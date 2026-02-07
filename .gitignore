@@ -1,0 +1,14 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# Build outputs
+build/
+iso_root/
+
+# Downloaded dependencies
+limine/
+boot/limine/
+
+# Misc
+Legalitas Sistem Blockchain & Privasi.txt
