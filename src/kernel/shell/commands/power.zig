@@ -9,6 +9,13 @@ const timer = @import("../../drivers/timer/timer.zig");
 const cpu = @import("../../core/cpu.zig");
 
 // =============================================================================
+// Triple fault support
+// =============================================================================
+
+/// Null IDT descriptor for triple fault reboot
+var null_idt_desc: [10]u8 align(2) = [_]u8{0} ** 10;
+
+// =============================================================================
 // Command Entry Points
 // =============================================================================
 
@@ -34,27 +41,56 @@ pub fn reboot() void {
 
     serial.writeString("\n[REBOOT] System rebooting...\n");
 
-    // Method 1: Triple fault via invalid IDT
+    // Disable interrupts
     cpu.cli();
 
-    // Load null IDT to cause triple fault
-    asm volatile (
-        \\lidt (%%rax)
+    // Method 1: Keyboard controller reset (0xFE to port 0x64)
+    // Wait for controller input buffer to be empty
+    var timeout: u32 = 0;
+    while (timeout < 10000) : (timeout += 1) {
+        const status = asm volatile ("inb $0x64, %%al"
+            : [ret] "={al}" (-> u8),
+        );
+        if ((status & 0x02) == 0) break;
+    }
+
+    // Send reset command
+    asm volatile ("outb %%al, $0x64"
         :
-        : [null_idt] "{rax}" (@as(u64, 0)),
+        : [cmd] "{al}" (@as(u8, 0xFE)),
     );
 
-    // Trigger interrupt with null IDT
-    asm volatile ("int $0");
+    // Wait for reset to take effect
+    var i: u32 = 0;
+    while (i < 10000000) : (i += 1) {
+        asm volatile ("nop");
+    }
 
-    // Method 2: Keyboard controller reset (fallback)
-    // Port 0x64 command 0xFE triggers CPU reset
-    asm volatile (
-        \\mov $0xFE, %%al
-        \\out %%al, $0x64
+    // Method 2: Triple fault via null IDT
+    // Load a zero-length IDT so any interrupt causes triple fault -> reset
+    null_idt_desc = [_]u8{0} ** 10;
+    asm volatile ("lidt (%[idt])"
+        :
+        : [idt] "r" (&null_idt_desc),
     );
 
-    // If we're still here, halt
+    // Trigger interrupt with null IDT -> triple fault -> CPU reset
+    asm volatile ("int $3");
+
+    // Method 3: QEMU debug exit (if isa-debug-exit device present at 0xF4)
+    asm volatile ("outl %%eax, %%dx"
+        :
+        : [val] "{eax}" (@as(u32, 0x01)),
+          [port] "{dx}" (@as(u16, 0xF4)),
+    );
+
+    // Method 4: Fast A20 gate reset (port 0x92)
+    asm volatile ("outb %%al, $0x92"
+        :
+        : [cmd] "{al}" (@as(u8, 0x01)),
+    );
+
+    // If all methods failed, halt
     cpu.halt();
 }
 
@@ -93,7 +129,6 @@ pub fn shutdown() void {
         const height = terminal.getHeight();
         const width = terminal.getWidth();
 
-        // Cast lengths to u32 for setCursor
         const msg1_len: u32 = @intCast(msg1.len);
         const msg2_len: u32 = @intCast(msg2.len);
         const msg3_len: u32 = @intCast(msg3.len);
@@ -111,13 +146,31 @@ pub fn shutdown() void {
         terminal.println(msg3);
     }
 
-    // Disable interrupts and halt
+    // Disable interrupts
     cpu.cli();
 
-    // Try ACPI shutdown if available (simplified)
-    // Real implementation would use ACPI tables
+    // Method 1: QEMU ACPI shutdown (port 0x604, value 0x2000)
+    asm volatile ("outw %%ax, %%dx"
+        :
+        : [val] "{ax}" (@as(u16, 0x2000)),
+          [port] "{dx}" (@as(u16, 0x604)),
+    );
 
-    // Halt the CPU
+    // Method 2: QEMU debug exit (if isa-debug-exit device present)
+    asm volatile ("outl %%eax, %%dx"
+        :
+        : [val] "{eax}" (@as(u32, 0x00)),
+          [port] "{dx}" (@as(u16, 0xF4)),
+    );
+
+    // Method 3: Bochs/older QEMU shutdown (port 0xB004)
+    asm volatile ("outw %%ax, %%dx"
+        :
+        : [val] "{ax}" (@as(u16, 0x2000)),
+          [port] "{dx}" (@as(u16, 0xB004)),
+    );
+
+    // Halt the CPU in a loop
     while (true) {
         cpu.halt();
     }

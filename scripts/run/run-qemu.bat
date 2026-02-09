@@ -38,8 +38,8 @@ qemu-system-x86_64 ^
     -m 256M ^
     -serial stdio ^
     -cpu qemu64,+rdrand ^
-    -no-reboot ^
     -no-shutdown ^
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 ^
     -device e1000,netdev=net0,mac=52:54:00:12:34:56 ^
     -netdev user,id=net0,hostfwd=tcp::8080-:80 ^
     -device virtio-net-pci,netdev=net1,mac=52:54:00:12:34:57 ^
@@ -57,4 +57,7 @@ REM   IDE Primary:    disks/system.qcow2
 REM
 REM Port Forwarding:
 REM   Host 8080 -> Guest 80
+REM
+REM Debug:
+REM   isa-debug-exit on port 0xF4 for clean shutdown
 REM ============================================

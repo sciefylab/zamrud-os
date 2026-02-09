@@ -3,6 +3,7 @@
 const helpers = @import("helpers.zig");
 const shell = @import("../shell.zig");
 const identity = @import("../../identity/identity.zig");
+const identity_store = @import("../../persist/identity_store.zig");
 
 pub fn execute(args: []const u8) void {
     const parsed = helpers.parseArgs(args);
@@ -23,6 +24,12 @@ pub fn execute(args: []const u8) void {
         lockSession();
     } else if (helpers.strEql(parsed.cmd, "privacy")) {
         showPrivacy();
+    } else if (helpers.strEql(parsed.cmd, "export")) {
+        exportIdentities();
+    } else if (helpers.strEql(parsed.cmd, "import")) {
+        importIdentities();
+    } else if (helpers.strEql(parsed.cmd, "status")) {
+        showPersistStatus();
     } else {
         shell.printError("identity: unknown '");
         shell.print(parsed.cmd);
@@ -49,6 +56,12 @@ fn showHelp() void {
     shell.println("  privacy           Show privacy settings");
     shell.newLine();
 
+    shell.println("Persistence:");
+    shell.println("  export            Save identities to disk");
+    shell.println("  import            Load identities from disk");
+    shell.println("  status            Show persistence status");
+    shell.newLine();
+
     shell.println("Test Commands:");
     shell.println("  test              Run all identity tests");
     shell.println("  test quick        Quick health check");
@@ -57,7 +70,73 @@ fn showHelp() void {
     shell.println("  test privacy      Test privacy module");
     shell.newLine();
 
-    shell.println("Related: whoami");
+    shell.println("Related: whoami, config");
+    shell.newLine();
+}
+
+fn exportIdentities() void {
+    shell.printInfoLine("Exporting identities to disk...");
+
+    if (identity.getIdentityCount() == 0) {
+        shell.printWarningLine("No identities to export");
+        return;
+    }
+
+    if (identity_store.saveToDisk()) {
+        shell.printSuccessLine("[OK] Identities saved to /disk/IDENTITY.DAT");
+        shell.print("  Exported: ");
+        helpers.printUsize(identity.getIdentityCount());
+        shell.println(" identities");
+        shell.println("  Note: Private keys stored encrypted (PIN required to unlock)");
+    } else {
+        shell.printErrorLine("Failed to export identities!");
+    }
+}
+
+fn importIdentities() void {
+    shell.printInfoLine("Importing identities from disk...");
+
+    if (!identity_store.hasSavedIdentities()) {
+        shell.printWarningLine("No saved identities found on disk");
+        return;
+    }
+
+    shell.printWarningLine("Warning: This will replace current identities!");
+
+    if (identity_store.loadFromDisk()) {
+        shell.printSuccessLine("[OK] Identities loaded from /disk/IDENTITY.DAT");
+        shell.print("  Imported: ");
+        helpers.printUsize(identity.getIdentityCount());
+        shell.println(" identities");
+        shell.println("  Note: All identities are LOCKED. Use 'identity unlock <name> <pin>'");
+    } else {
+        shell.printErrorLine("Failed to import identities!");
+    }
+}
+
+fn showPersistStatus() void {
+    shell.printInfoLine("========================================");
+    shell.printInfoLine("  IDENTITY PERSISTENCE STATUS");
+    shell.printInfoLine("========================================");
+    shell.newLine();
+
+    shell.print("  Store initialized: ");
+    if (identity_store.isInitialized()) shell.printSuccessLine("Yes") else shell.printErrorLine("No");
+
+    shell.print("  Loaded from disk:  ");
+    if (identity_store.wasLoadedFromDisk()) shell.printSuccessLine("Yes") else shell.println("No");
+
+    shell.print("  Saved on disk:     ");
+    if (identity_store.hasSavedIdentities()) shell.printSuccessLine("Yes (/disk/IDENTITY.DAT)") else shell.println("No");
+
+    shell.print("  Current count:     ");
+    helpers.printUsize(identity.getIdentityCount());
+    shell.newLine();
+
+    shell.print("  Last save count:   ");
+    helpers.printUsize(identity_store.getLastSaveCount());
+    shell.newLine();
+
     shell.newLine();
 }
 
@@ -76,8 +155,10 @@ pub fn runTest(args: []const u8) void {
         runModuleTest("privacy");
     } else if (helpers.strEql(opt, "names")) {
         runModuleTest("names");
+    } else if (helpers.strEql(opt, "persist")) {
+        runModuleTest("persist");
     } else {
-        shell.println("identity test options: all, quick, keyring, auth, privacy, names");
+        shell.println("identity test options: all, quick, keyring, auth, privacy, names, persist");
     }
 }
 
@@ -103,6 +184,14 @@ fn runQuickTest() void {
         ok = false;
     }
 
+    shell.print("  Store ready:  ");
+    if (identity_store.isInitialized()) {
+        shell.printSuccessLine("OK");
+    } else {
+        shell.printErrorLine("FAIL");
+        ok = false;
+    }
+
     shell.newLine();
     helpers.printQuickResult("Identity", ok);
 }
@@ -118,7 +207,7 @@ fn runAllTests() void {
     var p: u32 = 0;
     var f: u32 = 0;
 
-    helpers.printTestCategory(1, 4, "Keyring");
+    helpers.printTestCategory(1, 5, "Keyring");
     if (keyring.test_keyring()) {
         shell.printSuccessLine("      PASSED");
         p += 1;
@@ -127,7 +216,7 @@ fn runAllTests() void {
         f += 1;
     }
 
-    helpers.printTestCategory(2, 4, "Auth");
+    helpers.printTestCategory(2, 5, "Auth");
     if (auth.test_auth()) {
         shell.printSuccessLine("      PASSED");
         p += 1;
@@ -136,7 +225,7 @@ fn runAllTests() void {
         f += 1;
     }
 
-    helpers.printTestCategory(3, 4, "Privacy");
+    helpers.printTestCategory(3, 5, "Privacy");
     if (privacy.test_privacy()) {
         shell.printSuccessLine("      PASSED");
         p += 1;
@@ -145,8 +234,17 @@ fn runAllTests() void {
         f += 1;
     }
 
-    helpers.printTestCategory(4, 4, "Names");
+    helpers.printTestCategory(4, 5, "Names");
     if (names.test_names()) {
+        shell.printSuccessLine("      PASSED");
+        p += 1;
+    } else {
+        shell.printErrorLine("      FAILED");
+        f += 1;
+    }
+
+    helpers.printTestCategory(5, 5, "Persistence");
+    if (identity_store.test_identity_store()) {
         shell.printSuccessLine("      PASSED");
         p += 1;
     } else {
@@ -170,6 +268,8 @@ fn runModuleTest(module: []const u8) void {
         @import("../../identity/privacy.zig").test_privacy()
     else if (helpers.strEql(module, "names"))
         @import("../../identity/names.zig").test_names()
+    else if (helpers.strEql(module, "persist"))
+        identity_store.test_identity_store()
     else
         false;
 
@@ -195,6 +295,9 @@ fn showInfo() void {
 
     shell.print("  Session:      ");
     if (identity.isUnlocked()) shell.printSuccessLine("Unlocked") else shell.printWarningLine("Locked");
+
+    shell.print("  Persisted:    ");
+    if (identity_store.wasLoadedFromDisk()) shell.printSuccessLine("Yes (from disk)") else shell.println("No");
 
     if (identity.getCurrentIdentity()) |id| {
         shell.newLine();
@@ -223,6 +326,9 @@ fn listIdentities() void {
     if (count == 0) {
         shell.println("  (none)");
         shell.println("  Use: identity create <name> <pin>");
+        if (identity_store.hasSavedIdentities()) {
+            shell.println("  Or:  identity import  (load from disk)");
+        }
         return;
     }
 
@@ -273,6 +379,13 @@ fn createIdentity(args: []const u8) void {
         shell.printSuccessLine("Created!");
         shell.print("  Address: ");
         shell.println(id.getAddress());
+
+        // Auto-save to disk
+        if (identity_store.isInitialized()) {
+            if (identity_store.saveToDisk()) {
+                shell.printSuccessLine("  Auto-saved to disk");
+            }
+        }
     } else {
         shell.printErrorLine("Failed to create");
     }

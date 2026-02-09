@@ -20,7 +20,8 @@ const p2p_cmd = @import("commands/p2p.zig");
 const gateway_cmd = @import("commands/gateway.zig");
 const security_cmd = @import("commands/security.zig");
 const smoke_cmd = @import("commands/smoke.zig");
-const disk_cmd = @import("commands/disk.zig"); // ADD THIS
+const disk_cmd = @import("commands/disk.zig");
+const config_cmd = @import("commands/config.zig"); // D3: Config persistence
 
 // =============================================================================
 // Command Execution
@@ -77,11 +78,15 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "devtest")) {
         device.cmdDevTest(args);
     }
-    // Disk commands - ADD THIS SECTION
+    // Disk commands
     else if (helpers.strEql(command, "disk")) {
         disk_cmd.execute(args);
     } else if (helpers.strEql(command, "diskinfo")) {
         disk_cmd.execute("list");
+    }
+    // Config commands (D3)
+    else if (helpers.strEql(command, "config")) {
+        config_cmd.execute(args);
     }
     // Process commands
     else if (helpers.strEql(command, "ps")) {
@@ -248,9 +253,14 @@ fn runAllTests() void {
     boot_cmd.execute("test");
     shell.newLine();
 
-    // 8. Disk tests - ADD THIS
+    // 8. Disk tests
     shell.printInfoLine("=== DISK TESTS ===");
     disk_cmd.execute("test");
+    shell.newLine();
+
+    // 9. Config persistence tests (D3)
+    shell.printInfoLine("=== CONFIG PERSISTENCE TESTS ===");
+    config_cmd.execute("test");
     shell.newLine();
 
     // Final summary

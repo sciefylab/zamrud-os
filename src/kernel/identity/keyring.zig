@@ -431,6 +431,39 @@ pub fn isInitialized() bool {
 }
 
 // =============================================================================
+// Persistence Support (D3)
+// =============================================================================
+
+/// Get raw pointer to identity slot (bypasses count check)
+/// Used by identity_store to restore identities from disk
+pub fn getSlotPtr(index: usize) ?*Identity {
+    if (index >= MAX_IDENTITIES) return null;
+    return &identities[index];
+}
+
+/// Set the internal identity count directly
+/// Used after restoring identities from disk
+pub fn setIdentityCount(count: usize) void {
+    if (count <= MAX_IDENTITIES) {
+        identity_count = count;
+    }
+}
+
+/// Ensure first active identity is set as current
+pub fn ensureCurrentIdentity() void {
+    if (has_current_identity) return;
+
+    var i: usize = 0;
+    while (i < identity_count) : (i += 1) {
+        if (identities[i].active) {
+            current_identity_idx = i;
+            has_current_identity = true;
+            return;
+        }
+    }
+}
+
+// =============================================================================
 // Test
 // =============================================================================
 

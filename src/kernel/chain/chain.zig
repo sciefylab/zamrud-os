@@ -1,7 +1,8 @@
 //! Zamrud OS - Blockchain Module
-//! Lightweight integrity ledger with PoA consensus
+//! Lightweight integrity ledger with PoA consensus and persistence
 
 const serial = @import("../drivers/serial/serial.zig");
+const fat32 = @import("../fs/fat32.zig");
 
 // Sub-modules
 pub const block = @import("block.zig");
@@ -21,16 +22,32 @@ pub const EntryType = entry.EntryType;
 
 var chain_initialized: bool = false;
 
-// Static auth key for initialization
 var static_chain_auth_key: [32]u8 = [_]u8{0} ** 32;
+var static_config_entry: entry.Entry = undefined;
 
 /// Initialize the blockchain subsystem
+/// Tries to load from disk first, falls back to fresh init
 pub fn init() bool {
     serial.writeString("[CHAIN] Initializing integrity ledger...\n");
 
     serial.writeString("[CHAIN] Step 1: authority.init()...\n");
     authority.init();
     serial.writeString("[CHAIN] Step 1: Done\n");
+
+    // Step 2: Try to load persisted chain from disk
+    if (fat32.isMounted()) {
+        serial.writeString("[CHAIN] Step 2: Checking for saved chain...\n");
+        if (ledger.loadFromDisk()) {
+            serial.writeString("[CHAIN] Step 2: Chain restored from disk!\n");
+            chain_initialized = true;
+            serial.writeString("[CHAIN] Integrity ledger ready (restored)\n");
+            return true;
+        } else {
+            serial.writeString("[CHAIN] Step 2: No saved chain, starting fresh\n");
+        }
+    } else {
+        serial.writeString("[CHAIN] Step 2: Disk not available, skip persistence\n");
+    }
 
     serial.writeString("[CHAIN] Setting chain_initialized=true\n");
     chain_initialized = true;
@@ -43,14 +60,23 @@ pub fn init() bool {
 /// Initialize with genesis (PoA)
 pub fn initWithGenesis(authority_pubkey: *const [32]u8) bool {
     if (!chain_initialized) {
-        if (!init()) return false;
+        // Don't call full init() here to avoid double-load
+        authority.init();
+        chain_initialized = true;
     }
 
     // Add genesis authority
     _ = authority.addAuthority(authority_pubkey, "genesis");
 
     // Initialize ledger
-    return ledger.init(authority_pubkey);
+    if (!ledger.init(authority_pubkey)) return false;
+
+    // Auto-save genesis to disk
+    if (fat32.isMounted()) {
+        _ = ledger.saveToDisk();
+    }
+
+    return true;
 }
 
 /// Check if initialized
@@ -73,7 +99,7 @@ pub fn getTipHash() *const [32]u8 {
     return ledger.getTipHash();
 }
 
-/// Add a new block
+/// Add a new block (auto-saves to disk)
 pub fn addBlock(blk: *const Block) bool {
     return ledger.addBlock(blk);
 }
@@ -81,6 +107,71 @@ pub fn addBlock(blk: *const Block) bool {
 /// Create block template
 pub fn createBlockTemplate(authority_pubkey: *const [32]u8) *Block {
     return ledger.createBlockTemplate(authority_pubkey);
+}
+
+// =============================================================================
+// Config Change Recording (D3)
+// =============================================================================
+
+/// Add a config change entry to the blockchain
+/// Creates a new block with the config_change entry
+pub fn addConfigEntry(config_entry: *const entry.Entry) bool {
+    if (!chain_initialized) return false;
+    if (!ledger.isInitialized()) return false;
+
+    // Use a default authority key for config changes
+    var auth_key: [32]u8 = [_]u8{0} ** 32;
+    auth_key[0] = 0xCF; // 'CF' for ConFig
+
+    // Ensure ledger has genesis
+    if (ledger.getBlockCount() == 0) {
+        if (!ledger.init(&auth_key)) return false;
+    }
+
+    // Create a new block with this entry
+    const blk = ledger.createBlockTemplate(&auth_key);
+
+    // Copy entry to static storage and add to block
+    var i: usize = 0;
+    static_config_entry.entry_type = config_entry.entry_type;
+    static_config_entry.timestamp = config_entry.timestamp;
+    while (i < 32) : (i += 1) {
+        static_config_entry.target_hash[i] = config_entry.target_hash[i];
+        static_config_entry.data[i] = config_entry.data[i];
+    }
+
+    _ = blk.addEntry(&static_config_entry);
+
+    return ledger.addBlock(blk);
+}
+
+// =============================================================================
+// Persistence API
+// =============================================================================
+
+/// Manually save chain to disk
+pub fn saveChain() bool {
+    return ledger.saveToDisk();
+}
+
+/// Manually load chain from disk
+pub fn loadChain() bool {
+    return ledger.loadFromDisk();
+}
+
+/// Check if a saved chain exists on disk
+pub fn hasSavedChain() bool {
+    return ledger.hasSavedChain();
+}
+
+/// Enable/disable auto-save
+pub fn setAutoSave(enabled: bool) void {
+    ledger.setAutoSave(enabled);
+}
+
+/// Get last saved height
+pub fn getLastSaveHeight() u32 {
+    return ledger.getLastSaveHeight();
 }
 
 // =============================================================================

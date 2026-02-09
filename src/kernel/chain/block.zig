@@ -34,7 +34,7 @@ var static_block_data: [256]u8 = [_]u8{0} ** 256;
 var static_block_hash: [32]u8 = [_]u8{0} ** 32;
 var static_entries_data: [128]u8 = [_]u8{0} ** 128;
 
-var static_block: Block = undefined;
+pub var static_block: Block = undefined;
 var static_block_initialized: bool = false;
 
 var static_test_entry: entry_mod.Entry = undefined;

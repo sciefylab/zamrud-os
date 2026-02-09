@@ -45,6 +45,10 @@ const smoke = @import("tests/smoke.zig");
 
 const storage = @import("drivers/storage/storage.zig");
 
+// D3: Config & Identity Persistence
+const config_store = @import("persist/config_store.zig");
+const identity_store = @import("persist/identity_store.zig");
+
 // ============================================================================
 // Limine Requests
 // ============================================================================
@@ -138,11 +142,8 @@ export fn kernel_main() noreturn {
     integrity.init();
     serial.writeString("[OK]   Integrity ready\n");
 
-    if (chain.init()) {
-        serial.writeString("[OK]   Blockchain ready\n");
-    } else {
-        serial.writeString("[WARN] Blockchain failed\n");
-    }
+    // NOTE: Blockchain init moved AFTER storage for disk persistence
+    // Will be initialized after FAT32 is mounted
 
     identity.init();
     serial.writeString("[OK]   Identity ready\n");
@@ -183,19 +184,64 @@ export fn kernel_main() noreturn {
     serial.writeString("[OK]   Storage ready\n");
 
     // Initialize FAT32 filesystem driver
-    // Initialize FAT32 filesystem driver
     fat32.init();
     if (fat32.isMounted()) {
         serial.writeString("[OK]   FAT32 mounted\n");
 
         // Mount FAT32 to VFS at /disk
         if (fat32.mountToVfs()) {
-            serial.writeString("[OK]   FAT32 → VFS /disk\n");
+            serial.writeString("[OK]   FAT32 -> VFS /disk\n");
         } else {
             serial.writeString("[WARN] FAT32 VFS mount failed\n");
         }
     } else {
         serial.writeString("[WARN] FAT32 not mounted\n");
+    }
+
+    // Initialize blockchain AFTER storage (for persistence)
+    // chain.init() will auto-load from /disk/CHAIN.DAT if it exists
+    if (chain.init()) {
+        serial.writeString("[OK]   Blockchain ready");
+        if (chain.hasSavedChain()) {
+            serial.writeString(" (restored from disk)");
+        }
+        serial.writeString("\n");
+    } else {
+        serial.writeString("[WARN] Blockchain failed\n");
+    }
+
+    // === D3: Config & Identity Persistence ===
+    printLine();
+    serial.writeString("[PERSISTENCE]\n");
+
+    // Initialize config store with defaults
+    config_store.init();
+
+    // Try to load config from disk (overrides defaults if found)
+    if (config_store.hasSavedConfig()) {
+        if (config_store.loadFromDisk()) {
+            serial.writeString("[OK]   Config restored from disk\n");
+        } else {
+            serial.writeString("[WARN] Config load failed, using defaults\n");
+        }
+    } else {
+        serial.writeString("[OK]   Config initialized (defaults)\n");
+    }
+
+    // Initialize identity store
+    identity_store.init();
+
+    // Try to load identities from disk
+    if (identity_store.hasSavedIdentities()) {
+        if (identity_store.loadFromDisk()) {
+            serial.writeString("[OK]   Identities restored from disk (");
+            printDecSerial(identity.getIdentityCount());
+            serial.writeString(" identities, locked)\n");
+        } else {
+            serial.writeString("[WARN] Identity load failed\n");
+        }
+    } else {
+        serial.writeString("[OK]   Identity store ready (no saved identities)\n");
     }
 
     printLine();
@@ -294,6 +340,38 @@ fn printSystemSummary() void {
     serial.writeString(if (storage.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  FAT32:      ");
     serial.writeString(if (fat32.isMounted()) "Mounted\n" else "Not mounted\n");
+    serial.writeString("  Blockchain: ");
+    if (chain.isInitialized()) {
+        serial.writeString("OK (height=");
+        printDecSerial(chain.getHeight());
+        serial.writeString(", blocks=");
+        printDecSerial(chain.getBlockCount());
+        serial.writeString(")\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+    serial.writeString("  Config:     ");
+    if (config_store.isInitialized()) {
+        serial.writeString("OK (");
+        printDecSerial(config_store.getEntryCount());
+        serial.writeString(" entries");
+        if (config_store.wasLoadedFromDisk()) {
+            serial.writeString(", from disk");
+        }
+        serial.writeString(")\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+    serial.writeString("  Identities: ");
+    if (identity.isInitialized()) {
+        printDecSerial(identity.getIdentityCount());
+        if (identity_store.wasLoadedFromDisk()) {
+            serial.writeString(" (from disk, locked)");
+        }
+        serial.writeString("\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
     serial.writeString("  Network:    ");
     serial.writeString(if (net.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  Firewall:   ");
