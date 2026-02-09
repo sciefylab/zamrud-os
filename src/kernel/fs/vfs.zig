@@ -295,6 +295,10 @@ fn openInode(inode: *Inode, file_path: []const u8, flags: OpenFlags) ?*File {
         if (getMountPointFs("/dev")) |fs| {
             file.ops = fs.file_ops;
         }
+    } else if (isPathUnderMount(file_path, "/disk")) {
+        if (getMountPointFs("/disk")) |fs| {
+            file.ops = fs.file_ops;
+        }
     } else {
         if (root_fs) |fs| {
             file.ops = fs.file_ops;
@@ -398,6 +402,24 @@ pub fn seek(file: *File, offset: i64, whence: SeekWhence) i64 {
 pub fn readdir(dir_path: []const u8, index: usize) ?*DirEntry {
     if (!initialized) return null;
 
+    // Handle /disk path - delegate to FAT32 mount point
+    if (dir_path.len >= 5 and
+        dir_path[0] == '/' and
+        dir_path[1] == 'd' and
+        dir_path[2] == 'i' and
+        dir_path[3] == 's' and
+        dir_path[4] == 'k')
+    {
+        if (getMountPointRoot("/disk")) |disk_root| {
+            if (disk_root.ops) |ops| {
+                if (ops.readdir) |readdir_fn| {
+                    return readdir_fn(disk_root, index);
+                }
+            }
+        }
+        return null;
+    }
+
     const inode = resolvePath(dir_path) orelse return null;
     if (inode.file_type != .Directory) return null;
 
@@ -452,6 +474,25 @@ pub fn chdir(dir_path: []const u8) bool {
 
         current_dir_len = new_len;
         return true;
+    }
+
+    // Allow cd to /disk
+    if (dir_path.len == 5 and
+        dir_path[0] == '/' and
+        dir_path[1] == 'd' and
+        dir_path[2] == 'i' and
+        dir_path[3] == 's' and
+        dir_path[4] == 'k')
+    {
+        if (getMountPointRoot("/disk") != null) {
+            var k: usize = 0;
+            while (k < dir_path.len and k < MAX_PATH) : (k += 1) {
+                current_dir[k] = dir_path[k];
+            }
+            current_dir_len = dir_path.len;
+            return true;
+        }
+        return false;
     }
 
     const inode = resolvePath(dir_path) orelse return false;
@@ -513,6 +554,30 @@ pub fn resolvePath(file_path: []const u8) ?*Inode {
         file_path[3] == 'v')
     {
         return getMountPointRoot("/dev");
+    }
+
+    // Check if path starts with /disk/
+    if (file_path.len >= 6 and
+        file_path[0] == '/' and
+        file_path[1] == 'd' and
+        file_path[2] == 'i' and
+        file_path[3] == 's' and
+        file_path[4] == 'k' and
+        file_path[5] == '/')
+    {
+        const disk_path = file_path[6..];
+        return resolveInMountPoint("/disk", disk_path);
+    }
+
+    // Check if path is exactly "/disk"
+    if (file_path.len == 5 and
+        file_path[0] == '/' and
+        file_path[1] == 'd' and
+        file_path[2] == 'i' and
+        file_path[3] == 's' and
+        file_path[4] == 'k')
+    {
+        return getMountPointRoot("/disk");
     }
 
     var current = root_fs.?.root.?;
@@ -583,6 +648,15 @@ pub fn resolvePath(file_path: []const u8) ?*Inode {
         if (component.len == 3 and component[0] == 'd' and component[1] == 'e' and component[2] == 'v') {
             if (getMountPointRoot("/dev")) |dev_root| {
                 current = dev_root;
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // Check if this component is /disk mount point
+        if (component.len == 4 and component[0] == 'd' and component[1] == 'i' and component[2] == 's' and component[3] == 'k') {
+            if (getMountPointRoot("/disk")) |disk_root| {
+                current = disk_root;
                 i = end + 1;
                 continue;
             }

@@ -1,15 +1,23 @@
 //! Zamrud OS - Filesystem Commands
 //! ls, cd, pwd, mkdir, touch, rm, rmdir, cat, write
+//! + FAT32 disk commands via /disk path
 
 const shell = @import("../shell.zig");
 const helpers = @import("helpers.zig");
 const terminal = @import("../../drivers/display/terminal.zig");
 const vfs = @import("../../fs/vfs.zig");
+const fat32 = @import("../../fs/fat32.zig");
 
 var read_buf: [64]u8 = [_]u8{0} ** 64;
 
 pub fn cmdLs(args: []const u8) void {
     const dir_path = if (args.len > 0) helpers.trim(args) else vfs.getcwd();
+
+    // Special case: "ls /disk" or "ls disk" - list FAT32 directly
+    if (isDiskPath(dir_path)) {
+        listDiskFiles();
+        return;
+    }
 
     const inode = vfs.resolvePath(dir_path);
     if (inode == null) {
@@ -126,6 +134,20 @@ pub fn cmdRm(args: []const u8) void {
         return;
     }
 
+    // Handle /disk/ paths - delete from FAT32
+    if (isDiskFilePath(name)) {
+        const fname = extractDiskFilename(name);
+        if (fname.len > 0 and fat32.deleteFile(fname)) {
+            shell.printSuccess("Removed from disk: ");
+            shell.println(fname);
+        } else {
+            shell.printError("rm: cannot remove '");
+            shell.print(name);
+            shell.printErrorLine("'");
+        }
+        return;
+    }
+
     if (vfs.removeFile(name)) {
         shell.printSuccess("Removed: ");
         shell.println(name);
@@ -157,6 +179,13 @@ pub fn cmdCat(args: []const u8) void {
     const name = helpers.trim(args);
     if (name.len == 0) {
         shell.printErrorLine("cat: missing operand");
+        return;
+    }
+
+    // Handle /disk/ paths - read from FAT32 directly
+    if (isDiskFilePath(name)) {
+        const fname = extractDiskFilename(name);
+        catDiskFile(fname);
         return;
     }
 
@@ -226,6 +255,17 @@ pub fn cmdWrite(args: []const u8) void {
     }
     const content = trimmed[content_start..];
 
+    // Handle /disk/ paths - write to FAT32 directly
+    if (isDiskFilePath(filename)) {
+        const fname = extractDiskFilename(filename);
+        if (fname.len > 0) {
+            writeDiskFile(fname, content);
+        } else {
+            shell.printErrorLine("write: invalid disk path");
+        }
+        return;
+    }
+
     if (!vfs.exists(filename)) {
         if (vfs.createFile(filename) == null) {
             shell.printErrorLine("write: cannot create file");
@@ -253,5 +293,158 @@ pub fn cmdWrite(args: []const u8) void {
         shell.println(filename);
     } else {
         shell.printErrorLine("write: failed to write");
+    }
+}
+
+// =============================================================================
+// FAT32 Direct Access Helpers
+// =============================================================================
+
+fn isDiskPath(path: []const u8) bool {
+    if (path.len == 5 and eql5(path, "/disk")) return true;
+    if (path.len == 6 and eql5(path, "/disk") and path[5] == '/') return true;
+    if (path.len == 4 and eql4(path, "disk")) return true;
+    return false;
+}
+
+fn isDiskFilePath(path: []const u8) bool {
+    // /disk/filename
+    if (path.len > 6 and eql5(path, "/disk") and path[5] == '/') return true;
+    return false;
+}
+
+fn extractDiskFilename(path: []const u8) []const u8 {
+    // /disk/filename -> filename
+    if (path.len > 6 and eql5(path, "/disk") and path[5] == '/') {
+        return path[6..];
+    }
+    return path;
+}
+
+fn eql4(s: []const u8, target: *const [4]u8) bool {
+    if (s.len < 4) return false;
+    return s[0] == target[0] and s[1] == target[1] and s[2] == target[2] and s[3] == target[3];
+}
+
+fn eql5(s: []const u8, target: *const [5]u8) bool {
+    if (s.len < 5) return false;
+    return s[0] == target[0] and s[1] == target[1] and s[2] == target[2] and s[3] == target[3] and s[4] == target[4];
+}
+
+fn listDiskFiles() void {
+    if (!fat32.isMounted()) {
+        shell.printErrorLine("  Disk not mounted");
+        return;
+    }
+
+    var entries: [32]fat32.FileInfo = undefined;
+    const count = fat32.listRoot(&entries);
+
+    if (count == 0) {
+        shell.println("  (empty disk)");
+        return;
+    }
+
+    shell.println("");
+    shell.println("  Name          Size       Type");
+    shell.println("  ─────────────────────────────────");
+
+    for (entries[0..count]) |entry| {
+        shell.print("  ");
+
+        const name = entry.getName();
+        shell.print(name);
+
+        // Pad name to 14 chars
+        var pad: usize = if (14 > name.len) 14 - name.len else 1;
+        while (pad > 0) : (pad -= 1) {
+            shell.printChar(' ');
+        }
+
+        if (entry.is_dir) {
+            shell.print("-          ");
+            if (terminal.isInitialized()) {
+                terminal.setFgColor(terminal.Colors.DIR_COLOR);
+            }
+            shell.print("[DIR]");
+            if (terminal.isInitialized()) {
+                terminal.setFgColor(terminal.Colors.FG_DEFAULT);
+            }
+        } else {
+            helpers.printU32(entry.size);
+            shell.print(" B");
+            pad = if (entry.size < 10) 8 else if (entry.size < 100) 7 else if (entry.size < 1000) 6 else if (entry.size < 10000) 5 else 4;
+            while (pad > 0) : (pad -= 1) {
+                shell.printChar(' ');
+            }
+            shell.print("[FILE]");
+        }
+        shell.newLine();
+    }
+
+    shell.println("");
+    shell.print("  ");
+    helpers.printUsize(count);
+    shell.println(" file(s)");
+}
+
+fn catDiskFile(name: []const u8) void {
+    if (!fat32.isMounted()) {
+        shell.printErrorLine("  Disk not mounted");
+        return;
+    }
+
+    const file = fat32.findInRoot(name) orelse {
+        shell.printError("cat: file not found on disk: ");
+        shell.println(name);
+        return;
+    };
+
+    if (file.is_dir) {
+        shell.printErrorLine("cat: is a directory");
+        return;
+    }
+
+    var buf: [4096]u8 = [_]u8{0} ** 4096;
+    const max_read = @min(@as(usize, file.size), 4096);
+    const bytes = fat32.readFile(file.cluster, buf[0..max_read]);
+
+    if (bytes == 0) {
+        shell.println("  (empty file)");
+        return;
+    }
+
+    shell.print("  ");
+    for (buf[0..bytes]) |c| {
+        if (c == '\n') {
+            shell.newLine();
+            shell.print("  ");
+        } else if (c >= 0x20 and c < 0x7F) {
+            shell.printChar(c);
+        }
+    }
+    shell.newLine();
+}
+
+fn writeDiskFile(name: []const u8, content: []const u8) void {
+    if (!fat32.isMounted()) {
+        shell.printErrorLine("  Disk not mounted");
+        return;
+    }
+
+    // Delete existing file first (overwrite)
+    if (fat32.findInRoot(name) != null) {
+        _ = fat32.deleteFile(name);
+    }
+
+    if (fat32.createFile(name, content)) {
+        shell.printSuccess("Written to disk: ");
+        shell.print(name);
+        shell.print(" (");
+        helpers.printUsize(content.len);
+        shell.println(" bytes)");
+    } else {
+        shell.printError("write: failed to write to disk: ");
+        shell.println(name);
     }
 }

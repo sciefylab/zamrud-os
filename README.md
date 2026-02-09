@@ -49,3 +49,15 @@ zig build run -Dwith_ui=true
 
 zig build run -Dwith_ui=false
 
+## Hapus disk lama
+
+del disks\system.qcow2
+
+## Buat disk baru
+
+scripts\run\create-disk.bat
+
+## Jalankan ulang
+
+zig build run
+

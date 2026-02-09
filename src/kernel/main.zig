@@ -25,6 +25,7 @@ const user = @import("proc/user.zig");
 const vfs = @import("fs/vfs.zig");
 const ramfs = @import("fs/ramfs.zig");
 const devfs = @import("fs/devfs.zig");
+const fat32 = @import("fs/fat32.zig");
 
 const syscall_mod = @import("syscall/syscall.zig");
 const shell = @import("shell/shell.zig");
@@ -175,6 +176,29 @@ export fn kernel_main() noreturn {
     }
 
     printLine();
+    serial.writeString("[STORAGE]\n");
+
+    // Initialize storage subsystem (ATA + MBR + auto-format)
+    storage.init();
+    serial.writeString("[OK]   Storage ready\n");
+
+    // Initialize FAT32 filesystem driver
+    // Initialize FAT32 filesystem driver
+    fat32.init();
+    if (fat32.isMounted()) {
+        serial.writeString("[OK]   FAT32 mounted\n");
+
+        // Mount FAT32 to VFS at /disk
+        if (fat32.mountToVfs()) {
+            serial.writeString("[OK]   FAT32 → VFS /disk\n");
+        } else {
+            serial.writeString("[WARN] FAT32 VFS mount failed\n");
+        }
+    } else {
+        serial.writeString("[WARN] FAT32 not mounted\n");
+    }
+
+    printLine();
     serial.writeString("[NETWORK]\n");
 
     net.init();
@@ -211,13 +235,10 @@ export fn kernel_main() noreturn {
         serial.writeString("[OK]   Terminal ready\n");
     }
 
-    // Initialize storage
-    storage.init();
-    serial.writeString("[OK]   Storage ready\n");
-
     printLine();
     printSystemSummary();
     printLine();
+
     // ========================================
     // Smoke Tests (optional)
     // ========================================
@@ -269,6 +290,10 @@ fn printSystemSummary() void {
     serial.writeString(if (boot_verify.isVerified()) "Verified\n" else "Unverified\n");
     serial.writeString("  Crypto:     ");
     serial.writeString(if (crypto.isInitialized()) "OK\n" else "NO\n");
+    serial.writeString("  Storage:    ");
+    serial.writeString(if (storage.isInitialized()) "OK\n" else "NO\n");
+    serial.writeString("  FAT32:      ");
+    serial.writeString(if (fat32.isMounted()) "Mounted\n" else "Not mounted\n");
     serial.writeString("  Network:    ");
     serial.writeString(if (net.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  Firewall:   ");

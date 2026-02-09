@@ -12,3 +12,10 @@ boot/limine/
 
 # Misc
 Legalitas Sistem Blockchain & Privasi.txt
+
+# Virtual disk images
+disks/*.qcow2
+disks/*.img
+disks/*.vdi
+disks/*.vmdk
+!disks/.gitkeep
