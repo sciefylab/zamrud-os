@@ -1,4 +1,5 @@
 //! Zamrud OS - Main Kernel with Security Integration
+//! Phases A-E3.4 Complete
 
 const cpu = @import("core/cpu.zig");
 const limine = @import("core/limine.zig");
@@ -57,6 +58,9 @@ const unveil = @import("security/unveil.zig");
 
 // E3.3: Binary Verification
 const binaryverify = @import("security/binaryverify.zig");
+
+// E3.4: Network Capability
+const net_capability = @import("security/net_capability.zig");
 
 // ============================================================================
 // Limine Requests
@@ -264,6 +268,10 @@ export fn kernel_main() noreturn {
     configureSecurityForEnvironment();
     serial.writeString("[OK]   Firewall configured\n");
 
+    // E3.4: Network capability — AFTER firewall, AFTER process system
+    net_capability.init();
+    serial.writeString("[OK]   Network capability ready (E3.4)\n");
+
     p2p.init();
     serial.writeString("[OK]   P2P ready\n");
 
@@ -360,6 +368,16 @@ fn printSystemSummary() void {
     } else {
         serial.writeString("NO\n");
     }
+    serial.writeString("  NetCap(E3.4):");
+    if (net_capability.isInitialized()) {
+        serial.writeString("ACTIVE (");
+        printDecSerial(net_capability.getProcessCount());
+        serial.writeString(" procs, ");
+        printDecSerial(net_capability.getActiveSocketCount());
+        serial.writeString(" socks)\n");
+    } else {
+        serial.writeString("NO\n");
+    }
     serial.writeString("  Storage:    ");
     serial.writeString(if (storage.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  FAT32:      ");
@@ -411,6 +429,11 @@ fn printSystemSummary() void {
     serial.writeString(" tables, ");
     printDecSerial(unveil.getViolationCount());
     serial.writeString(" violations\n");
+    serial.writeString("  Net Viols:  ");
+    printDecSerial(net_capability.getStats().violations_total);
+    serial.writeString(" (");
+    printDecSerial(net_capability.getStats().processes_killed);
+    serial.writeString(" killed)\n");
     serial.writeString("  -----------------------------\n");
     serial.writeString("  Type 'help' for commands\n\n");
 }

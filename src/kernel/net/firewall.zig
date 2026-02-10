@@ -1,13 +1,6 @@
 //! Zamrud OS - Kernel Firewall
 //! Stealth-mode firewall with Zero Trust architecture
-//!
-//! Features:
-//! - Stealth mode (no ICMP responses)
-//! - Connection tracking
-//! - Rate limiting per IP/peer
-//! - Port scan detection
-//! - Auto-blacklist
-//! - P2P-only mode
+//! Updated: E3.4 Per-Process Network Filtering
 
 const std = @import("std");
 const serial = @import("../drivers/serial/serial.zig");
@@ -149,6 +142,7 @@ pub const FirewallStats = struct {
     blocked_no_peer: u64 = 0,
     blocked_syn_flood: u64 = 0,
     blocked_port_scan: u64 = 0,
+    blocked_process_cap: u64 = 0, // E3.4
     connections_total: u64 = 0,
     connections_active: u64 = 0,
     last_reset: u64 = 0,
@@ -204,40 +198,33 @@ pub fn init() void {
     serial.writeString("\n[FIREWALL] ");
     printLine(40);
 
-    // Initialize rules
     for (&rules) |*rule| {
         rule.* = std.mem.zeroes(Rule);
     }
     rule_count = 0;
 
-    // Initialize connections
     for (&connections) |*conn| {
         conn.* = std.mem.zeroes(Connection);
     }
     connection_count = 0;
 
-    // Initialize rate limits
     for (&rate_limits) |*rl| {
         rl.* = std.mem.zeroes(RateLimitEntry);
     }
     rate_limit_count = 0;
 
-    // Initialize blacklist
     for (&blacklist) |*bl| {
         bl.* = std.mem.zeroes(BlacklistEntry);
     }
     blacklist_count = 0;
 
-    // Initialize scan trackers
     for (&scan_trackers) |*st| {
         st.* = std.mem.zeroes(PortScanTracker);
     }
     scan_tracker_count = 0;
 
-    // Reset stats
     stats = FirewallStats{};
 
-    // Add default rules
     addDefaultRules();
     rules_initialized = true;
 
@@ -263,18 +250,15 @@ pub fn init() void {
 }
 
 fn addDefaultRules() void {
-    // =========================================================================
-    // Rule 1: Allow loopback (127.0.0.0/8)
-    // Priority: 0 (highest)
-    // =========================================================================
+    // Rule 1: Allow loopback
     _ = addRule(.{
         .id = 1,
         .priority = 0,
         .enabled = true,
         .direction = .both,
         .protocol = .any,
-        .src_ip = 0x7F000000, // 127.0.0.0
-        .src_mask = 0xFF000000, // /8
+        .src_ip = 0x7F000000,
+        .src_mask = 0xFF000000,
         .src_port_start = 0,
         .src_port_end = 65535,
         .dst_ip = 0x7F000000,
@@ -289,10 +273,7 @@ fn addDefaultRules() void {
         .description = makeDescription("Allow loopback"),
     });
 
-    // =========================================================================
-    // Rule 2: Block ICMP (if configured)
-    // Priority: 10
-    // =========================================================================
+    // Rule 2: Block ICMP
     if (config.block_icmp) {
         _ = addRule(.{
             .id = 2,
@@ -317,15 +298,11 @@ fn addDefaultRules() void {
         });
     }
 
-    // =========================================================================
-    // Rule 3: DISABLED - Allow established
-    // NOTE: Connection tracking is done BEFORE rule matching in filterInbound()
-    //       so this rule is redundant and causes false positives
-    // =========================================================================
+    // Rule 3: Allow established (disabled)
     _ = addRule(.{
         .id = 3,
         .priority = 20,
-        .enabled = false, // DISABLED - handled by connection tracking
+        .enabled = false,
         .direction = .inbound,
         .protocol = .tcp,
         .src_ip = 0,
@@ -344,17 +321,14 @@ fn addDefaultRules() void {
         .description = makeDescription("Allow established (disabled)"),
     });
 
-    // =========================================================================
-    // Rule 4: QEMU gateway (10.0.2.2)
-    // Priority: 15
-    // =========================================================================
+    // Rule 4: QEMU gateway
     _ = addRule(.{
         .id = 4,
         .priority = 15,
         .enabled = true,
         .direction = .both,
         .protocol = .any,
-        .src_ip = 0x0A000202, // 10.0.2.2
+        .src_ip = 0x0A000202,
         .src_mask = 0xFFFFFFFF,
         .src_port_start = 0,
         .src_port_end = 65535,
@@ -370,17 +344,14 @@ fn addDefaultRules() void {
         .description = makeDescription("QEMU gateway"),
     });
 
-    // =========================================================================
-    // Rule 5: QEMU DNS (10.0.2.3:53)
-    // Priority: 15
-    // =========================================================================
+    // Rule 5: QEMU DNS
     _ = addRule(.{
         .id = 5,
         .priority = 15,
         .enabled = true,
         .direction = .both,
         .protocol = .udp,
-        .src_ip = 0x0A000203, // 10.0.2.3
+        .src_ip = 0x0A000203,
         .src_mask = 0xFFFFFFFF,
         .src_port_start = 53,
         .src_port_end = 53,
@@ -396,23 +367,19 @@ fn addDefaultRules() void {
         .description = makeDescription("QEMU DNS"),
     });
 
-    // =========================================================================
-    // Rule 6: QEMU local subnet (10.0.2.0/24 <-> 10.0.2.0/24)
-    // Priority: 25
-    // NOTE: Both src AND dst must be in local subnet
-    // =========================================================================
+    // Rule 6: QEMU local subnet
     _ = addRule(.{
         .id = 6,
         .priority = 25,
         .enabled = true,
         .direction = .both,
         .protocol = .any,
-        .src_ip = 0x0A000200, // 10.0.2.0
-        .src_mask = 0xFFFFFF00, // /24
+        .src_ip = 0x0A000200,
+        .src_mask = 0xFFFFFF00,
         .src_port_start = 0,
         .src_port_end = 65535,
-        .dst_ip = 0x0A000200, // 10.0.2.0
-        .dst_mask = 0xFFFFFF00, // /24
+        .dst_ip = 0x0A000200,
+        .dst_mask = 0xFFFFFF00,
         .dst_port_start = 0,
         .dst_port_end = 65535,
         .action = .allow,
@@ -423,10 +390,7 @@ fn addDefaultRules() void {
         .description = makeDescription("QEMU local subnet"),
     });
 
-    // =========================================================================
     // Rule 100: Default deny inbound
-    // Priority: 65534 (very low = last to match)
-    // =========================================================================
     _ = addRule(.{
         .id = 100,
         .priority = 65534,
@@ -449,10 +413,7 @@ fn addDefaultRules() void {
         .description = makeDescription("Default deny inbound"),
     });
 
-    // =========================================================================
     // Rule 101: Allow all outbound
-    // Priority: 65535 (lowest)
-    // =========================================================================
     _ = addRule(.{
         .id = 101,
         .priority = 65535,
@@ -492,7 +453,6 @@ fn makeDescription(text: []const u8) [64]u8 {
 pub fn addRule(rule: Rule) bool {
     if (rule_count >= MAX_RULES) return false;
 
-    // Find insertion position (sorted by priority)
     var insert_pos: usize = rule_count;
     for (0..rule_count) |i| {
         if (rule.priority < rules[i].priority) {
@@ -501,7 +461,6 @@ pub fn addRule(rule: Rule) bool {
         }
     }
 
-    // Shift rules to make room
     if (insert_pos < rule_count) {
         var i = rule_count;
         while (i > insert_pos) : (i -= 1) {
@@ -553,7 +512,6 @@ pub fn getRule(index: usize) ?*const Rule {
 pub fn addToBlacklist(ip: u32, duration_sec: u64, reason: []const u8) bool {
     const now = getTimestamp();
 
-    // Check if already exists - update expiry
     for (0..blacklist_count) |i| {
         if (blacklist[i].ip == ip) {
             blacklist[i].expires_at = now + (duration_sec * 1000);
@@ -562,7 +520,6 @@ pub fn addToBlacklist(ip: u32, duration_sec: u64, reason: []const u8) bool {
         }
     }
 
-    // Remove oldest if full
     if (blacklist_count >= MAX_BLACKLIST) {
         var oldest_idx: usize = 0;
         var oldest_time: u64 = 0xFFFFFFFFFFFFFFFF;
@@ -584,14 +541,12 @@ pub fn addToBlacklist(ip: u32, duration_sec: u64, reason: []const u8) bool {
         }
     }
 
-    // Create reason buffer
     var r: [64]u8 = [_]u8{0} ** 64;
     const len = @min(reason.len, 63);
     for (0..len) |i| {
         r[i] = reason[i];
     }
 
-    // Add entry
     blacklist[blacklist_count] = BlacklistEntry{
         .ip = ip,
         .added_at = now,
@@ -602,7 +557,6 @@ pub fn addToBlacklist(ip: u32, duration_sec: u64, reason: []const u8) bool {
     };
     blacklist_count += 1;
 
-    // Log only to serial if enabled
     if (config.log_to_serial) {
         serial.writeString("[FW] Blacklisted: ");
         printIP(ip);
@@ -618,9 +572,7 @@ pub fn isBlacklisted(ip: u32) bool {
     var i: usize = 0;
     while (i < blacklist_count) {
         if (blacklist[i].ip == ip) {
-            // Check expiry
             if (!blacklist[i].permanent and blacklist[i].expires_at < now) {
-                // Expired - remove
                 for (i..blacklist_count - 1) |j| {
                     blacklist[j] = blacklist[j + 1];
                 }
@@ -671,17 +623,11 @@ pub fn filterInbound(
 ) FilterResult {
     stats.packets_total += 1;
 
-    // =========================================
-    // CHECK 1: Firewall disabled
-    // =========================================
     if (state == .disabled) {
         stats.packets_allowed += 1;
         return .{ .action = .allow, .rule_id = 0, .reason = "Disabled" };
     }
 
-    // =========================================
-    // CHECK 2: Lockdown mode
-    // =========================================
     if (state == .lockdown) {
         if (!isWhitelisted(src_ip)) {
             stats.packets_dropped += 1;
@@ -689,18 +635,12 @@ pub fn filterInbound(
         }
     }
 
-    // =========================================
-    // CHECK 3: Blacklist
-    // =========================================
     if (isBlacklisted(src_ip)) {
         stats.packets_dropped += 1;
         stats.blocked_blacklist += 1;
         return .{ .action = .drop, .rule_id = 0, .reason = "Blacklisted" };
     }
 
-    // =========================================
-    // CHECK 4: Rate limiting
-    // =========================================
     if (config.enable_rate_limit) {
         const rate_result = checkRateLimit(src_ip, protocol);
         if (!rate_result.allowed) {
@@ -713,11 +653,8 @@ pub fn filterInbound(
         }
     }
 
-    // =========================================
-    // CHECK 5: P2P-only mode
-    // =========================================
     if (config.p2p_only_mode and peer_id == null) {
-        const is_local = (src_ip & 0xFFFFFF00) == 0x0A000200; // 10.0.2.0/24
+        const is_local = (src_ip & 0xFFFFFF00) == 0x0A000200;
         const is_loopback = (src_ip >> 24) == 127;
 
         if (!is_local and !is_loopback) {
@@ -729,19 +666,13 @@ pub fn filterInbound(
         }
     }
 
-    // =========================================
-    // CHECK 6: Established connection tracking (TCP only)
-    // =========================================
-    if (protocol == 6) { // TCP
+    if (protocol == 6) {
         if (isEstablishedConnection(src_ip, src_port, dst_ip, dst_port)) {
             stats.packets_allowed += 1;
             return .{ .action = .allow, .rule_id = 3, .reason = "Established" };
         }
     }
 
-    // =========================================
-    // CHECK 7: Match against rules
-    // =========================================
     const proto = protocolFromU8(protocol);
 
     for (0..rule_count) |i| {
@@ -774,9 +705,6 @@ pub fn filterInbound(
         }
     }
 
-    // =========================================
-    // DEFAULT: Deny
-    // =========================================
     stats.packets_dropped += 1;
     stats.blocked_no_rule += 1;
     return .{ .action = .drop, .rule_id = 0, .reason = "Default deny" };
@@ -800,7 +728,6 @@ pub fn filterOutbound(
         return .{ .action = .allow, .rule_id = 0, .reason = "Disabled" };
     }
 
-    // Check if destination is blacklisted
     if (isBlacklisted(dst_ip)) {
         stats.packets_dropped += 1;
         return .{ .action = .drop, .rule_id = 0, .reason = "Dst blacklisted" };
@@ -808,7 +735,6 @@ pub fn filterOutbound(
 
     const proto = protocolFromU8(protocol);
 
-    // Match against rules
     for (0..rule_count) |i| {
         const rule = &rules[i];
 
@@ -821,7 +747,6 @@ pub fn filterOutbound(
 
             if (rule.action == .allow) {
                 stats.packets_allowed += 1;
-                // Track outbound TCP for established connection detection
                 if (protocol == 6) {
                     trackConnection(src_ip, src_port, dst_ip, dst_port, proto);
                 }
@@ -833,7 +758,6 @@ pub fn filterOutbound(
         }
     }
 
-    // Default allow outbound
     stats.packets_allowed += 1;
     return .{ .action = .allow, .rule_id = 0, .reason = "Default allow" };
 }
@@ -851,30 +775,24 @@ fn matchRule(
     dst_port: u16,
     peer_id: ?[32]u8,
 ) bool {
-    // Protocol check
     if (rule.protocol != .any and rule.protocol != protocol) return false;
 
-    // Source IP check
     if (rule.src_ip != 0) {
         if ((src_ip & rule.src_mask) != (rule.src_ip & rule.src_mask)) return false;
     }
 
-    // Destination IP check
     if (rule.dst_ip != 0) {
         if ((dst_ip & rule.dst_mask) != (rule.dst_ip & rule.dst_mask)) return false;
     }
 
-    // Source port check
     if (rule.src_port_start != 0 or rule.src_port_end != 0) {
         if (src_port < rule.src_port_start or src_port > rule.src_port_end) return false;
     }
 
-    // Destination port check
     if (rule.dst_port_start != 0 or rule.dst_port_end != 0) {
         if (dst_port < rule.dst_port_start or dst_port > rule.dst_port_end) return false;
     }
 
-    // Peer ID check
     if (rule.require_peer_id) {
         if (peer_id == null) return false;
         if (rule.peer_id) |required_peer| {
@@ -901,7 +819,6 @@ fn checkRateLimit(ip: u32, protocol: u8) RateLimitResult {
     const now = getTimestamp();
     var entry: ?*RateLimitEntry = null;
 
-    // Find existing entry
     for (0..rate_limit_count) |i| {
         if (rate_limits[i].ip == ip) {
             entry = &rate_limits[i];
@@ -909,10 +826,8 @@ fn checkRateLimit(ip: u32, protocol: u8) RateLimitResult {
         }
     }
 
-    // Create new entry if not found
     if (entry == null) {
         if (rate_limit_count >= MAX_RATE_ENTRIES) {
-            // Remove first entry
             rate_limits[0] = rate_limits[rate_limit_count - 1];
             rate_limit_count -= 1;
         }
@@ -929,9 +844,8 @@ fn checkRateLimit(ip: u32, protocol: u8) RateLimitResult {
         rate_limit_count += 1;
     }
 
-    var e = entry.?;
+    const e = entry.?;
 
-    // Reset counters if window passed
     if (now > e.last_reset and now - e.last_reset >= 1000) {
         e.packets_this_second = 0;
         e.syn_count = 0;
@@ -940,13 +854,11 @@ fn checkRateLimit(ip: u32, protocol: u8) RateLimitResult {
 
     e.packets_this_second += 1;
 
-    // Check packet rate
     if (e.packets_this_second > config.max_packets_per_second) {
         e.violations += 1;
         return .{ .allowed = false, .reason = "Rate limit" };
     }
 
-    // Check SYN flood for TCP
     if (protocol == 6) {
         e.syn_count += 1;
         if (e.syn_count > config.syn_flood_threshold) {
@@ -956,7 +868,6 @@ fn checkRateLimit(ip: u32, protocol: u8) RateLimitResult {
         }
     }
 
-    // Check connection limit
     if (e.connections_active > config.max_connections_per_ip) {
         e.violations += 1;
         return .{ .allowed = false, .reason = "Too many connections" };
@@ -983,7 +894,6 @@ fn recordViolation(ip: u32) void {
 
 fn trackConnection(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16, protocol: Protocol) void {
     if (connection_count >= MAX_CONNECTIONS) {
-        // Remove oldest
         for (0..MAX_CONNECTIONS - 1) |i| {
             connections[i] = connections[i + 1];
         }
@@ -1013,7 +923,6 @@ fn trackConnection(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16, proto
 fn isEstablishedConnection(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16) bool {
     for (0..connection_count) |i| {
         const conn = &connections[i];
-        // Match reverse direction (response to our outbound)
         if (conn.dst_ip == src_ip and conn.dst_port == src_port and
             conn.src_ip == dst_ip and conn.src_port == dst_port)
         {
@@ -1043,7 +952,6 @@ pub fn detectPortScan(src_ip: u32, dst_port: u16) bool {
 
     var tracker: ?*PortScanTracker = null;
 
-    // Find existing tracker
     for (0..scan_tracker_count) |i| {
         if (scan_trackers[i].ip == src_ip) {
             tracker = &scan_trackers[i];
@@ -1051,7 +959,6 @@ pub fn detectPortScan(src_ip: u32, dst_port: u16) bool {
         }
     }
 
-    // Create new tracker
     if (tracker == null) {
         if (scan_tracker_count >= MAX_SCAN_TRACKERS) return false;
         scan_trackers[scan_tracker_count] = PortScanTracker{
@@ -1065,15 +972,13 @@ pub fn detectPortScan(src_ip: u32, dst_port: u16) bool {
         scan_tracker_count += 1;
     }
 
-    var t = tracker.?;
+    const t = tracker.?;
 
-    // Reset if window expired
     if (now > t.first_seen and now - t.first_seen > SCAN_WINDOW_MS) {
         t.port_count = 0;
         t.first_seen = now;
     }
 
-    // Check if port already seen
     var port_exists = false;
     for (0..t.port_count) |i| {
         if (t.ports_accessed[i] == dst_port) {
@@ -1082,7 +987,6 @@ pub fn detectPortScan(src_ip: u32, dst_port: u16) bool {
         }
     }
 
-    // Add new port
     if (!port_exists and t.port_count < 64) {
         t.ports_accessed[t.port_count] = dst_port;
         t.port_count += 1;
@@ -1090,7 +994,6 @@ pub fn detectPortScan(src_ip: u32, dst_port: u16) bool {
 
     t.last_seen = now;
 
-    // Check threshold
     if (t.port_count >= SCAN_THRESHOLD) {
         stats.blocked_port_scan += 1;
 
@@ -1115,15 +1018,12 @@ pub fn detectPortScan(src_ip: u32, dst_port: u16) bool {
 // ============================================================================
 
 fn isWhitelisted(ip: u32) bool {
-    // Loopback
     if ((ip & 0xFF000000) == 0x7F000000) return true;
-    // QEMU subnet
     if ((ip & 0xFFFFFF00) == 0x0A000200) return true;
     return false;
 }
 
 fn isRegisteredPeerIP(ip: u32) bool {
-    // TODO: Integrate with P2P peer registry
     _ = ip;
     return true;
 }
@@ -1197,7 +1097,6 @@ pub fn isInitialized() bool {
 
 pub fn setState(new_state: FirewallState) void {
     state = new_state;
-    // Silent - no logging (for tests)
 }
 
 pub fn setStateWithLog(new_state: FirewallState) void {
@@ -1280,10 +1179,82 @@ pub fn printStatus() void {
     printNumber(stats.packets_dropped);
     serial.writeString("\n");
 
+    serial.writeString("  ProcCap:     ");
+    printNumber(stats.blocked_process_cap);
+    serial.writeString("\n");
+
     serial.writeString("  Connections: ");
     printNumber(connection_count);
     serial.writeString("\n");
 
     printLine(45);
     serial.writeString("\n");
+}
+
+// ============================================================================
+// E3.4: Per-Process Network Filtering
+// ============================================================================
+
+const net_cap = @import("../security/net_capability.zig");
+
+/// Filter outbound with per-process CAP_NET enforcement
+pub fn filterProcessOutbound(
+    pid: u16,
+    src_ip: u32,
+    dst_ip: u32,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+) FilterResult {
+    if (pid != 0 and net_cap.isInitialized()) {
+        const cap_result = net_cap.checkConnect(pid, dst_ip, dst_port);
+        if (cap_result.action != .allowed) {
+            stats.packets_dropped += 1;
+            stats.blocked_process_cap += 1;
+            return .{ .action = .drop, .rule_id = 0, .reason = "Process CAP_NET denied" };
+        }
+    }
+    return filterOutbound(src_ip, dst_ip, protocol, src_port, dst_port);
+}
+
+/// Filter inbound with socket owner enforcement
+pub fn filterProcessInbound(
+    socket_idx: u8,
+    src_ip: u32,
+    dst_ip: u32,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    peer_id: ?[32]u8,
+) FilterResult {
+    if (net_cap.isInitialized()) {
+        if (net_cap.getSocketOwner(socket_idx)) |pid| {
+            if (pid != 0) {
+                if (net_cap.isKilled(pid)) {
+                    stats.packets_dropped += 1;
+                    stats.blocked_process_cap += 1;
+                    return .{ .action = .drop, .rule_id = 0, .reason = "Owner killed" };
+                }
+                if (!net_cap.hasNetCapability(pid)) {
+                    stats.packets_dropped += 1;
+                    stats.blocked_process_cap += 1;
+                    return .{ .action = .drop, .rule_id = 0, .reason = "Owner no CAP_NET" };
+                }
+            }
+        }
+    }
+    return filterInbound(src_ip, dst_ip, protocol, src_port, dst_port, peer_id);
+}
+
+/// Add per-process rule via firewall API
+pub fn addProcessNetRule(
+    pid: u16,
+    remote_ip: u32,
+    remote_mask: u32,
+    port_start: u16,
+    port_end: u16,
+    allow: bool,
+) bool {
+    if (!net_cap.isInitialized()) return false;
+    return net_cap.addNetRule(pid, remote_ip, remote_mask, port_start, port_end, allow) != null;
 }

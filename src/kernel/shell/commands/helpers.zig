@@ -1,5 +1,6 @@
 //! Zamrud OS - Command Helpers
 //! Utility functions for shell commands
+//! Updated: E3.4 Network Capability
 
 const shell = @import("../shell.zig");
 const terminal = @import("../../drivers/display/terminal.zig");
@@ -17,7 +18,6 @@ pub fn strEql(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-/// Alias for strEql for consistency
 pub fn eqlStr(a: []const u8, b: []const u8) bool {
     return strEql(a, b);
 }
@@ -73,7 +73,6 @@ pub fn splitFirst(s: []const u8, delim: u8) struct { first: []const u8, rest: []
     return .{ .first = s, .rest = "" };
 }
 
-/// Split string into parts by delimiter
 pub fn splitAll(s: []const u8, delim: u8, out: [][]const u8) usize {
     var count: usize = 0;
     var start: usize = 0;
@@ -94,7 +93,6 @@ pub fn splitAll(s: []const u8, delim: u8, out: [][]const u8) usize {
         }
     }
 
-    // Last part
     if (in_word and count < out.len) {
         out[count] = s[start..];
         count += 1;
@@ -103,7 +101,6 @@ pub fn splitAll(s: []const u8, delim: u8, out: [][]const u8) usize {
     return count;
 }
 
-/// Case-insensitive string comparison
 pub fn strEqlIgnoreCase(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |ca, cb| {
@@ -126,7 +123,7 @@ pub fn parseU32(s: []const u8) ?u32 {
         if (c >= '0' and c <= '9') {
             const digit: u32 = c - '0';
             if (result > 429496729 or (result == 429496729 and digit > 5)) {
-                return null; // Overflow
+                return null;
             }
             result = result * 10 + digit;
         } else if (c == ' ' or c == '\t') {
@@ -146,7 +143,7 @@ pub fn parseU16(s: []const u8) ?u16 {
         if (c >= '0' and c <= '9') {
             const digit: u16 = c - '0';
             if (result > 6553 or (result == 6553 and digit > 5)) {
-                return null; // Overflow
+                return null;
             }
             result = result * 10 + digit;
         } else if (c == ' ' or c == '\t') {
@@ -158,6 +155,11 @@ pub fn parseU16(s: []const u8) ?u16 {
     return result;
 }
 
+/// Alias for parseU16 — used by E3.4 commands
+pub fn parseDec16(s: []const u8) ?u16 {
+    return parseU16(s);
+}
+
 pub fn parseU64(s: []const u8) ?u64 {
     if (s.len == 0) return null;
 
@@ -165,7 +167,6 @@ pub fn parseU64(s: []const u8) ?u64 {
     for (s) |c| {
         if (c >= '0' and c <= '9') {
             const digit: u64 = c - '0';
-            // Check overflow
             if (result > 1844674407370955161 or (result == 1844674407370955161 and digit > 5)) {
                 return null;
             }
@@ -198,10 +199,23 @@ pub fn parseHex(s: []const u8) ?u32 {
             return null;
         }
 
-        if (result > 0x0FFFFFFF) return null; // Overflow
+        if (result > 0x0FFFFFFF) return null;
         result = (result << 4) | digit;
     }
     return result;
+}
+
+/// Alias for parseHex — used by E3.4
+pub fn parseHex32(s: []const u8) ?u32 {
+    return parseHex(s);
+}
+
+/// Parse hex with optional 0x prefix
+pub fn parseHexAuto(s: []const u8) ?u32 {
+    if (s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X')) {
+        return parseHex(s[2..]);
+    }
+    return parseHex(s);
 }
 
 // =============================================================================
@@ -297,16 +311,54 @@ pub fn printI32(val: i32) void {
     }
 }
 
+// =============================================================================
+// E3.4 Generic Print Functions
+// =============================================================================
+
+/// Generic decimal print — any integer type via shell
+pub fn printDec(val: anytype) void {
+    const T = @TypeOf(val);
+    switch (@typeInfo(T)) {
+        .int => |info| {
+            if (info.signedness == .signed) {
+                if (val < 0) {
+                    shell.printChar('-');
+                    const unsigned_type = @Type(.{ .int = .{ .signedness = .unsigned, .bits = info.bits } });
+                    printU64(@intCast(@as(unsigned_type, @intCast(-val))));
+                    return;
+                }
+            }
+            printU64(@intCast(val));
+        },
+        .comptime_int => {
+            if (val < 0) {
+                shell.printChar('-');
+                printU64(@intCast(-val));
+            } else {
+                printU64(@intCast(val));
+            }
+        },
+        else => {
+            shell.print("?");
+        },
+    }
+}
+
+/// Print u64 as decimal — alias for printU64
+pub fn printDec64(val: u64) void {
+    printU64(val);
+}
+
 /// Generic number print (for any integer type)
 pub fn printNumber(n: anytype) void {
     const T = @TypeOf(n);
     const val = switch (@typeInfo(T)) {
-        .Int => @as(u64, @intCast(if (n < 0) -n else n)),
-        .ComptimeInt => @as(u64, @intCast(if (n < 0) -n else n)),
+        .int => @as(u64, @intCast(if (n < 0) -n else n)),
+        .comptime_int => @as(u64, @intCast(if (n < 0) -n else n)),
         else => @compileError("printNumber requires integer type"),
     };
 
-    if (@typeInfo(T) == .Int and @typeInfo(T).Int.signedness == .signed and n < 0) {
+    if (@typeInfo(T) == .int and @typeInfo(T).int.signedness == .signed and n < 0) {
         shell.printChar('-');
     }
 
@@ -331,7 +383,7 @@ pub fn printNumber(n: anytype) void {
 }
 
 // =============================================================================
-// Number Printing (via Terminal - for gateway commands)
+// Number Printing (via Terminal)
 // =============================================================================
 
 pub fn printNumberTerminal(n: anytype) void {
@@ -482,7 +534,6 @@ pub fn printI32Padded(val: i32, width: usize) void {
     }
 }
 
-/// Padded number for terminal output
 pub fn printNumberPadded(n: anytype, width: usize) void {
     var buf: [20]u8 = undefined;
     var len: usize = 0;
@@ -507,6 +558,12 @@ pub fn printNumberPadded(n: anytype, width: usize) void {
         len -= 1;
         shell.printChar(buf[len]);
     }
+}
+
+/// Generic padded decimal — used by E3.4
+pub fn printDecPadded(val: anytype, width: usize) void {
+    const v: u64 = @intCast(val);
+    printU64Padded(v, width);
 }
 
 // =============================================================================
@@ -547,6 +604,7 @@ pub fn printHexU64(val: u64) void {
     }
 }
 
+/// Print u32 as 8-digit uppercase hex — used by E3.4 netreg
 pub fn printHex32(val: u32) void {
     const hex_chars = "0123456789ABCDEF";
     var i: u5 = 28;
@@ -557,7 +615,6 @@ pub fn printHex32(val: u32) void {
     }
 }
 
-/// Print hex to terminal (for gateway commands)
 pub fn printHexTerminal(data: []const u8) void {
     const hex_chars = "0123456789abcdef";
     for (data) |b| {
@@ -699,12 +756,10 @@ pub fn printSubsection(name: []const u8) void {
     shell.println(name);
 }
 
-/// Execute a test and print result - FIXED: No double [OK]
 pub fn doTest(name: []const u8, passed: bool, failed: *u32) u32 {
     shell.print("  ");
     shell.print(name);
 
-    // Pad to 26 chars with dots
     var pad: usize = 0;
     if (name.len < 26) {
         pad = 26 - name.len;
@@ -715,7 +770,6 @@ pub fn doTest(name: []const u8, passed: bool, failed: *u32) u32 {
     shell.print(" ");
 
     if (passed) {
-        // Print green PASS without extra prefix
         if (terminal.isInitialized()) {
             terminal.setFgColor(terminal.Colors.SUCCESS);
         }
@@ -725,7 +779,6 @@ pub fn doTest(name: []const u8, passed: bool, failed: *u32) u32 {
         }
         return 1;
     } else {
-        // Print red FAIL without extra prefix
         if (terminal.isInitialized()) {
             terminal.setFgColor(terminal.Colors.ERROR);
         }
@@ -738,12 +791,10 @@ pub fn doTest(name: []const u8, passed: bool, failed: *u32) u32 {
     }
 }
 
-/// Print a skipped test
 pub fn doSkip(name: []const u8) void {
     shell.print("  ");
     shell.print(name);
 
-    // Pad to 26 chars
     var pad: usize = 0;
     if (name.len < 26) {
         pad = 26 - name.len;

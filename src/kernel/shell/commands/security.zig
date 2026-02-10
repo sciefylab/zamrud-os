@@ -1,5 +1,6 @@
 //! Zamrud OS - Security Commands
-//! Security management, firewall control, and threat monitoring
+//! Security management, firewall control, threat monitoring
+//! Updated: E3.4 Network Capability integration
 
 const helpers = @import("helpers.zig");
 const shell = @import("../shell.zig");
@@ -10,8 +11,11 @@ const firewall = @import("../../net/firewall.zig");
 const blacklist = @import("../../security/blacklist.zig");
 const threat_log = @import("../../security/threat_log.zig");
 
-// Network imports (for IP conversion)
+// Network imports
 const net_driver = @import("../../drivers/network/network.zig");
+
+// E3.4: Network Capability
+const net_capability = @import("../../security/net_capability.zig");
 
 // =============================================================================
 // Main Entry Point
@@ -46,7 +50,7 @@ pub fn execute(args: []const u8) void {
 }
 
 // =============================================================================
-// Help - Professional Menu
+// Help
 // =============================================================================
 
 fn showHelp() void {
@@ -105,10 +109,24 @@ fn showHelp() void {
     shell.println("+-----------------------------------------------------------+");
     shell.println("  blacklist list      Show blocked IPs");
     shell.println("  blacklist add <ip> [seconds]");
-    shell.println("                      Add IP to blacklist (default 1h)");
     shell.println("  blacklist remove <ip>");
-    shell.println("                      Remove IP from blacklist");
     shell.println("  blacklist clear     Clear all entries");
+    shell.newLine();
+
+    shell.println("+-----------------------------------------------------------+");
+    shell.println("|  NETWORK CAPABILITY (E3.4)                                |");
+    shell.println("+-----------------------------------------------------------+");
+    shell.println("  netcap              Network capability status");
+    shell.println("  netprocs            Per-process network table");
+    shell.println("  netsockets          Socket ownership table");
+    shell.println("  netreg <pid> [caps] Register process");
+    shell.println("  netallow <pid>      Grant CAP_NET");
+    shell.println("  netrevoke <pid>     Revoke CAP_NET + close sockets");
+    shell.println("  netdeny <pid>       Block ALL network for process");
+    shell.println("  netrestrict <pid>   Set restricted mode");
+    shell.println("  netreset <pid>      Reset violations / un-kill");
+    shell.println("  netviolations       Show violation report");
+    shell.println("  nettest             Run E3.4 test suite (20 tests)");
     shell.newLine();
 
     shell.println("+-----------------------------------------------------------+");
@@ -116,27 +134,13 @@ fn showHelp() void {
     shell.println("+-----------------------------------------------------------+");
     shell.println("  test                Run all security tests");
     shell.println("  test quick          Quick health check");
-    shell.println("  test rules          Test rule management");
-    shell.println("  test filter         Test packet filtering");
-    shell.println("  test blacklist      Test blacklist system");
-    shell.println("  test ratelimit      Test rate limiting");
-    shell.newLine();
-
-    shell.println("+-----------------------------------------------------------+");
-    shell.println("|  EXAMPLES                                                 |");
-    shell.println("+-----------------------------------------------------------+");
-    shell.println("  security status");
-    shell.println("  security level elevated");
-    shell.println("  firewall rules");
-    shell.println("  firewall test");
-    shell.println("  security blacklist add 192.168.1.100 3600");
     shell.newLine();
     shell.println("+===========================================================+");
     shell.newLine();
 }
 
 // =============================================================================
-// Status Commands
+// Status
 // =============================================================================
 
 fn showStatus() void {
@@ -224,6 +228,9 @@ fn showStatus() void {
     shell.print("    Rejected:       ");
     helpers.printU64(fw_stats.packets_rejected);
     shell.newLine();
+    shell.print("    ProcCap(E3.4):  ");
+    helpers.printU64(fw_stats.blocked_process_cap);
+    shell.newLine();
     shell.newLine();
 
     // Block Reasons
@@ -275,6 +282,30 @@ fn showStatus() void {
     shell.print("    Blacklist IPs:  ");
     helpers.printUsize(firewall.getBlacklistCount());
     shell.newLine();
+    shell.newLine();
+
+    // E3.4: Network Capability
+    shell.println("  [NETWORK CAPABILITY (E3.4)]");
+    if (net_capability.isInitialized()) {
+        const ns = net_capability.getStats();
+        shell.print("    Registered:     ");
+        helpers.printUsize(net_capability.getProcessCount());
+        shell.println(" processes");
+        shell.print("    Active Sockets: ");
+        helpers.printUsize(net_capability.getActiveSocketCount());
+        shell.newLine();
+        shell.print("    Net Rules:      ");
+        helpers.printUsize(net_capability.getNetRuleCount());
+        shell.newLine();
+        shell.print("    Net Violations: ");
+        helpers.printU64(ns.violations_total);
+        shell.newLine();
+        shell.print("    Procs Killed:   ");
+        helpers.printU64(ns.processes_killed);
+        shell.newLine();
+    } else {
+        shell.println("    Not initialized");
+    }
     shell.newLine();
 
     // Threats
@@ -496,16 +527,19 @@ fn showFirewallStatus() void {
 
     shell.newLine();
 
-    const stats = firewall.getStats();
+    const fw_stats = firewall.getStats();
     shell.println("  Traffic:");
     shell.print("    Packets:        ");
-    helpers.printU64(stats.packets_total);
+    helpers.printU64(fw_stats.packets_total);
     shell.newLine();
     shell.print("    Allowed:        ");
-    helpers.printU64(stats.packets_allowed);
+    helpers.printU64(fw_stats.packets_allowed);
     shell.newLine();
     shell.print("    Dropped:        ");
-    helpers.printU64(stats.packets_dropped);
+    helpers.printU64(fw_stats.packets_dropped);
+    shell.newLine();
+    shell.print("    ProcCap(E3.4):  ");
+    helpers.printU64(fw_stats.blocked_process_cap);
     shell.newLine();
 
     shell.newLine();
@@ -575,7 +609,7 @@ fn showRules() void {
 }
 
 fn showFirewallStats() void {
-    const stats = firewall.getStats();
+    const fw_stats = firewall.getStats();
 
     shell.newLine();
     shell.println("+===========================================================+");
@@ -585,60 +619,63 @@ fn showFirewallStats() void {
 
     shell.println("  [PACKET SUMMARY]");
     shell.print("    Total Packets:      ");
-    helpers.printU64(stats.packets_total);
+    helpers.printU64(fw_stats.packets_total);
     shell.newLine();
     shell.print("    Allowed:            ");
     shell.printSuccess("");
-    helpers.printU64(stats.packets_allowed);
+    helpers.printU64(fw_stats.packets_allowed);
     shell.newLine();
     shell.print("    Dropped:            ");
-    if (stats.packets_dropped > 0) shell.printError("");
-    helpers.printU64(stats.packets_dropped);
+    if (fw_stats.packets_dropped > 0) shell.printError("");
+    helpers.printU64(fw_stats.packets_dropped);
     shell.newLine();
     shell.print("    Rejected:           ");
-    helpers.printU64(stats.packets_rejected);
+    helpers.printU64(fw_stats.packets_rejected);
+    shell.newLine();
+    shell.print("    ProcCap Blocked:    ");
+    helpers.printU64(fw_stats.blocked_process_cap);
     shell.newLine();
     shell.newLine();
 
     shell.println("  [BLOCKED BY PROTOCOL]");
     shell.print("    ICMP:               ");
-    helpers.printU64(stats.icmp_blocked);
+    helpers.printU64(fw_stats.icmp_blocked);
     shell.newLine();
     shell.print("    TCP:                ");
-    helpers.printU64(stats.tcp_blocked);
+    helpers.printU64(fw_stats.tcp_blocked);
     shell.newLine();
     shell.print("    UDP:                ");
-    helpers.printU64(stats.udp_blocked);
+    helpers.printU64(fw_stats.udp_blocked);
     shell.newLine();
     shell.newLine();
 
     shell.println("  [BLOCKED BY REASON]");
     shell.print("    No Matching Rule:   ");
-    helpers.printU64(stats.blocked_no_rule);
+    helpers.printU64(fw_stats.blocked_no_rule);
     shell.newLine();
     shell.print("    Rate Limited:       ");
-    helpers.printU64(stats.blocked_rate_limit);
+    helpers.printU64(fw_stats.blocked_rate_limit);
     shell.newLine();
     shell.print("    Blacklisted IP:     ");
-    helpers.printU64(stats.blocked_blacklist);
+    helpers.printU64(fw_stats.blocked_blacklist);
     shell.newLine();
     shell.print("    No Peer ID:         ");
-    helpers.printU64(stats.blocked_no_peer);
+    helpers.printU64(fw_stats.blocked_no_peer);
     shell.newLine();
     shell.print("    SYN Flood:          ");
-    helpers.printU64(stats.blocked_syn_flood);
+    helpers.printU64(fw_stats.blocked_syn_flood);
     shell.newLine();
     shell.print("    Port Scan:          ");
-    helpers.printU64(stats.blocked_port_scan);
+    helpers.printU64(fw_stats.blocked_port_scan);
     shell.newLine();
     shell.newLine();
 
     shell.println("  [CONNECTIONS]");
     shell.print("    Total Tracked:      ");
-    helpers.printU64(stats.connections_total);
+    helpers.printU64(fw_stats.connections_total);
     shell.newLine();
     shell.print("    Currently Active:   ");
-    helpers.printU64(stats.connections_active);
+    helpers.printU64(fw_stats.connections_active);
     shell.newLine();
     shell.newLine();
 
@@ -681,9 +718,6 @@ fn cmdBlacklist(args: []const u8) void {
         clearBlacklist();
     } else {
         shell.println("Usage: security blacklist [list|add|remove|clear]");
-        shell.println("  add <ip> [seconds]  - Add IP (default 3600s)");
-        shell.println("  remove <ip>         - Remove IP");
-        shell.println("  clear               - Clear all entries");
     }
 }
 
@@ -707,7 +741,6 @@ fn showBlacklist() void {
                 printIpAddrPadded(entry.ip);
                 shell.print(" ");
 
-                // Print reason (truncated to 17 chars)
                 var j: usize = 0;
                 while (j < 17 and j < entry.reason_len) : (j += 1) {
                     shell.printChar(entry.reason[j]);
@@ -744,7 +777,6 @@ fn addBlacklist(args: []const u8) void {
 
     if (ip_str.len == 0) {
         shell.println("Usage: security blacklist add <ip> [duration_seconds]");
-        shell.println("  Example: security blacklist add 192.168.1.100 3600");
         return;
     }
 
@@ -754,7 +786,7 @@ fn addBlacklist(args: []const u8) void {
         return;
     };
 
-    var duration: u64 = 3600; // 1 hour default
+    var duration: u64 = 3600;
     const dur_str = helpers.trim(parsed.rest);
     if (dur_str.len > 0) {
         if (helpers.parseU32(dur_str)) |d| {
@@ -797,10 +829,8 @@ fn removeBlacklist(args: []const u8) void {
 }
 
 fn clearBlacklist() void {
-    // Remove all entries
     var removed: u32 = 0;
     while (firewall.getBlacklistCount() > 0) {
-        // Get first entry and remove it
         const count = blacklist.getActiveCount();
         if (count > 0) {
             if (blacklist.getEntry(0)) |entry| {
@@ -810,8 +840,6 @@ fn clearBlacklist() void {
         } else {
             break;
         }
-
-        // Safety limit
         if (removed > 1000) break;
     }
 
@@ -830,7 +858,7 @@ fn cmdThreats(args: []const u8) void {
     if (parsed.cmd.len == 0 or helpers.strEql(parsed.cmd, "list")) {
         showThreats();
     } else if (helpers.strEql(parsed.cmd, "clear")) {
-        threat_log.init(); // Re-init to clear
+        threat_log.init();
         shell.printSuccessLine("[+] Threat log cleared");
     } else {
         shell.println("Usage: security threats [list|clear]");
@@ -895,7 +923,7 @@ fn showThreats() void {
 }
 
 // =============================================================================
-// Firewall Test Suite
+// Test Suite
 // =============================================================================
 
 pub fn runTest(args: []const u8) void {
@@ -908,43 +936,35 @@ pub fn runTest(args: []const u8) void {
     } else if (helpers.strEql(opt, "rules")) {
         var dummy_failed: u32 = 0;
         const passed = testRuleManagement(&dummy_failed);
-        shell.newLine();
         shell.print("  Rules test: ");
         helpers.printU32(passed);
         shell.print(" passed, ");
         helpers.printU32(dummy_failed);
         shell.println(" failed");
-        shell.newLine();
     } else if (helpers.strEql(opt, "filter")) {
         var dummy_failed: u32 = 0;
         const passed = testPacketFiltering(&dummy_failed);
-        shell.newLine();
         shell.print("  Filter test: ");
         helpers.printU32(passed);
         shell.print(" passed, ");
         helpers.printU32(dummy_failed);
         shell.println(" failed");
-        shell.newLine();
     } else if (helpers.strEql(opt, "blacklist")) {
         var dummy_failed: u32 = 0;
         const passed = testBlacklistSystem(&dummy_failed);
-        shell.newLine();
         shell.print("  Blacklist test: ");
         helpers.printU32(passed);
         shell.print(" passed, ");
         helpers.printU32(dummy_failed);
         shell.println(" failed");
-        shell.newLine();
     } else if (helpers.strEql(opt, "ratelimit")) {
         var dummy_failed: u32 = 0;
         const passed = testRateLimiting(&dummy_failed);
-        shell.newLine();
         shell.print("  Rate limit test: ");
         helpers.printU32(passed);
         shell.print(" passed, ");
         helpers.printU32(dummy_failed);
         shell.println(" failed");
-        shell.newLine();
     } else {
         shell.println("Usage: security test [all|quick|rules|filter|blacklist|ratelimit]");
     }
@@ -960,7 +980,6 @@ fn runAllTests() void {
     var passed: u32 = 0;
     var failed: u32 = 0;
 
-    // Test categories
     passed += testInitialization(&failed);
     passed += testRuleManagement(&failed);
     passed += testPacketFiltering(&failed);
@@ -971,7 +990,6 @@ fn runAllTests() void {
     passed += testStateMachine(&failed);
     passed += testIntegration(&failed);
 
-    // Summary
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
     shell.print("|  RESULTS: ");
@@ -1032,7 +1050,7 @@ fn runQuickTest() void {
     const test_result = firewall.filterInbound(
         net_driver.ipToU32(192, 168, 1, 100),
         net_driver.ipToU32(10, 0, 2, 15),
-        6, // TCP
+        6,
         12345,
         80,
         null,
@@ -1052,6 +1070,14 @@ fn runQuickTest() void {
         ok = false;
     }
 
+    shell.print("  NetCap initialized:       ");
+    if (net_capability.isInitialized()) {
+        shell.printSuccessLine("PASS");
+    } else {
+        shell.printErrorLine("FAIL");
+        ok = false;
+    }
+
     shell.newLine();
     shell.print("  Quick Test Result: ");
     if (ok) {
@@ -1065,7 +1091,7 @@ fn runQuickTest() void {
 }
 
 // =============================================================================
-// Test Category 1: Initialization
+// Test Categories
 // =============================================================================
 
 fn testInitialization(failed: *u32) u32 {
@@ -1084,17 +1110,12 @@ fn testInitialization(failed: *u32) u32 {
     return passed;
 }
 
-// =============================================================================
-// Test Category 2: Rule Management
-// =============================================================================
-
 fn testRuleManagement(failed: *u32) u32 {
     helpers.printTestCategory(2, 9, "Rule Management");
     var passed: u32 = 0;
 
     const initial_count = firewall.getRuleCount();
 
-    // Test add rule
     const test_rule = firewall.Rule{
         .id = 999,
         .priority = 500,
@@ -1121,19 +1142,16 @@ fn testRuleManagement(failed: *u32) u32 {
     passed += helpers.doTest("Add rule", added, failed);
     passed += helpers.doTest("Rule count increased", firewall.getRuleCount() == initial_count + 1, failed);
 
-    // Test enable/disable
     const toggled = firewall.enableRule(999, false);
     passed += helpers.doTest("Disable rule", toggled, failed);
 
     const re_enabled = firewall.enableRule(999, true);
     passed += helpers.doTest("Re-enable rule", re_enabled, failed);
 
-    // Test remove rule
     const removed = firewall.removeRule(999);
     passed += helpers.doTest("Remove rule", removed, failed);
     passed += helpers.doTest("Rule count restored", firewall.getRuleCount() == initial_count, failed);
 
-    // Test get rule
     const rule0 = firewall.getRule(0);
     passed += helpers.doTest("Get rule by index", rule0 != null, failed);
 
@@ -1142,10 +1160,6 @@ fn testRuleManagement(failed: *u32) u32 {
 
     return passed;
 }
-
-// =============================================================================
-// Test Category 3: Packet Filtering
-// =============================================================================
 
 fn testPacketFiltering(failed: *u32) u32 {
     helpers.printTestCategory(3, 9, "Packet Filtering");
@@ -1156,19 +1170,15 @@ fn testPacketFiltering(failed: *u32) u32 {
     const qemu_gw = net_driver.ipToU32(10, 0, 2, 2);
     const local_ip = net_driver.ipToU32(10, 0, 2, 15);
 
-    // Test 1: Loopback should be allowed
     const lo_result = firewall.filterInbound(lo_ip, lo_ip, 6, 1234, 5678, null);
     passed += helpers.doTest("Loopback allowed", lo_result.action == .allow, failed);
 
-    // Test 2: QEMU gateway should be allowed
     const qemu_result = firewall.filterInbound(qemu_gw, local_ip, 17, 53, 12345, null);
     passed += helpers.doTest("QEMU gateway allowed", qemu_result.action == .allow, failed);
 
-    // Test 3: External inbound should be dropped (default deny)
     const external_result = firewall.filterInbound(external_ip, local_ip, 6, 54321, 80, null);
     passed += helpers.doTest("External blocked", external_result.action == .drop, failed);
 
-    // Test 4: ICMP should be blocked if configured
     if (firewall.config.block_icmp) {
         const icmp_result = firewall.filterInbound(external_ip, local_ip, 1, 0, 0, null);
         passed += helpers.doTest("ICMP blocked", icmp_result.action == .drop, failed);
@@ -1176,18 +1186,15 @@ fn testPacketFiltering(failed: *u32) u32 {
         helpers.doSkip("ICMP blocked");
     }
 
-    // Test 5: Outbound should be allowed
     const out_result = firewall.filterOutbound(local_ip, external_ip, 6, 54321, 443);
     passed += helpers.doTest("Outbound allowed", out_result.action == .allow, failed);
 
-    // Test 6: Protocol matching
     const tcp_result = firewall.filterInbound(lo_ip, lo_ip, 6, 1234, 5678, null);
     passed += helpers.doTest("TCP protocol OK", tcp_result.action == .allow, failed);
 
     const udp_result = firewall.filterInbound(lo_ip, lo_ip, 17, 1234, 5678, null);
     passed += helpers.doTest("UDP protocol OK", udp_result.action == .allow, failed);
 
-    // Test 7: Stats updated
     const stats_before = firewall.getStats();
     _ = firewall.filterInbound(lo_ip, lo_ip, 6, 1234, 5678, null);
     const stats_after = firewall.getStats();
@@ -1196,10 +1203,6 @@ fn testPacketFiltering(failed: *u32) u32 {
     return passed;
 }
 
-// =============================================================================
-// Test Category 4: Blacklist System
-// =============================================================================
-
 fn testBlacklistSystem(failed: *u32) u32 {
     helpers.printTestCategory(4, 9, "Blacklist System");
     var passed: u32 = 0;
@@ -1207,50 +1210,37 @@ fn testBlacklistSystem(failed: *u32) u32 {
     const test_ip = net_driver.ipToU32(192, 168, 99, 99);
     const local_ip = net_driver.ipToU32(10, 0, 2, 15);
 
-    // Test 1: Add to blacklist
     const added = firewall.addToBlacklist(test_ip, 60, "Test");
     passed += helpers.doTest("Add to blacklist", added, failed);
 
-    // Test 2: Check if blacklisted
     const is_blocked = firewall.isBlacklisted(test_ip);
     passed += helpers.doTest("IP is blacklisted", is_blocked, failed);
 
-    // Test 3: Blacklisted packet dropped
     const filter_result = firewall.filterInbound(test_ip, local_ip, 6, 12345, 80, null);
     passed += helpers.doTest("Blacklisted dropped", filter_result.action == .drop, failed);
 
-    // Test 4: Stats updated
-    const stats = firewall.getStats();
-    passed += helpers.doTest("Blacklist stats", stats.blocked_blacklist > 0, failed);
+    const fw_stats = firewall.getStats();
+    passed += helpers.doTest("Blacklist stats", fw_stats.blocked_blacklist > 0, failed);
 
-    // Test 5: Remove from blacklist
     const removed = firewall.removeFromBlacklist(test_ip);
     passed += helpers.doTest("Remove from blacklist", removed, failed);
 
-    // Test 6: No longer blacklisted
     const still_blocked = firewall.isBlacklisted(test_ip);
     passed += helpers.doTest("IP not blacklisted", !still_blocked, failed);
 
-    // Test 7: Get blacklist count
     const count = firewall.getBlacklistCount();
     passed += helpers.doTest("Blacklist count OK", count >= 0, failed);
 
-    // Test 8: Double-add updates entry
     _ = firewall.addToBlacklist(test_ip, 60, "Test");
     const count2 = firewall.getBlacklistCount();
     _ = firewall.addToBlacklist(test_ip, 120, "Test2");
     const count3 = firewall.getBlacklistCount();
     passed += helpers.doTest("Double-add updates", count2 == count3, failed);
 
-    // Cleanup
     _ = firewall.removeFromBlacklist(test_ip);
 
     return passed;
 }
-
-// =============================================================================
-// Test Category 5: Rate Limiting
-// =============================================================================
 
 fn testRateLimiting(failed: *u32) u32 {
     helpers.printTestCategory(5, 9, "Rate Limiting");
@@ -1275,16 +1265,12 @@ fn testRateLimiting(failed: *u32) u32 {
     passed += helpers.doTest("Blacklist threshold", firewall.config.blacklist_threshold > 0, failed);
     passed += helpers.doTest("Duration configured", firewall.config.blacklist_duration_sec > 0, failed);
 
-    const stats = firewall.getStats();
-    passed += helpers.doTest("Stats tracking", stats.blocked_rate_limit >= 0, failed);
-    passed += helpers.doTest("SYN flood stats", stats.blocked_syn_flood >= 0, failed);
+    const fw_stats = firewall.getStats();
+    passed += helpers.doTest("Stats tracking", fw_stats.blocked_rate_limit >= 0, failed);
+    passed += helpers.doTest("SYN flood stats", fw_stats.blocked_syn_flood >= 0, failed);
 
     return passed;
 }
-
-// =============================================================================
-// Test Category 6: Port Scan Detection
-// =============================================================================
 
 fn testPortScanDetection(failed: *u32) u32 {
     helpers.printTestCategory(6, 9, "Port Scan Detection");
@@ -1292,7 +1278,6 @@ fn testPortScanDetection(failed: *u32) u32 {
 
     const scanner_ip = net_driver.ipToU32(192, 168, 77, 77);
 
-    // Test port scan detection
     var detected = false;
     var port: u16 = 1000;
     while (port < 1015) : (port += 1) {
@@ -1305,8 +1290,8 @@ fn testPortScanDetection(failed: *u32) u32 {
     if (detected) {
         passed += helpers.doTest("Scan detected", true, failed);
 
-        const stats = firewall.getStats();
-        passed += helpers.doTest("Stats updated", stats.blocked_port_scan > 0, failed);
+        const fw_stats = firewall.getStats();
+        passed += helpers.doTest("Stats updated", fw_stats.blocked_port_scan > 0, failed);
 
         if (firewall.config.auto_blacklist) {
             passed += helpers.doTest("Auto-blacklisted", firewall.isBlacklisted(scanner_ip), failed);
@@ -1328,10 +1313,6 @@ fn testPortScanDetection(failed: *u32) u32 {
     return passed;
 }
 
-// =============================================================================
-// Test Category 7: Connection Tracking
-// =============================================================================
-
 fn testConnectionTracking(failed: *u32) u32 {
     helpers.printTestCategory(7, 9, "Connection Tracking");
     var passed: u32 = 0;
@@ -1339,33 +1320,23 @@ fn testConnectionTracking(failed: *u32) u32 {
     const local_ip = net_driver.ipToU32(10, 0, 2, 15);
     const remote_ip = net_driver.ipToU32(8, 8, 8, 8);
 
-    // Test outbound creates tracking
     _ = firewall.filterOutbound(local_ip, remote_ip, 6, 54321, 443);
     passed += helpers.doTest("Outbound tracked", true, failed);
 
-    // Test established connection allowed
     const inbound = firewall.filterInbound(remote_ip, local_ip, 6, 443, 54321, null);
     passed += helpers.doTest("Established allowed", inbound.action == .allow, failed);
 
-    // Test connection stats
-    const stats = firewall.getStats();
-    passed += helpers.doTest("Connection count", stats.connections_total > 0, failed);
-    passed += helpers.doTest("Active tracking", stats.connections_active >= 0, failed);
+    const fw_stats = firewall.getStats();
+    passed += helpers.doTest("Connection count", fw_stats.connections_total > 0, failed);
+    passed += helpers.doTest("Active tracking", fw_stats.connections_active >= 0, failed);
 
-    // Test max connections
     passed += helpers.doTest("Max conns config", firewall.config.max_connections_per_ip > 0, failed);
-
-    // Test connection states
     passed += helpers.doTest("State tracking", true, failed);
     passed += helpers.doTest("Cleanup support", true, failed);
     passed += helpers.doTest("Per-IP tracking", true, failed);
 
     return passed;
 }
-
-// =============================================================================
-// Test Category 8: State Machine
-// =============================================================================
 
 fn testStateMachine(failed: *u32) u32 {
     helpers.printTestCategory(8, 9, "State Machine");
@@ -1374,7 +1345,6 @@ fn testStateMachine(failed: *u32) u32 {
     const original_state = firewall.state;
     const original_stealth = firewall.config.stealth_mode;
 
-    // Test state transitions
     firewall.setState(.disabled);
     passed += helpers.doTest("Set disabled", firewall.state == .disabled, failed);
 
@@ -1387,7 +1357,6 @@ fn testStateMachine(failed: *u32) u32 {
     firewall.setState(.lockdown);
     passed += helpers.doTest("Set lockdown", firewall.state == .lockdown, failed);
 
-    // Test disabled state allows all
     firewall.setState(.disabled);
     const disabled_result = firewall.filterInbound(
         net_driver.ipToU32(1, 2, 3, 4),
@@ -1399,7 +1368,6 @@ fn testStateMachine(failed: *u32) u32 {
     );
     passed += helpers.doTest("Disabled allows", disabled_result.action == .allow, failed);
 
-    // Test lockdown blocks unknown
     firewall.setState(.lockdown);
     const lockdown_result = firewall.filterInbound(
         net_driver.ipToU32(1, 2, 3, 4),
@@ -1411,41 +1379,32 @@ fn testStateMachine(failed: *u32) u32 {
     );
     passed += helpers.doTest("Lockdown blocks", lockdown_result.action == .drop, failed);
 
-    // Test stealth mode toggle
     firewall.setStealthMode(true);
     passed += helpers.doTest("Stealth ON", firewall.config.stealth_mode, failed);
 
     firewall.setStealthMode(false);
     passed += helpers.doTest("Stealth OFF", !firewall.config.stealth_mode, failed);
 
-    // Restore original state
     firewall.setState(original_state);
     firewall.setStealthMode(original_stealth);
 
     return passed;
 }
 
-// =============================================================================
-// Test Category 9: Integration
-// =============================================================================
-
 fn testIntegration(failed: *u32) u32 {
     helpers.printTestCategory(9, 9, "Integration");
     var passed: u32 = 0;
 
-    // Test security coordinator integration
     passed += helpers.doTest("Security init", security.isInitialized(), failed);
 
     const status = security.getStatus();
     passed += helpers.doTest("Status accessible", status.level == security.getSecurityLevel(), failed);
 
-    // Test level changes
     const orig_level = security.getSecurityLevel();
     security.setSecurityLevel(.standard);
     passed += helpers.doTest("Level change", security.getSecurityLevel() == .standard, failed);
     security.setSecurityLevel(orig_level);
 
-    // Test threat logging integration
     const threat_id = threat_log.logThreat(.{
         .threat_type = .port_scan,
         .severity = .high,
@@ -1454,19 +1413,17 @@ fn testIntegration(failed: *u32) u32 {
     });
     passed += helpers.doTest("Threat logging", threat_id > 0, failed);
 
-    // Test blacklist integration
     const bl_added = blacklist.addToBlacklist(net_driver.ipToU32(5, 6, 7, 8), 60, "Integration test");
     passed += helpers.doTest("Blacklist integ", bl_added, failed);
     _ = blacklist.removeFromBlacklist(net_driver.ipToU32(5, 6, 7, 8));
 
-    // Test stats reset
-    const old_stats = firewall.getStats();
-    _ = old_stats;
     firewall.resetStats();
     const new_stats = firewall.getStats();
     passed += helpers.doTest("Stats reset", new_stats.packets_total == 0, failed);
 
-    // Test complete filtering flow
+    // E3.4: Net capability integration
+    passed += helpers.doTest("NetCap initialized", net_capability.isInitialized(), failed);
+
     const test_result = firewall.filterInbound(
         net_driver.ipToU32(10, 0, 2, 2),
         net_driver.ipToU32(10, 0, 2, 15),
@@ -1477,13 +1434,11 @@ fn testIntegration(failed: *u32) u32 {
     );
     passed += helpers.doTest("Complete flow", test_result.rule_id > 0, failed);
 
-    passed += helpers.doTest("All systems OK", true, failed);
-
     return passed;
 }
 
 // =============================================================================
-// Helper Functions
+// Helpers
 // =============================================================================
 
 fn parseIpAddr(s: []const u8) ?u32 {
@@ -1526,7 +1481,6 @@ fn printIpAddr(addr: u32) void {
 fn printIpAddrPadded(addr: u32) void {
     const octets = net_driver.u32ToIp(addr);
 
-    // Print with padding to 15 chars (xxx.xxx.xxx.xxx)
     var buf: [15]u8 = [_]u8{' '} ** 15;
     var pos: usize = 0;
 
@@ -1548,7 +1502,6 @@ fn printIpAddrPadded(addr: u32) void {
         }
     }
 
-    // Fill rest with spaces
     while (pos < 15) : (pos += 1) {
         buf[pos] = ' ';
     }

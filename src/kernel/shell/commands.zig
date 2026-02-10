@@ -1,4 +1,5 @@
 //! Zamrud OS - Shell Commands Main Dispatcher
+//! Phases A-E3.4 Complete
 
 const shell = @import("shell.zig");
 
@@ -22,6 +23,10 @@ const security_cmd = @import("commands/security.zig");
 const smoke_cmd = @import("commands/smoke.zig");
 const disk_cmd = @import("commands/disk.zig");
 const config_cmd = @import("commands/config.zig");
+
+// E3.4: Network Capability - direct kernel import for inline commands
+const net_capability = @import("../security/net_capability.zig");
+const terminal = @import("../drivers/display/terminal.zig");
 
 // =============================================================================
 // Command Execution
@@ -132,6 +137,30 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "trusted")) {
         process_cmd.cmdTrusted(args);
     }
+    // === E3.4: Network Capability Commands ===
+    else if (helpers.strEql(command, "netcap")) {
+        cmdNetcap(args);
+    } else if (helpers.strEql(command, "netprocs")) {
+        cmdNetprocs(args);
+    } else if (helpers.strEql(command, "netsockets")) {
+        cmdNetsockets(args);
+    } else if (helpers.strEql(command, "netallow")) {
+        cmdNetallow(args);
+    } else if (helpers.strEql(command, "netdeny")) {
+        cmdNetdeny(args);
+    } else if (helpers.strEql(command, "netrevoke")) {
+        cmdNetrevoke(args);
+    } else if (helpers.strEql(command, "netrestrict")) {
+        cmdNetrestrict(args);
+    } else if (helpers.strEql(command, "netreset")) {
+        cmdNetreset(args);
+    } else if (helpers.strEql(command, "netviolations")) {
+        cmdNetviolations(args);
+    } else if (helpers.strEql(command, "netreg")) {
+        cmdNetreg(args);
+    } else if (helpers.strEql(command, "nettest")) {
+        cmdNettest(args);
+    }
     // Crypto command
     else if (helpers.strEql(command, "crypto")) {
         crypto_cmd.execute(args);
@@ -161,7 +190,7 @@ pub fn execute(input: []const u8) void {
         network_cmd.cmdNetstat(args);
     } else if (helpers.strEql(command, "arp")) {
         network_cmd.cmdArp(args);
-    } else if (helpers.strEql(command, "nettest")) {
+    } else if (helpers.strEql(command, "ntest")) {
         network_cmd.runTest("all");
     }
     // P2P commands
@@ -229,6 +258,396 @@ pub fn execute(input: []const u8) void {
         shell.newLine();
         shell.println("  Type 'help' for available commands");
     }
+}
+
+// =============================================================================
+// E3.4: Network Capability Commands (inline)
+// =============================================================================
+
+/// netcap — show network capability status
+fn cmdNetcap(_: []const u8) void {
+    if (!net_capability.isInitialized()) {
+        shell.println("  Network capability not initialized");
+        return;
+    }
+
+    shell.println("");
+    shell.println("  === NETWORK CAPABILITY STATUS (E3.4) ===");
+    shell.println("  ─────────────────────────────────────────");
+
+    const s = net_capability.getStats();
+
+    shell.print("  Registered processes: ");
+    helpers.printDec(net_capability.getProcessCount());
+    shell.newLine();
+
+    shell.print("  Active sockets:       ");
+    helpers.printDec(net_capability.getActiveSocketCount());
+    shell.newLine();
+
+    shell.print("  Per-process rules:    ");
+    helpers.printDec(net_capability.getNetRuleCount());
+    shell.newLine();
+
+    shell.println("  ─────────────────────────────────────────");
+
+    shell.print("  Checks total:     ");
+    helpers.printDec64(s.checks_total);
+    shell.newLine();
+
+    shell.print("  Checks allowed:   ");
+    helpers.printDec64(s.checks_allowed);
+    shell.newLine();
+
+    shell.print("  Checks blocked:   ");
+    helpers.printDec64(s.checks_blocked);
+    shell.newLine();
+
+    shell.print("  Violations total: ");
+    helpers.printDec64(s.violations_total);
+    shell.newLine();
+
+    shell.print("  Processes killed: ");
+    helpers.printDec64(s.processes_killed);
+    shell.newLine();
+
+    shell.print("  Sockets created:  ");
+    helpers.printDec64(s.sockets_created);
+    shell.newLine();
+
+    shell.print("  Sockets closed:   ");
+    helpers.printDec64(s.sockets_closed);
+    shell.newLine();
+
+    shell.println("  ─────────────────────────────────────────");
+    shell.println("");
+}
+
+/// netprocs — show per-process network table
+fn cmdNetprocs(_: []const u8) void {
+    if (!net_capability.isInitialized()) {
+        shell.println("  Network capability not initialized");
+        return;
+    }
+
+    shell.println("");
+    shell.println("  === NET-CAP PROCESS TABLE ===");
+    shell.println("  PID  NET  MODE        SOCKS  VIOLS  STATUS");
+    shell.println("  ───  ───  ──────────  ─────  ─────  ──────");
+
+    // Use serial print since it has the table display
+    net_capability.printProcessTable();
+
+    shell.println("  (See serial output for detailed table)");
+    shell.println("");
+}
+
+/// netsockets — show socket ownership
+fn cmdNetsockets(_: []const u8) void {
+    if (!net_capability.isInitialized()) {
+        shell.println("  Network capability not initialized");
+        return;
+    }
+
+    shell.println("");
+    shell.println("  === SOCKET OWNERSHIP ===");
+
+    var count: usize = 0;
+    while (count < 32) : (count += 1) {
+        if (net_capability.getSocketOwnerEntry(count)) |o| {
+            shell.print("  sock[");
+            helpers.printDec(o.socket_idx);
+            shell.print("] pid=");
+            helpers.printDec(o.pid);
+            shell.print(" type=");
+            shell.print(switch (o.sock_type) {
+                0 => "TCP",
+                1 => "UDP",
+                2 => "RAW",
+                else => "???",
+            });
+            shell.print(" port=");
+            helpers.printDec(o.local_port);
+            shell.newLine();
+        } else break;
+    }
+
+    if (count == 0) {
+        shell.println("  (no active sockets)");
+    }
+    shell.println("");
+}
+
+/// netreg <pid> [caps] — register process for net capability tracking
+fn cmdNetreg(args: []const u8) void {
+    if (args.len == 0) {
+        shell.println("  Usage: netreg <pid> [caps_hex]");
+        shell.println("  Example: netreg 5 0008    (register pid 5 with CAP_NET)");
+        shell.println("  Example: netreg 10 0000   (register pid 10, no net)");
+        return;
+    }
+
+    // Parse PID
+    const parsed = helpers.parseArgs(args);
+    const pid = helpers.parseDec16(parsed.cmd) orelse {
+        shell.println("  Invalid PID");
+        return;
+    };
+
+    // Parse optional caps
+    var caps: u32 = 0;
+    if (parsed.rest.len > 0) {
+        caps = helpers.parseHex32(parsed.rest) orelse 0;
+    }
+
+    if (net_capability.registerProcess(pid, caps)) {
+        shell.print("  Registered pid=");
+        helpers.printDec(pid);
+        shell.print(" caps=0x");
+        helpers.printHex32(caps);
+        shell.print(" cap_net=");
+        shell.println(if ((caps & 0x0008) != 0) "YES" else "NO");
+    } else {
+        shell.println("  Failed: table full");
+    }
+}
+
+/// netallow <pid> — grant CAP_NET to process
+fn cmdNetallow(args: []const u8) void {
+    if (args.len == 0) {
+        shell.println("  Usage: netallow <pid>");
+        return;
+    }
+
+    const pid = helpers.parseDec16(args) orelse {
+        shell.println("  Invalid PID");
+        return;
+    };
+
+    if (net_capability.grantNetCapability(pid)) {
+        shell.print("  Granted CAP_NET to pid ");
+        helpers.printDec(pid);
+        shell.newLine();
+    } else {
+        shell.println("  Failed: register process first (netreg <pid>)");
+    }
+}
+
+/// netdeny <pid> — set deny_all mode (block ALL network)
+fn cmdNetdeny(args: []const u8) void {
+    if (args.len == 0) {
+        shell.println("  Usage: netdeny <pid>");
+        return;
+    }
+
+    const pid = helpers.parseDec16(args) orelse {
+        shell.println("  Invalid PID");
+        return;
+    };
+
+    if (net_capability.setNetMode(pid, .deny_all)) {
+        shell.print("  Set DENY_ALL for pid ");
+        helpers.printDec(pid);
+        shell.println(" — all network blocked");
+    } else {
+        shell.println("  Failed: process not registered");
+    }
+}
+
+/// netrevoke <pid> — revoke CAP_NET + close all sockets
+fn cmdNetrevoke(args: []const u8) void {
+    if (args.len == 0) {
+        shell.println("  Usage: netrevoke <pid>");
+        return;
+    }
+
+    const pid = helpers.parseDec16(args) orelse {
+        shell.println("  Invalid PID");
+        return;
+    };
+
+    if (net_capability.revokeNetCapability(pid)) {
+        shell.print("  Revoked CAP_NET for pid ");
+        helpers.printDec(pid);
+        shell.println(" — sockets closed");
+    } else {
+        shell.println("  Failed: process not registered");
+    }
+}
+
+/// netrestrict <pid> — set restricted mode (only allowed IPs/ports)
+fn cmdNetrestrict(args: []const u8) void {
+    if (args.len == 0) {
+        shell.println("  Usage: netrestrict <pid>");
+        shell.println("  Then use addip/addport to configure allowlist");
+        return;
+    }
+
+    const pid = helpers.parseDec16(args) orelse {
+        shell.println("  Invalid PID");
+        return;
+    };
+
+    if (net_capability.setNetMode(pid, .restricted)) {
+        shell.print("  Set RESTRICTED mode for pid ");
+        helpers.printDec(pid);
+        shell.newLine();
+    } else {
+        shell.println("  Failed: process not registered");
+    }
+}
+
+/// netreset <pid> — reset violations and un-kill process
+fn cmdNetreset(args: []const u8) void {
+    if (args.len == 0) {
+        shell.println("  Usage: netreset <pid>");
+        return;
+    }
+
+    const pid = helpers.parseDec16(args) orelse {
+        shell.println("  Invalid PID");
+        return;
+    };
+
+    net_capability.resetViolations(pid);
+    shell.print("  Reset violations for pid ");
+    helpers.printDec(pid);
+    shell.newLine();
+}
+
+/// netviolations — show all violation stats
+fn cmdNetviolations(_: []const u8) void {
+    if (!net_capability.isInitialized()) {
+        shell.println("  Network capability not initialized");
+        return;
+    }
+
+    shell.println("");
+    shell.println("  === NETWORK VIOLATION REPORT ===");
+    shell.println("  ────────────────────────────────");
+
+    const s = net_capability.getStats();
+
+    shell.print("  Total checks:     ");
+    helpers.printDec64(s.checks_total);
+    shell.newLine();
+
+    shell.print("  Blocked:          ");
+    helpers.printDec64(s.checks_blocked);
+    shell.newLine();
+
+    shell.print("  Violations:       ");
+    helpers.printDec64(s.violations_total);
+    shell.newLine();
+
+    shell.print("  Processes killed: ");
+    helpers.printDec64(s.processes_killed);
+    shell.newLine();
+
+    shell.println("  ────────────────────────────────");
+
+    // Show per-process detail via serial
+    net_capability.printProcessTable();
+    shell.println("  (Detailed table on serial)");
+    shell.println("");
+}
+
+/// nettest — run E3.4 test suite (simple format like other tests)
+fn cmdNettest(_: []const u8) void {
+    if (!net_capability.isInitialized()) {
+        shell.println("  Network capability not initialized");
+        return;
+    }
+
+    helpers.printTestHeader("E3.4 NETWORK CAPABILITY");
+
+    var passed: u32 = 0;
+    var failed: u32 = 0;
+
+    // Test 1
+    passed += helpers.doTest("NetCap initialized", net_capability.isInitialized(), &failed);
+
+    // Test 2
+    passed += helpers.doTest("Register pid=100 +NET", net_capability.registerProcess(100, 0x0008), &failed);
+
+    // Test 3
+    passed += helpers.doTest("Register pid=200 noNET", net_capability.registerProcess(200, 0x0000), &failed);
+
+    // Test 4
+    const r4 = net_capability.checkCreate(0);
+    passed += helpers.doTest("Kernel create allowed", r4.action == .allowed, &failed);
+
+    // Test 5
+    const r5 = net_capability.checkCreate(100);
+    passed += helpers.doTest("pid=100 create OK", r5.action == .allowed, &failed);
+
+    // Test 6
+    const r6 = net_capability.checkCreate(200);
+    passed += helpers.doTest("pid=200 create BLOCKED", r6.action == .blocked_no_cap, &failed);
+
+    // Test 7
+    _ = net_capability.registerSocket(0, 100, 1, 8080);
+    const owner7 = net_capability.getSocketOwner(0);
+    passed += helpers.doTest("Socket ownership", owner7 != null and owner7.? == 100, &failed);
+
+    // Test 8
+    const r8 = net_capability.checkBind(100, 0, 8080);
+    passed += helpers.doTest("pid=100 bind OK", r8.action == .allowed, &failed);
+
+    // Test 9
+    const r9 = net_capability.checkBind(200, 0, 8080);
+    passed += helpers.doTest("pid=200 bind BLOCKED", r9.action == .blocked_no_cap, &failed);
+
+    // Test 10
+    const r10 = net_capability.checkConnect(100, 0x0A000203, 53);
+    passed += helpers.doTest("pid=100 connect OK", r10.action == .allowed, &failed);
+
+    // Test 11
+    const r11 = net_capability.checkConnect(200, 0x0A000203, 53);
+    passed += helpers.doTest("pid=200 connect BLOCK", r11.action == .blocked_no_cap, &failed);
+
+    // Test 12
+    const r12 = net_capability.checkSend(100);
+    passed += helpers.doTest("pid=100 send OK", r12.action == .allowed, &failed);
+
+    // Test 13
+    const r13 = net_capability.checkSend(200);
+    passed += helpers.doTest("pid=200 send BLOCKED", r13.action != .allowed, &failed);
+
+    // Test 14
+    passed += helpers.doTest("pid=200 violations>=3", net_capability.getViolations(200) >= 3, &failed);
+
+    // Test 15
+    passed += helpers.doTest("pid=200 auto-killed", net_capability.isKilled(200), &failed);
+
+    // Test 16
+    _ = net_capability.registerProcess(300, 0x0008);
+    const set_ok = net_capability.setNetMode(300, .restricted);
+    const add_ok = net_capability.addAllowedIP(300, 0x01020304);
+    passed += helpers.doTest("Restricted mode setup", set_ok and add_ok, &failed);
+
+    // Test 17
+    const r17 = net_capability.checkConnect(300, 0x01020304, 80);
+    passed += helpers.doTest("Allowed IP connect OK", r17.action == .allowed, &failed);
+
+    // Test 18
+    const r18 = net_capability.checkConnect(300, 0x05060708, 80);
+    passed += helpers.doTest("Bad IP BLOCKED", r18.action == .blocked_restricted, &failed);
+
+    // Test 19
+    const revoked = net_capability.revokeNetCapability(100);
+    passed += helpers.doTest("Revoke CAP_NET", revoked and !net_capability.hasNetCapability(100), &failed);
+
+    // Test 20
+    const r20 = net_capability.checkCreate(100);
+    passed += helpers.doTest("After revoke BLOCKED", r20.action == .blocked_no_cap, &failed);
+
+    // Cleanup
+    net_capability.unregisterProcess(100);
+    net_capability.unregisterProcess(200);
+    net_capability.unregisterProcess(300);
+
+    helpers.printTestResults(passed, failed);
 }
 
 // =============================================================================
@@ -303,6 +722,11 @@ fn runAllTests() void {
     // 12. Binary verification tests (E3.3)
     shell.printInfoLine("=== BINARY VERIFY TESTS (E3.3) ===");
     process_cmd.cmdVerifyBin("test");
+    shell.newLine();
+
+    // 13. Network capability tests (E3.4)
+    shell.printInfoLine("=== NETWORK CAPABILITY TESTS (E3.4) ===");
+    cmdNettest("");
     shell.newLine();
 
     // Final summary
