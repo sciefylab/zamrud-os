@@ -122,6 +122,16 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "sandbox-fs")) {
         process_cmd.cmdSandboxFs(args);
     }
+    // === E3.3: Binary Verification Commands ===
+    else if (helpers.strEql(command, "verify")) {
+        process_cmd.cmdVerifyBin(args);
+    } else if (helpers.strEql(command, "trust")) {
+        process_cmd.cmdTrust(args);
+    } else if (helpers.strEql(command, "untrust")) {
+        process_cmd.cmdUntrust(args);
+    } else if (helpers.strEql(command, "trusted")) {
+        process_cmd.cmdTrusted(args);
+    }
     // Crypto command
     else if (helpers.strEql(command, "crypto")) {
         crypto_cmd.execute(args);
@@ -282,7 +292,17 @@ fn runAllTests() void {
 
     // 10. Capability tests (E3.1)
     shell.printInfoLine("=== CAPABILITY TESTS (E3.1) ===");
-    runCapabilityTests();
+    process_cmd.cmdCaps("test");
+    shell.newLine();
+
+    // 11. Unveil tests (E3.2)
+    shell.printInfoLine("=== UNVEIL TESTS (E3.2) ===");
+    process_cmd.cmdUnveil("test");
+    shell.newLine();
+
+    // 12. Binary verification tests (E3.3)
+    shell.printInfoLine("=== BINARY VERIFY TESTS (E3.3) ===");
+    process_cmd.cmdVerifyBin("test");
     shell.newLine();
 
     // Final summary
@@ -290,96 +310,4 @@ fn runAllTests() void {
     shell.printInfoLine("##  COMPLETE TEST SUITE FINISHED      ##");
     shell.printInfoLine("########################################");
     shell.newLine();
-}
-
-// =============================================================================
-// E3.1: Capability Inline Tests
-// =============================================================================
-
-fn runCapabilityTests() void {
-    const capability = @import("../security/capability.zig");
-
-    // Test 1: System initialized
-    shell.print("  Cap system init:    ");
-    if (capability.isInitialized()) {
-        shell.printSuccessLine("PASS");
-    } else {
-        shell.printErrorLine("FAIL");
-    }
-
-    // Test 2: PID 0 has ALL
-    shell.print("  PID 0 = ALL caps:   ");
-    if (capability.getCaps(0) == capability.CAP_ALL) {
-        shell.printSuccessLine("PASS");
-    } else {
-        shell.printErrorLine("FAIL");
-    }
-
-    // Test 3: PID 0 check always passes
-    shell.print("  PID 0 check pass:   ");
-    if (capability.check(0, capability.CAP_NET) and capability.check(0, capability.CAP_ADMIN)) {
-        shell.printSuccessLine("PASS");
-    } else {
-        shell.printErrorLine("FAIL");
-    }
-
-    // Test 4: Register + check
-    shell.print("  Register+check:     ");
-    const test_pid: u32 = 99;
-    _ = capability.registerProcess(test_pid, capability.CAP_FS_READ | capability.CAP_IPC);
-
-    const has_read = capability.check(test_pid, capability.CAP_FS_READ);
-    const has_ipc = capability.check(test_pid, capability.CAP_IPC);
-    const no_net = !capability.check(test_pid, capability.CAP_NET);
-    const no_admin = !capability.check(test_pid, capability.CAP_ADMIN);
-
-    if (has_read and has_ipc and no_net and no_admin) {
-        shell.printSuccessLine("PASS");
-    } else {
-        shell.printErrorLine("FAIL");
-    }
-
-    // Test 5: Grant
-    shell.print("  Grant cap:          ");
-    _ = capability.grantCap(test_pid, capability.CAP_NET);
-    if (capability.check(test_pid, capability.CAP_NET)) {
-        shell.printSuccessLine("PASS");
-    } else {
-        shell.printErrorLine("FAIL");
-    }
-
-    // Test 6: Revoke
-    shell.print("  Revoke cap:         ");
-    _ = capability.revokeCap(test_pid, capability.CAP_NET);
-    if (!capability.check(test_pid, capability.CAP_NET)) {
-        shell.printSuccessLine("PASS");
-    } else {
-        shell.printErrorLine("FAIL");
-    }
-
-    // Test 7: formatCaps
-    shell.print("  Format caps:        ");
-    var buf: [64]u8 = undefined;
-    const len = capability.formatCaps(capability.CAP_FS_READ | capability.CAP_IPC, &buf);
-    if (len > 0) {
-        shell.printSuccessLine("PASS");
-    } else {
-        shell.printErrorLine("FAIL");
-    }
-
-    // Test 8: Violations initially 0
-    shell.print("  Zero violations:    ");
-    const pre_count = capability.getTotalViolations();
-    // Record a test violation
-    capability.recordViolationPublic(test_pid, capability.CAP_ADMIN, 999, 12345);
-    if (capability.getTotalViolations() == pre_count + 1) {
-        shell.printSuccessLine("PASS");
-    } else {
-        shell.printErrorLine("FAIL");
-    }
-
-    // Cleanup
-    capability.unregisterProcess(test_pid);
-
-    shell.printInfoLine("  Capability tests complete");
 }

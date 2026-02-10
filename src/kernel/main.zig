@@ -55,6 +55,9 @@ const capability = @import("security/capability.zig");
 // E3.2: Filesystem Sandbox
 const unveil = @import("security/unveil.zig");
 
+// E3.3: Binary Verification
+const binaryverify = @import("security/binaryverify.zig");
+
 // ============================================================================
 // Limine Requests
 // ============================================================================
@@ -149,6 +152,10 @@ export fn kernel_main() noreturn {
     // E3.2: Filesystem sandbox
     unveil.init();
     serial.writeString("[OK]   Unveil sandbox ready (E3.2)\n");
+
+    // E3.3: Binary verification
+    binaryverify.init();
+    serial.writeString("[OK]   Binary verify ready (E3.3)\n");
 
     crypto.init();
     serial.writeString("[OK]   Crypto ready\n");
@@ -344,6 +351,15 @@ fn printSystemSummary() void {
     serial.writeString(if (capability.isInitialized()) "ACTIVE\n" else "NO\n");
     serial.writeString("  Unveil(E3.2):");
     serial.writeString(if (unveil.isInitialized()) "ACTIVE\n" else "NO\n");
+    serial.writeString("  BinVerify:  ");
+    if (binaryverify.isInitialized()) {
+        serial.writeString(if (binaryverify.isEnforcing()) "ENFORCING" else "WARN");
+        serial.writeString(" (");
+        printDecSerial(binaryverify.getTrustCount());
+        serial.writeString(" trusted)\n");
+    } else {
+        serial.writeString("NO\n");
+    }
     serial.writeString("  Storage:    ");
     serial.writeString(if (storage.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  FAT32:      ");

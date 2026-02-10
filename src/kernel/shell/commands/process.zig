@@ -1,5 +1,6 @@
-//! Zamrud OS - Process Commands (E3.1 + E3.2)
-//! ps, spawn, kill, sched, caps, grant, revoke, unveil, paths, sandbox-fs
+//! Zamrud OS - Process Commands (E3.1 + E3.2 + E3.3)
+//! ps, spawn, kill, sched, caps, grant, revoke, unveil, paths,
+//! sandbox-fs, verify, trust, untrust, trusted
 
 const shell = @import("../shell.zig");
 const helpers = @import("helpers.zig");
@@ -8,6 +9,8 @@ const scheduler = @import("../../proc/scheduler.zig");
 const test_procs = @import("../../proc/test_procs.zig");
 const capability = @import("../../security/capability.zig");
 const unveil = @import("../../security/unveil.zig");
+const binaryverify = @import("../../security/binaryverify.zig");
+const hash_mod = @import("../../crypto/hash.zig");
 
 // =============================================================================
 // Process Commands
@@ -431,11 +434,14 @@ pub fn cmdViolations(_: []const u8) void {
     shell.print("  Unveil violations: ");
     helpers.printU64(unveil.getViolationCount());
     shell.newLine();
+    shell.print("  Bin blocked:       ");
+    helpers.printU64(binaryverify.getBlockCount());
+    shell.newLine();
     shell.print("  Kill threshold:    ");
     helpers.printU32(@as(u32, capability.KILL_THRESHOLD));
     shell.println(" violations");
 
-    if (capability.getTotalViolations() == 0 and unveil.getViolationCount() == 0) {
+    if (capability.getTotalViolations() == 0 and unveil.getViolationCount() == 0 and binaryverify.getBlockCount() == 0) {
         shell.newLine();
         shell.printSuccessLine("  No violations recorded. System clean.");
         return;
@@ -672,6 +678,171 @@ pub fn cmdSandboxFs(args: []const u8) void {
 }
 
 // =============================================================================
+// E3.3: Binary Verification Commands
+// =============================================================================
+
+pub fn cmdVerifyBin(args: []const u8) void {
+    const trimmed = helpers.trim(args);
+
+    if (trimmed.len == 0 or helpers.strEql(trimmed, "help")) {
+        shell.printInfoLine("Binary Verification:");
+        shell.println("  verify test           Run verification tests");
+        shell.println("  verify status         Show verification status");
+        shell.println("  verify enforce        Enable enforcement mode");
+        shell.println("  verify warn           Switch to warn mode");
+        shell.println("  trust <name> <data>   Trust a binary by name+data");
+        shell.println("  untrust <name>        Remove from whitelist");
+        shell.println("  trusted               List trusted binaries");
+        return;
+    }
+
+    if (helpers.strEql(trimmed, "test")) {
+        runBinaryVerifyTest();
+        return;
+    }
+
+    if (helpers.strEql(trimmed, "status")) {
+        shell.printInfoLine("Binary Verification Status:");
+        shell.print("  Mode:      ");
+        if (binaryverify.isEnforcing()) {
+            shell.printErrorLine("ENFORCING");
+        } else {
+            shell.printWarningLine("WARN");
+        }
+        shell.print("  Trusted:   ");
+        helpers.printUsize(binaryverify.getTrustCount());
+        shell.newLine();
+        shell.print("  Verified:  ");
+        helpers.printU64(binaryverify.getVerifyCount());
+        shell.newLine();
+        shell.print("  Allowed:   ");
+        helpers.printU64(binaryverify.getAllowCount());
+        shell.newLine();
+        shell.print("  Blocked:   ");
+        helpers.printU64(binaryverify.getBlockCount());
+        shell.newLine();
+        return;
+    }
+
+    if (helpers.strEql(trimmed, "enforce")) {
+        binaryverify.setEnforce(true);
+        shell.printWarningLine("Binary verification: ENFORCING mode");
+        shell.println("  Unsigned binaries will be BLOCKED!");
+        return;
+    }
+
+    if (helpers.strEql(trimmed, "warn")) {
+        binaryverify.setEnforce(false);
+        shell.printSuccessLine("Binary verification: WARN mode");
+        return;
+    }
+
+    shell.printErrorLine("verify: unknown subcommand");
+    shell.println("  Use 'verify help' for usage");
+}
+
+pub fn cmdTrust(args: []const u8) void {
+    const trimmed = helpers.trim(args);
+
+    if (trimmed.len == 0) {
+        shell.printErrorLine("trust: usage: trust <name> [data]");
+        shell.println("  Example: trust myapp hello_world_binary");
+        return;
+    }
+
+    const parsed = helpers.splitFirst(trimmed, ' ');
+    const name = parsed.first;
+    const data = if (parsed.rest.len > 0) parsed.rest else name;
+
+    if (binaryverify.trustBinary(data, name, 0, 0)) {
+        shell.printSuccess("Trusted: ");
+        shell.print(name);
+        shell.print(" hash=");
+
+        var h = binaryverify.computeHash(data);
+        var hex_buf: [64]u8 = undefined;
+        const hex_len = binaryverify.formatHash(&h, &hex_buf);
+        const show_len = @min(hex_len, 16);
+        shell.print(hex_buf[0..show_len]);
+        shell.println("...");
+    } else {
+        shell.printErrorLine("Failed to trust binary (table full?)");
+    }
+}
+
+pub fn cmdUntrust(args: []const u8) void {
+    const trimmed = helpers.trim(args);
+
+    if (trimmed.len == 0) {
+        shell.printErrorLine("untrust: usage: untrust <name>");
+        return;
+    }
+
+    if (binaryverify.untrustByName(trimmed)) {
+        shell.printSuccess("Untrusted: ");
+        shell.println(trimmed);
+    } else {
+        shell.printErrorLine("Not found in trust list");
+    }
+}
+
+pub fn cmdTrusted(args: []const u8) void {
+    _ = args;
+
+    shell.printInfoLine("Trusted Binaries:");
+    shell.print("  Mode: ");
+    if (binaryverify.isEnforcing()) {
+        shell.printErrorLine("ENFORCING");
+    } else {
+        shell.printWarningLine("WARN");
+    }
+
+    const count = binaryverify.getTrustCount();
+    shell.print("  Count: ");
+    helpers.printUsize(count);
+    shell.newLine();
+
+    if (count == 0) {
+        shell.println("  (no trusted binaries)");
+        return;
+    }
+
+    shell.println("");
+    shell.println("  #   NAME                HASH");
+    shell.println("  --  ------------------  --------------------------------");
+
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (binaryverify.getEntry(i)) |entry| {
+            shell.print("  ");
+            helpers.printU32(@as(u32, @intCast(i)));
+            shell.print("   ");
+            shell.print(entry.name);
+
+            // Pad name
+            var pad: usize = if (entry.name.len < 20) 20 - entry.name.len else 1;
+            while (pad > 0) : (pad -= 1) shell.print(" ");
+
+            // Print hash (first 32 chars)
+            var hex_buf: [64]u8 = undefined;
+            const hex_len = binaryverify.formatHash(entry.hash_ptr, &hex_buf);
+            const show = @min(hex_len, 32);
+            shell.print(hex_buf[0..show]);
+            shell.println("...");
+        }
+    }
+
+    shell.println("");
+    shell.print("  Verified: ");
+    helpers.printU64(binaryverify.getVerifyCount());
+    shell.print("  Allowed: ");
+    helpers.printU64(binaryverify.getAllowCount());
+    shell.print("  Blocked: ");
+    helpers.printU64(binaryverify.getBlockCount());
+    shell.newLine();
+}
+
+// =============================================================================
 // E3.1: Capability Test Suite
 // =============================================================================
 
@@ -813,95 +984,183 @@ fn runUnveilTest() void {
     var passed: u32 = 0;
     var failed: u32 = 0;
 
-    // Test 1: System initialized
     passed += helpers.doTest("Unveil system init", unveil.isInitialized(), &failed);
 
-    // Test 2: PID 0 always passes
     const pid0_ok = unveil.checkAccess(0, "/anything", unveil.PERM_ALL);
     passed += helpers.doTest("PID 0 always allowed", pid0_ok, &failed);
 
-    // Test 3: No table = full access
     const no_table_ok = unveil.checkAccess(97, "/secret", unveil.PERM_READ);
     passed += helpers.doTest("No table = full access", no_table_ok, &failed);
 
-    // Test 4: Create table
     const test_pid: u32 = 97;
     const create_ok = unveil.createTable(test_pid);
     passed += helpers.doTest("Create unveil table", create_ok, &failed);
 
-    // Test 5: Empty table = all blocked
     const empty_blocked = !unveil.checkAccess(test_pid, "/home", unveil.PERM_READ);
     passed += helpers.doTest("Empty table = blocked", empty_blocked, &failed);
 
-    // Test 6: Add entry
     const add_ok = unveil.addEntry(test_pid, "/home", unveil.PERM_READ);
     passed += helpers.doTest("Add unveil entry", add_ok, &failed);
 
-    // Test 7: Allowed path passes
     const home_ok = unveil.checkAccess(test_pid, "/home", unveil.PERM_READ);
     passed += helpers.doTest("Allowed path passes", home_ok, &failed);
 
-    // Test 8: Subpath passes
     const sub_ok = unveil.checkAccess(test_pid, "/home/user/file.txt", unveil.PERM_READ);
     passed += helpers.doTest("Subpath passes", sub_ok, &failed);
 
-    // Test 9: Different path blocked
     const other_blocked = !unveil.checkAccess(test_pid, "/etc/passwd", unveil.PERM_READ);
     passed += helpers.doTest("Other path blocked", other_blocked, &failed);
 
-    // Test 10: Wrong permission blocked
     const write_blocked = !unveil.checkAccess(test_pid, "/home", unveil.PERM_WRITE);
     passed += helpers.doTest("Wrong perm blocked", write_blocked, &failed);
 
-    // Test 11: Add write permission
     _ = unveil.addEntry(test_pid, "/tmp", unveil.PERM_RW);
     const tmp_rw = unveil.checkAccess(test_pid, "/tmp/data", unveil.PERM_WRITE);
     passed += helpers.doTest("RW entry works", tmp_rw, &failed);
 
-    // Test 12: Root entry matches all
     const test_pid2: u32 = 96;
     _ = unveil.createTable(test_pid2);
     _ = unveil.addEntry(test_pid2, "/", unveil.PERM_READ);
     const root_match = unveil.checkAccess(test_pid2, "/any/deep/path", unveil.PERM_READ);
     passed += helpers.doTest("Root entry = match all", root_match, &failed);
 
-    // Test 13: Lock table
     const lock_ok = unveil.lock(test_pid);
     passed += helpers.doTest("Lock table", lock_ok, &failed);
 
-    // Test 14: Locked table rejects add
     const add_after_lock = !unveil.addEntry(test_pid, "/new", unveil.PERM_READ);
     passed += helpers.doTest("Locked rejects add", add_after_lock, &failed);
 
-    // Test 15: formatPerms
     var pbuf: [8]u8 = undefined;
     const plen = unveil.formatPerms(unveil.PERM_RW, &pbuf);
     const is_rw = plen == 2 and pbuf[0] == 'r' and pbuf[1] == 'w';
     passed += helpers.doTest("Format perms rw", is_rw, &failed);
 
-    // Test 16: parsePerms
     const parsed = unveil.parsePerms("rwxc");
     passed += helpers.doTest("Parse perms rwxc", parsed == unveil.PERM_ALL, &failed);
 
-    // Test 17: Entry count
     const ec = unveil.getEntryCount(test_pid);
     passed += helpers.doTest("Entry count correct", ec == 2, &failed);
 
-    // Test 18: getEntry
     const entry = unveil.getEntry(test_pid, 0);
     passed += helpers.doTest("Get entry works", entry != null, &failed);
 
-    // Test 19: Violation counting
     const pre_v = unveil.getViolationCount();
     _ = unveil.checkAndEnforce(test_pid, "/forbidden", unveil.PERM_READ);
     const post_v = unveil.getViolationCount();
     passed += helpers.doTest("Violation counted", post_v == pre_v + 1, &failed);
 
-    // Test 20: Destroy table
     unveil.destroyTable(test_pid);
     unveil.destroyTable(test_pid2);
     const after_destroy = !unveil.hasTable(test_pid);
     passed += helpers.doTest("Destroy table", after_destroy, &failed);
+
+    helpers.printTestResults(passed, failed);
+}
+
+// =============================================================================
+// E3.3: Binary Verification Test Suite
+// =============================================================================
+
+fn runBinaryVerifyTest() void {
+    shell.newLine();
+    shell.println("  ========================================");
+    shell.println("    E3.3 BINARY VERIFICATION TEST SUITE");
+    shell.println("  ========================================");
+    shell.newLine();
+
+    var passed: u32 = 0;
+    var failed: u32 = 0;
+
+    // Test 1: System initialized
+    passed += helpers.doTest("BinVerify system init", binaryverify.isInitialized(), &failed);
+
+    // Test 2: Default mode = warn
+    passed += helpers.doTest("Default mode = warn", !binaryverify.isEnforcing(), &failed);
+
+    // Test 3: Empty whitelist
+    passed += helpers.doTest("Empty whitelist", binaryverify.getTrustCount() == 0, &failed);
+
+    // Test 4: Trust a binary
+    const test_data = "test_binary_data_12345";
+    const trust_ok = binaryverify.trustBinary(test_data, "test_app", 0, 100);
+    passed += helpers.doTest("Trust binary", trust_ok, &failed);
+
+    // Test 5: Trust count increased
+    passed += helpers.doTest("Trust count = 1", binaryverify.getTrustCount() == 1, &failed);
+
+    // Test 6: Verify trusted binary = Trusted
+    const result1 = binaryverify.verifyBinary(test_data);
+    passed += helpers.doTest("Verify trusted = ok", result1 == .Trusted, &failed);
+
+    // Test 7: Verify unknown binary = Untrusted
+    const result2 = binaryverify.verifyBinary("unknown_binary");
+    passed += helpers.doTest("Verify unknown = untrusted", result2 == .Untrusted, &failed);
+
+    // Test 8: checkExec in warn mode = allow
+    const exec_ok = binaryverify.checkExec("unknown_binary");
+    passed += helpers.doTest("Warn mode allows unknown", exec_ok, &failed);
+
+    // Test 9: Switch to enforce mode
+    binaryverify.setEnforce(true);
+    passed += helpers.doTest("Enforce mode set", binaryverify.isEnforcing(), &failed);
+
+    // Test 10: checkExec in enforce mode = block unknown
+    const exec_blocked = !binaryverify.checkExec("unknown_binary");
+    passed += helpers.doTest("Enforce blocks unknown", exec_blocked, &failed);
+
+    // Test 11: checkExec trusted still allowed
+    const exec_trusted = binaryverify.checkExec(test_data);
+    passed += helpers.doTest("Enforce allows trusted", exec_trusted, &failed);
+
+    // Test 12: Block count increased
+    passed += helpers.doTest("Block count > 0", binaryverify.getBlockCount() > 0, &failed);
+
+    // Test 13: Verify count tracking
+    passed += helpers.doTest("Verify count > 0", binaryverify.getVerifyCount() > 0, &failed);
+
+    // Test 14: Hash computation
+    const h1 = binaryverify.computeHash("hello");
+    const h2 = binaryverify.computeHash("world");
+    const h3 = binaryverify.computeHash("hello");
+    const same = hash_mod.hashEqual(&h1, &h3);
+    const diff = !hash_mod.hashEqual(&h1, &h2);
+    passed += helpers.doTest("Hash deterministic", same and diff, &failed);
+
+    // Test 15: formatHash
+    var hex_buf: [64]u8 = undefined;
+    const hex_len = binaryverify.formatHash(&h1, &hex_buf);
+    passed += helpers.doTest("Format hash", hex_len == 64, &failed);
+
+    // Test 16: parseHexHash
+    var parsed_hash: [32]u8 = undefined;
+    const parse_ok = binaryverify.parseHexHash(hex_buf[0..64], &parsed_hash);
+    const parse_match = parse_ok and hash_mod.hashEqual(&h1, &parsed_hash);
+    passed += helpers.doTest("Parse hex hash", parse_match, &failed);
+
+    // Test 17: Trust duplicate = ok (idempotent)
+    const dup_ok = binaryverify.trustBinary(test_data, "test_app", 0, 200);
+    passed += helpers.doTest("Trust duplicate ok", dup_ok and binaryverify.getTrustCount() == 1, &failed);
+
+    // Test 18: Trust second binary
+    const trust2 = binaryverify.trustBinary("another_binary", "app2", 0, 300);
+    passed += helpers.doTest("Trust second binary", trust2 and binaryverify.getTrustCount() == 2, &failed);
+
+    // Test 19: Untrust by name
+    const untrust_ok = binaryverify.untrustByName("app2");
+    passed += helpers.doTest("Untrust by name", untrust_ok and binaryverify.getTrustCount() == 1, &failed);
+
+    // Test 20: getEntry
+    const bv_entry = binaryverify.getEntry(0);
+    const entry_ok = bv_entry != null;
+    var name_ok = false;
+    if (bv_entry) |e| {
+        name_ok = helpers.strEql(e.name, "test_app");
+    }
+    passed += helpers.doTest("Get entry works", entry_ok and name_ok, &failed);
+
+    // Cleanup
+    _ = binaryverify.untrustByName("test_app");
+    binaryverify.setEnforce(false);
 
     helpers.printTestResults(passed, failed);
 }
