@@ -547,6 +547,16 @@ pub fn printHexU64(val: u64) void {
     }
 }
 
+pub fn printHex32(val: u32) void {
+    const hex_chars = "0123456789ABCDEF";
+    var i: u5 = 28;
+    while (true) {
+        shell.printChar(hex_chars[@intCast((val >> i) & 0xF)]);
+        if (i == 0) break;
+        i -= 4;
+    }
+}
+
 /// Print hex to terminal (for gateway commands)
 pub fn printHexTerminal(data: []const u8) void {
     const hex_chars = "0123456789abcdef";

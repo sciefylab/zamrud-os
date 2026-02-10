@@ -21,7 +21,7 @@ const gateway_cmd = @import("commands/gateway.zig");
 const security_cmd = @import("commands/security.zig");
 const smoke_cmd = @import("commands/smoke.zig");
 const disk_cmd = @import("commands/disk.zig");
-const config_cmd = @import("commands/config.zig"); // D3: Config persistence
+const config_cmd = @import("commands/config.zig");
 
 // =============================================================================
 // Command Execution
@@ -102,6 +102,18 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "sched-disable")) {
         process_cmd.cmdSchedDisable(args);
     }
+    // === E3.1: Capability Commands ===
+    else if (helpers.strEql(command, "caps")) {
+        process_cmd.cmdCaps(args);
+    } else if (helpers.strEql(command, "grant")) {
+        process_cmd.cmdGrant(args);
+    } else if (helpers.strEql(command, "revoke")) {
+        process_cmd.cmdRevoke(args);
+    } else if (helpers.strEql(command, "violations")) {
+        process_cmd.cmdViolations(args);
+    } else if (helpers.strEql(command, "sandbox")) {
+        process_cmd.cmdSpawnSandbox(args);
+    }
     // Crypto command
     else if (helpers.strEql(command, "crypto")) {
         crypto_cmd.execute(args);
@@ -146,11 +158,9 @@ pub fn execute(input: []const u8) void {
     else if (helpers.strEql(command, "security")) {
         security_cmd.execute(args);
     } else if (helpers.strEql(command, "firewall")) {
-        // Handle firewall as alias to security firewall
         var buffer: [256]u8 = undefined;
         var len: usize = 0;
 
-        // Copy "firewall "
         const prefix = "firewall ";
         for (prefix) |c| {
             if (len < buffer.len) {
@@ -159,7 +169,6 @@ pub fn execute(input: []const u8) void {
             }
         }
 
-        // Copy args
         for (args) |c| {
             if (len < buffer.len) {
                 buffer[len] = c;
@@ -248,7 +257,7 @@ fn runAllTests() void {
     syscall_cmd.execute("test");
     shell.newLine();
 
-    // 7. Boot tests (if applicable)
+    // 7. Boot tests
     shell.printInfoLine("=== BOOT TESTS ===");
     boot_cmd.execute("test");
     shell.newLine();
@@ -263,9 +272,106 @@ fn runAllTests() void {
     config_cmd.execute("test");
     shell.newLine();
 
+    // 10. Capability tests (E3.1)
+    shell.printInfoLine("=== CAPABILITY TESTS (E3.1) ===");
+    runCapabilityTests();
+    shell.newLine();
+
     // Final summary
     shell.printInfoLine("########################################");
     shell.printInfoLine("##  COMPLETE TEST SUITE FINISHED      ##");
     shell.printInfoLine("########################################");
     shell.newLine();
+}
+
+// =============================================================================
+// E3.1: Capability Inline Tests
+// =============================================================================
+
+fn runCapabilityTests() void {
+    const capability = @import("../security/capability.zig");
+
+    // Test 1: System initialized
+    shell.print("  Cap system init:    ");
+    if (capability.isInitialized()) {
+        shell.printSuccessLine("PASS");
+    } else {
+        shell.printErrorLine("FAIL");
+    }
+
+    // Test 2: PID 0 has ALL
+    shell.print("  PID 0 = ALL caps:   ");
+    if (capability.getCaps(0) == capability.CAP_ALL) {
+        shell.printSuccessLine("PASS");
+    } else {
+        shell.printErrorLine("FAIL");
+    }
+
+    // Test 3: PID 0 check always passes
+    shell.print("  PID 0 check pass:   ");
+    if (capability.check(0, capability.CAP_NET) and capability.check(0, capability.CAP_ADMIN)) {
+        shell.printSuccessLine("PASS");
+    } else {
+        shell.printErrorLine("FAIL");
+    }
+
+    // Test 4: Register + check
+    shell.print("  Register+check:     ");
+    const test_pid: u32 = 99;
+    _ = capability.registerProcess(test_pid, capability.CAP_FS_READ | capability.CAP_IPC);
+
+    const has_read = capability.check(test_pid, capability.CAP_FS_READ);
+    const has_ipc = capability.check(test_pid, capability.CAP_IPC);
+    const no_net = !capability.check(test_pid, capability.CAP_NET);
+    const no_admin = !capability.check(test_pid, capability.CAP_ADMIN);
+
+    if (has_read and has_ipc and no_net and no_admin) {
+        shell.printSuccessLine("PASS");
+    } else {
+        shell.printErrorLine("FAIL");
+    }
+
+    // Test 5: Grant
+    shell.print("  Grant cap:          ");
+    _ = capability.grantCap(test_pid, capability.CAP_NET);
+    if (capability.check(test_pid, capability.CAP_NET)) {
+        shell.printSuccessLine("PASS");
+    } else {
+        shell.printErrorLine("FAIL");
+    }
+
+    // Test 6: Revoke
+    shell.print("  Revoke cap:         ");
+    _ = capability.revokeCap(test_pid, capability.CAP_NET);
+    if (!capability.check(test_pid, capability.CAP_NET)) {
+        shell.printSuccessLine("PASS");
+    } else {
+        shell.printErrorLine("FAIL");
+    }
+
+    // Test 7: formatCaps
+    shell.print("  Format caps:        ");
+    var buf: [64]u8 = undefined;
+    const len = capability.formatCaps(capability.CAP_FS_READ | capability.CAP_IPC, &buf);
+    if (len > 0) {
+        shell.printSuccessLine("PASS");
+    } else {
+        shell.printErrorLine("FAIL");
+    }
+
+    // Test 8: Violations initially 0
+    shell.print("  Zero violations:    ");
+    const pre_count = capability.getTotalViolations();
+    // Record a test violation
+    capability.recordViolationPublic(test_pid, capability.CAP_ADMIN, 999, 12345);
+    if (capability.getTotalViolations() == pre_count + 1) {
+        shell.printSuccessLine("PASS");
+    } else {
+        shell.printErrorLine("FAIL");
+    }
+
+    // Cleanup
+    capability.unregisterProcess(test_pid);
+
+    shell.printInfoLine("  Capability tests complete");
 }

@@ -1,15 +1,63 @@
-//! Zamrud OS - Syscall Dispatch Table
+//! Zamrud OS - Syscall Dispatch Table (E3.1: with Capability Enforcement)
 
 const handlers = @import("handlers.zig");
 const numbers = @import("numbers.zig");
+const capability = @import("../security/capability.zig");
+const process = @import("../proc/process.zig");
+const timer = @import("../drivers/timer/timer.zig");
+const serial = @import("../drivers/serial/serial.zig");
 
-/// Dispatch syscall by number
+/// Dispatch syscall by number - with capability enforcement
 pub fn dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) i64 {
-    // Mark unused args - akan dipakai nanti untuk syscall yang butuh lebih banyak args
     _ = a4;
     _ = a5;
     _ = a6;
 
+    // === E3.1: Capability Check ===
+    // Fast path: only check if capability system is initialized
+    if (capability.isInitialized()) {
+        const pid = process.getCurrentPid();
+
+        // Special handling for SYS_WRITE: stdout/stderr always allowed
+        if (num == numbers.SYS_WRITE) {
+            if (!capability.checkWrite(pid, a1)) {
+                // fd > 2 and no FS_WRITE cap
+                const ts = if (@import("std").meta.hasFn(timer, "getTicks"))
+                    timer.getTicks()
+                else
+                    0;
+                _ = ts;
+                capability.recordViolationPublic(pid, capability.CAP_FS_WRITE, num, timer.getTicks());
+                if (capability.shouldKill(pid)) {
+                    serial.writeString("[CAP] AUTO-KILL PID=");
+                    printDec32(pid);
+                    serial.writeString(" (violation threshold)\n");
+                    _ = process.terminate(pid);
+                    // Return error; process is dead but syscall returns gracefully
+                    return handlers.EPERM;
+                }
+                return handlers.EPERM;
+            }
+        } else {
+            // General capability check
+            const required = capability.syscallRequiredCap(num);
+            if (required != capability.CAP_NONE) {
+                if (!capability.checkAndEnforce(pid, required, num, timer.getTicks())) {
+                    // Violation recorded. Check kill threshold.
+                    if (capability.shouldKill(pid)) {
+                        serial.writeString("[CAP] AUTO-KILL PID=");
+                        printDec32(pid);
+                        serial.writeString(" (violation threshold)\n");
+                        _ = process.terminate(pid);
+                        return handlers.EPERM;
+                    }
+                    return handlers.EPERM;
+                }
+            }
+        }
+    }
+
+    // === Normal Dispatch ===
     return switch (num) {
         // === Standard Syscalls ===
         numbers.SYS_READ => handlers.sysRead(a1, a2, a3),
@@ -54,4 +102,26 @@ pub fn dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) 
         // === Unknown ===
         else => handlers.ENOSYS,
     };
+}
+
+// =============================================================================
+// Helper
+// =============================================================================
+
+fn printDec32(val: u32) void {
+    if (val == 0) {
+        serial.writeChar('0');
+        return;
+    }
+    var v: u32 = val;
+    var started = false;
+    const divs = [_]u32{ 1000000000, 100000000, 10000000, 1000000, 100000, 10000, 1000, 100, 10, 1 };
+    for (divs) |d| {
+        var digit: u8 = 0;
+        while (v >= d) : (digit += 1) v -= d;
+        if (digit > 0 or started) {
+            serial.writeChar('0' + digit);
+            started = true;
+        }
+    }
 }

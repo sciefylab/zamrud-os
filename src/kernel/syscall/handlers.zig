@@ -1,4 +1,6 @@
 //! Zamrud OS - System Call Handlers
+//! NOTE: Capability checks are now done in table.zig BEFORE handlers are called.
+//! Handlers remain unchanged - they just execute. Security is enforced at dispatch level.
 
 const serial = @import("../drivers/serial/serial.zig");
 const vfs = @import("../fs/vfs.zig");
@@ -228,7 +230,7 @@ pub fn sysGetUptime() i64 {
 }
 
 // =============================================================================
-// Graphics Syscalls (Selalu tersedia, tapi cek framebuffer)
+// Graphics Syscalls
 // =============================================================================
 
 /// SYS_FB_GET_INFO

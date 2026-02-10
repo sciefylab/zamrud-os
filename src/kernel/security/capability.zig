@@ -1,0 +1,494 @@
+//! Zamrud OS - Process Capability System (E3.1)
+//! Bitwise capability enforcement per-process
+//! Design: ZERO-overhead when all caps granted (bitwise AND check)
+
+const serial = @import("../drivers/serial/serial.zig");
+
+// =============================================================================
+// Capability Bits - Each bit = one permission
+// =============================================================================
+
+pub const CAP_NET: u32 = 1 << 0;
+pub const CAP_FS_READ: u32 = 1 << 1;
+pub const CAP_FS_WRITE: u32 = 1 << 2;
+pub const CAP_IPC: u32 = 1 << 3;
+pub const CAP_EXEC: u32 = 1 << 4;
+pub const CAP_DEVICE: u32 = 1 << 5;
+pub const CAP_GRAPHICS: u32 = 1 << 6;
+pub const CAP_CRYPTO: u32 = 1 << 7;
+pub const CAP_CHAIN: u32 = 1 << 8;
+pub const CAP_ADMIN: u32 = 1 << 9;
+pub const CAP_RAW_IO: u32 = 1 << 10;
+pub const CAP_MEMORY: u32 = 1 << 11;
+
+pub const CAP_ALL: u32 = 0xFFFFFFFF;
+pub const CAP_USER_DEFAULT: u32 = CAP_FS_READ | CAP_FS_WRITE | CAP_IPC | CAP_GRAPHICS;
+pub const CAP_MINIMAL: u32 = CAP_FS_READ;
+pub const CAP_NONE: u32 = 0;
+
+// =============================================================================
+// Violation Tracking
+// =============================================================================
+
+pub const MAX_VIOLATIONS: usize = 64;
+pub const KILL_THRESHOLD: u16 = 3;
+
+pub const Violation = struct {
+    pid: u32 = 0,
+    attempted_cap: u32 = 0,
+    syscall_num: u64 = 0,
+    timestamp: u64 = 0,
+    valid: bool = false,
+};
+
+var violations: [MAX_VIOLATIONS]Violation = [_]Violation{.{}} ** MAX_VIOLATIONS;
+var violation_head: usize = 0;
+var violation_count: u64 = 0;
+
+// Per-process violation counters (indexed by cap_table slot, NOT by PID)
+var pid_violation_count: [MAX_CAP_ENTRIES]u16 = [_]u16{0} ** MAX_CAP_ENTRIES;
+
+var initialized: bool = false;
+
+// =============================================================================
+// Process Capability Storage
+// =============================================================================
+
+pub const MAX_CAP_ENTRIES: usize = 64;
+
+pub const CapEntry = struct {
+    pid: u32 = 0,
+    caps: u32 = CAP_NONE,
+    active: bool = false,
+};
+
+var cap_table: [MAX_CAP_ENTRIES]CapEntry = [_]CapEntry{.{}} ** MAX_CAP_ENTRIES;
+
+// =============================================================================
+// Init
+// =============================================================================
+
+pub fn init() void {
+    serial.writeString("[CAP] Initializing capability system...\n");
+
+    var i: usize = 0;
+    while (i < MAX_CAP_ENTRIES) : (i += 1) {
+        cap_table[i] = .{};
+        pid_violation_count[i] = 0;
+    }
+
+    i = 0;
+    while (i < MAX_VIOLATIONS) : (i += 1) {
+        violations[i] = .{};
+    }
+
+    violation_head = 0;
+    violation_count = 0;
+
+    // PID 0 (idle/kernel) = ALL capabilities at slot 0
+    cap_table[0] = .{
+        .pid = 0,
+        .caps = CAP_ALL,
+        .active = true,
+    };
+
+    initialized = true;
+    serial.writeString("[CAP] Capability system ready\n");
+}
+
+pub fn isInitialized() bool {
+    return initialized;
+}
+
+// =============================================================================
+// Internal: Find slot by PID
+// =============================================================================
+
+fn findSlotByPid(pid: u32) ?usize {
+    var i: usize = 0;
+    while (i < MAX_CAP_ENTRIES) : (i += 1) {
+        if (cap_table[i].active and cap_table[i].pid == pid) {
+            return i;
+        }
+    }
+    return null;
+}
+
+// =============================================================================
+// Capability Management
+// =============================================================================
+
+pub fn registerProcess(pid: u32, caps: u32) bool {
+    var i: usize = 0;
+    while (i < MAX_CAP_ENTRIES) : (i += 1) {
+        if (!cap_table[i].active) {
+            cap_table[i] = .{
+                .pid = pid,
+                .caps = caps,
+                .active = true,
+            };
+            pid_violation_count[i] = 0;
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn unregisterProcess(pid: u32) void {
+    if (findSlotByPid(pid)) |slot| {
+        pid_violation_count[slot] = 0;
+        cap_table[slot] = .{};
+    }
+}
+
+pub fn getCaps(pid: u32) u32 {
+    if (pid == 0) return CAP_ALL;
+
+    if (findSlotByPid(pid)) |slot| {
+        return cap_table[slot].caps;
+    }
+    // Unregistered = kernel process = ALL (backward compat)
+    return CAP_ALL;
+}
+
+pub fn grantCap(pid: u32, cap: u32) bool {
+    if (findSlotByPid(pid)) |slot| {
+        cap_table[slot].caps |= cap;
+        return true;
+    }
+    return false;
+}
+
+pub fn revokeCap(pid: u32, cap: u32) bool {
+    if (findSlotByPid(pid)) |slot| {
+        cap_table[slot].caps &= ~cap;
+        return true;
+    }
+    return false;
+}
+
+pub fn setCaps(pid: u32, caps: u32) bool {
+    if (findSlotByPid(pid)) |slot| {
+        cap_table[slot].caps = caps;
+        return true;
+    }
+    return false;
+}
+
+// =============================================================================
+// Capability Check (HOT PATH - must be fast!)
+// =============================================================================
+
+pub inline fn check(pid: u32, required: u32) bool {
+    if (pid == 0) return true;
+    const caps = getCaps(pid);
+    return (caps & required) == required;
+}
+
+pub fn checkAndEnforce(pid: u32, required: u32, syscall_num: u64, timestamp: u64) bool {
+    if (check(pid, required)) return true;
+    recordViolation(pid, required, syscall_num, timestamp);
+    return false;
+}
+
+pub fn getViolationCount(pid: u32) u16 {
+    if (findSlotByPid(pid)) |slot| {
+        return pid_violation_count[slot];
+    }
+    return 0;
+}
+
+pub fn shouldKill(pid: u32) bool {
+    return getViolationCount(pid) >= KILL_THRESHOLD;
+}
+
+// =============================================================================
+// Violation Recording
+// =============================================================================
+
+fn recordViolation(pid: u32, attempted_cap: u32, syscall_num: u64, timestamp: u64) void {
+    // Store in circular buffer
+    violations[violation_head] = .{
+        .pid = pid,
+        .attempted_cap = attempted_cap,
+        .syscall_num = syscall_num,
+        .timestamp = timestamp,
+        .valid = true,
+    };
+
+    violation_head += 1;
+    if (violation_head >= MAX_VIOLATIONS) violation_head = 0;
+    violation_count += 1;
+
+    // Increment per-process counter by cap_table slot (not raw PID)
+    if (findSlotByPid(pid)) |slot| {
+        if (pid_violation_count[slot] < 65535) {
+            pid_violation_count[slot] += 1;
+        }
+    }
+
+    // Log to serial
+    serial.writeString("[CAP] VIOLATION: PID=");
+    printDec32(pid);
+    serial.writeString(" cap=0x");
+    printHex32(attempted_cap);
+    serial.writeString(" syscall=");
+    printDec64(syscall_num);
+    serial.writeString(" count=");
+    printDec16(getViolationCount(pid));
+    serial.writeString("\n");
+}
+
+/// Public wrapper for table.zig
+pub fn recordViolationPublic(pid: u32, attempted_cap: u32, syscall_num: u64, timestamp: u64) void {
+    recordViolation(pid, attempted_cap, syscall_num, timestamp);
+}
+
+// =============================================================================
+// Query Functions
+// =============================================================================
+
+pub fn getTotalViolations() u64 {
+    return violation_count;
+}
+
+pub fn getRecentViolations(out: []Violation) usize {
+    var count: usize = 0;
+
+    if (violation_count == 0) return 0;
+
+    var idx: usize = if (violation_head == 0) MAX_VIOLATIONS - 1 else violation_head - 1;
+    var checked: usize = 0;
+
+    while (count < out.len and checked < MAX_VIOLATIONS) {
+        if (violations[idx].valid) {
+            out[count] = violations[idx];
+            count += 1;
+        }
+        checked += 1;
+        if (idx == 0) {
+            idx = MAX_VIOLATIONS - 1;
+        } else {
+            idx -= 1;
+        }
+    }
+
+    return count;
+}
+
+pub fn getCapEntryByIndex(index: usize) ?CapEntry {
+    if (index >= MAX_CAP_ENTRIES) return null;
+    if (!cap_table[index].active) return null;
+    return cap_table[index];
+}
+
+pub fn capName(cap: u32) []const u8 {
+    if (cap == CAP_NET) return "NET";
+    if (cap == CAP_FS_READ) return "FS_READ";
+    if (cap == CAP_FS_WRITE) return "FS_WRITE";
+    if (cap == CAP_IPC) return "IPC";
+    if (cap == CAP_EXEC) return "EXEC";
+    if (cap == CAP_DEVICE) return "DEVICE";
+    if (cap == CAP_GRAPHICS) return "GRAPHICS";
+    if (cap == CAP_CRYPTO) return "CRYPTO";
+    if (cap == CAP_CHAIN) return "CHAIN";
+    if (cap == CAP_ADMIN) return "ADMIN";
+    if (cap == CAP_RAW_IO) return "RAW_IO";
+    if (cap == CAP_MEMORY) return "MEMORY";
+    return "UNKNOWN";
+}
+
+pub fn formatCaps(caps: u32, buf: []u8) usize {
+    var pos: usize = 0;
+    const cap_bits = [_]struct { bit: u32, name: []const u8 }{
+        .{ .bit = CAP_NET, .name = "NET" },
+        .{ .bit = CAP_FS_READ, .name = "R" },
+        .{ .bit = CAP_FS_WRITE, .name = "W" },
+        .{ .bit = CAP_IPC, .name = "IPC" },
+        .{ .bit = CAP_EXEC, .name = "EXE" },
+        .{ .bit = CAP_DEVICE, .name = "DEV" },
+        .{ .bit = CAP_GRAPHICS, .name = "GFX" },
+        .{ .bit = CAP_CRYPTO, .name = "CRY" },
+        .{ .bit = CAP_CHAIN, .name = "CHN" },
+        .{ .bit = CAP_ADMIN, .name = "ADM" },
+        .{ .bit = CAP_RAW_IO, .name = "IO" },
+        .{ .bit = CAP_MEMORY, .name = "MEM" },
+    };
+
+    // Check if ALL caps
+    if (caps == CAP_ALL) {
+        const all_str = "ALL";
+        for (all_str) |c| {
+            if (pos >= buf.len) break;
+            buf[pos] = c;
+            pos += 1;
+        }
+        return pos;
+    }
+
+    var first = true;
+    for (cap_bits) |cb| {
+        if ((caps & cb.bit) != 0) {
+            if (!first and pos < buf.len) {
+                buf[pos] = '|';
+                pos += 1;
+            }
+            for (cb.name) |c| {
+                if (pos >= buf.len) break;
+                buf[pos] = c;
+                pos += 1;
+            }
+            first = false;
+        }
+    }
+
+    if (pos == 0 and buf.len > 0) {
+        const none_str = "NONE";
+        for (none_str) |c| {
+            if (pos >= buf.len) break;
+            buf[pos] = c;
+            pos += 1;
+        }
+    }
+
+    return pos;
+}
+
+// =============================================================================
+// Syscall-to-Capability Mapping
+// =============================================================================
+
+pub fn syscallRequiredCap(syscall_num: u64) u32 {
+    return switch (syscall_num) {
+        // File read
+        0 => CAP_FS_READ, // SYS_READ
+        79 => CAP_FS_READ, // SYS_GETCWD
+
+        // File write
+        1 => CAP_FS_WRITE, // SYS_WRITE (special handled in table.zig)
+        83 => CAP_FS_WRITE, // SYS_MKDIR
+        84 => CAP_FS_WRITE, // SYS_RMDIR
+        87 => CAP_FS_WRITE, // SYS_UNLINK
+
+        // File open
+        2 => CAP_FS_READ, // SYS_OPEN
+
+        // Network
+        41 => CAP_NET, // SYS_SOCKET
+        42 => CAP_NET, // SYS_CONNECT
+        43 => CAP_NET, // SYS_ACCEPT
+        44 => CAP_NET, // SYS_SENDTO
+        45 => CAP_NET, // SYS_RECVFROM
+        49 => CAP_NET, // SYS_BIND
+        50 => CAP_NET, // SYS_LISTEN
+
+        // Process
+        57 => CAP_EXEC, // SYS_FORK
+        59 => CAP_EXEC, // SYS_EXECVE
+
+        // Graphics
+        0x100 => CAP_GRAPHICS,
+        0x101 => CAP_GRAPHICS,
+        0x102 => CAP_GRAPHICS,
+        0x103 => CAP_GRAPHICS,
+        0x110 => CAP_GRAPHICS,
+        0x111 => CAP_GRAPHICS,
+        0x112 => CAP_GRAPHICS,
+
+        // Crypto
+        0x300 => CAP_CRYPTO,
+        0x301 => CAP_CRYPTO,
+        0x302 => CAP_CRYPTO,
+
+        // Chain
+        0x400 => CAP_CHAIN,
+        0x401 => CAP_CHAIN,
+
+        // Always allowed: EXIT, GETPID, GETPPID, GETUID, GETGID,
+        // SCHED_YIELD, NANOSLEEP, CLOSE, CHDIR, INPUT_*, DEBUG_*
+        else => CAP_NONE,
+    };
+}
+
+pub fn checkWrite(pid: u32, fd: u64) bool {
+    if (fd == 1 or fd == 2) return true;
+    return check(pid, CAP_FS_WRITE);
+}
+
+// =============================================================================
+// Print helpers (subtraction only - no division)
+// =============================================================================
+
+fn printDec16(val: u16) void {
+    if (val == 0) {
+        serial.writeChar('0');
+        return;
+    }
+    var v: u16 = val;
+    var started = false;
+    const divs = [_]u16{ 10000, 1000, 100, 10, 1 };
+    for (divs) |d| {
+        var digit: u8 = 0;
+        while (v >= d) : (digit += 1) v -= d;
+        if (digit > 0 or started) {
+            serial.writeChar('0' + digit);
+            started = true;
+        }
+    }
+}
+
+fn printDec32(val: u32) void {
+    if (val == 0) {
+        serial.writeChar('0');
+        return;
+    }
+    var v: u32 = val;
+    var started = false;
+    const divs = [_]u32{ 1000000000, 100000000, 10000000, 1000000, 100000, 10000, 1000, 100, 10, 1 };
+    for (divs) |d| {
+        var digit: u8 = 0;
+        while (v >= d) : (digit += 1) v -= d;
+        if (digit > 0 or started) {
+            serial.writeChar('0' + digit);
+            started = true;
+        }
+    }
+}
+
+fn printDec64(val: u64) void {
+    if (val == 0) {
+        serial.writeChar('0');
+        return;
+    }
+    var v: u64 = val;
+    var started = false;
+    const divs = [_]u64{
+        10000000000000000000, 1000000000000000000, 100000000000000000,
+        10000000000000000,    1000000000000000,    100000000000000,
+        10000000000000,       1000000000000,       100000000000,
+        10000000000,          1000000000,          100000000,
+        10000000,             1000000,             100000,
+        10000,                1000,                100,
+        10,                   1,
+    };
+    for (divs) |d| {
+        var digit: u8 = 0;
+        while (v >= d) : (digit += 1) v -= d;
+        if (digit > 0 or started) {
+            serial.writeChar('0' + digit);
+            started = true;
+        }
+    }
+}
+
+fn printHex32(val: u32) void {
+    const hex = "0123456789ABCDEF";
+    serial.writeChar(hex[@intCast((val >> 28) & 0xF)]);
+    serial.writeChar(hex[@intCast((val >> 24) & 0xF)]);
+    serial.writeChar(hex[@intCast((val >> 20) & 0xF)]);
+    serial.writeChar(hex[@intCast((val >> 16) & 0xF)]);
+    serial.writeChar(hex[@intCast((val >> 12) & 0xF)]);
+    serial.writeChar(hex[@intCast((val >> 8) & 0xF)]);
+    serial.writeChar(hex[@intCast((val >> 4) & 0xF)]);
+    serial.writeChar(hex[@intCast(val & 0xF)]);
+}

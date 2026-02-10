@@ -3,6 +3,7 @@
 const serial = @import("../drivers/serial/serial.zig");
 const heap = @import("../mm/heap.zig");
 const switch_ctx = @import("../arch/x86_64/switch.zig");
+const capability = @import("../security/capability.zig");
 
 // ============================================================================
 // Constants
@@ -37,6 +38,7 @@ pub const Process = struct {
     priority: u8 = 0,
     time_slice: u32 = 0,
     total_ticks: u64 = 0,
+    caps: u32 = capability.CAP_ALL, // E3.1: Capability bitset
 };
 
 // ============================================================================
@@ -71,6 +73,7 @@ pub fn init() void {
             .priority = 0,
             .time_slice = 0,
             .total_ticks = 0,
+            .caps = capability.CAP_NONE,
         };
     }
 
@@ -118,7 +121,13 @@ pub fn create(entry: u64) ?u32 {
     return createWithEntry("unnamed", entry, 0);
 }
 
+/// Create process with default capabilities (CAP_ALL for backward compat)
 pub fn createWithEntry(name: []const u8, entry: u64, arg: u64) ?u32 {
+    return createWithCaps(name, entry, arg, capability.CAP_ALL);
+}
+
+/// Create process with specific capabilities (E3.1)
+pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
     _ = name;
 
     if (!initialized) {
@@ -155,6 +164,7 @@ pub fn createWithEntry(name: []const u8, entry: u64, arg: u64) ?u32 {
         .priority = 1,
         .time_slice = 10,
         .total_ticks = 0,
+        .caps = caps,
     };
 
     // Setup initial stack (must match switch.zig stack layout)
@@ -163,10 +173,17 @@ pub fn createWithEntry(name: []const u8, entry: u64, arg: u64) ?u32 {
     process_used[slot] = true;
     process_count += 1;
 
+    // Register in capability system
+    if (capability.isInitialized()) {
+        _ = capability.registerProcess(pid, caps);
+    }
+
     serial.writeString("[PROC] Created PID=0x");
     printHex32(pid);
     serial.writeString(" slot=");
     serial.writeChar('0' + @as(u8, @intCast(slot)));
+    serial.writeString(" caps=0x");
+    printHex32(caps);
     serial.writeString("\n");
 
     return pid;
@@ -184,6 +201,11 @@ pub fn terminate(pid: u32) bool {
     // Jangan terminate idle
     if (slot == 0) return false;
 
+    // Unregister capabilities
+    if (capability.isInitialized()) {
+        capability.unregisterProcess(pid);
+    }
+
     // Free stack jika valid
     if (process_table[slot].kernel_stack != 0) {
         const stack_ptr: [*]u8 = @ptrFromInt(process_table[slot].kernel_stack);
@@ -200,9 +222,60 @@ pub fn terminate(pid: u32) bool {
         .priority = 0,
         .time_slice = 0,
         .total_ticks = 0,
+        .caps = capability.CAP_NONE,
     };
 
     if (process_count > 0) process_count -= 1;
+    return true;
+}
+
+// ============================================================================
+// Capability Accessors (E3.1)
+// ============================================================================
+
+/// Get capabilities for current running process
+pub fn getCurrentCaps() u32 {
+    return getProcessCaps(current_pid);
+}
+
+/// Get capabilities for specific PID
+pub fn getProcessCaps(pid: u32) u32 {
+    if (pid == 0) return capability.CAP_ALL;
+
+    const slot = getSlotByPid(pid) orelse return capability.CAP_ALL;
+    return process_table[slot].caps;
+}
+
+/// Set capabilities for specific PID
+pub fn setProcessCaps(pid: u32, caps: u32) bool {
+    const slot = getSlotByPid(pid) orelse return false;
+    process_table[slot].caps = caps;
+
+    if (capability.isInitialized()) {
+        return capability.setCaps(pid, caps);
+    }
+    return true;
+}
+
+/// Grant capability to process
+pub fn grantProcessCap(pid: u32, cap: u32) bool {
+    const slot = getSlotByPid(pid) orelse return false;
+    process_table[slot].caps |= cap;
+
+    if (capability.isInitialized()) {
+        return capability.grantCap(pid, cap);
+    }
+    return true;
+}
+
+/// Revoke capability from process
+pub fn revokeProcessCap(pid: u32, cap: u32) bool {
+    const slot = getSlotByPid(pid) orelse return false;
+    process_table[slot].caps &= ~cap;
+
+    if (capability.isInitialized()) {
+        return capability.revokeCap(pid, cap);
+    }
     return true;
 }
 
@@ -240,6 +313,7 @@ pub fn createIdleProcess() void {
         .priority = 255,
         .time_slice = 1,
         .total_ticks = 0,
+        .caps = capability.CAP_ALL, // Idle/kernel = full caps
     };
 
     process_table[0].rsp = switch_ctx.setupProcessStack(
@@ -249,6 +323,11 @@ pub fn createIdleProcess() void {
     );
 
     process_used[0] = true;
+
+    // Register idle in cap system
+    if (capability.isInitialized()) {
+        _ = capability.registerProcess(0, capability.CAP_ALL);
+    }
 
     serial.writeString("[PROC] Idle created\n");
 }
@@ -287,6 +366,7 @@ pub fn getProcessInfo(slot: usize) ?struct {
     pid: u32,
     state: ProcessState,
     priority: u8,
+    caps: u32,
 } {
     if (slot >= MAX_SLOTS_USED) return null;
     if (!process_used[slot]) return null;
@@ -295,6 +375,7 @@ pub fn getProcessInfo(slot: usize) ?struct {
         .pid = process_table[slot].pid,
         .state = process_table[slot].state,
         .priority = process_table[slot].priority,
+        .caps = process_table[slot].caps,
     };
 }
 
@@ -313,6 +394,8 @@ pub fn printProcessList() void {
             printHex32(process_table[i].pid);
             serial.writeString(" state=0x");
             printHex8(@intFromEnum(process_table[i].state));
+            serial.writeString(" caps=0x");
+            printHex32(process_table[i].caps);
             serial.writeString(" rsp=0x");
             printHex64(process_table[i].rsp);
             serial.writeString("\n");

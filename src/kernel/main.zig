@@ -49,6 +49,9 @@ const storage = @import("drivers/storage/storage.zig");
 const config_store = @import("persist/config_store.zig");
 const identity_store = @import("persist/identity_store.zig");
 
+// E3.1: Process Capabilities
+const capability = @import("security/capability.zig");
+
 // ============================================================================
 // Limine Requests
 // ============================================================================
@@ -136,6 +139,10 @@ export fn kernel_main() noreturn {
     printLine();
     serial.writeString("[SECURITY]\n");
 
+    // E3.1: Capability system MUST init before process system
+    capability.init();
+    serial.writeString("[OK]   Capabilities ready (E3.1)\n");
+
     crypto.init();
     serial.writeString("[OK]   Crypto ready\n");
 
@@ -199,7 +206,6 @@ export fn kernel_main() noreturn {
     }
 
     // Initialize blockchain AFTER storage (for persistence)
-    // chain.init() will auto-load from /disk/CHAIN.DAT if it exists
     if (chain.init()) {
         serial.writeString("[OK]   Blockchain ready");
         if (chain.hasSavedChain()) {
@@ -214,10 +220,8 @@ export fn kernel_main() noreturn {
     printLine();
     serial.writeString("[PERSISTENCE]\n");
 
-    // Initialize config store with defaults
     config_store.init();
 
-    // Try to load config from disk (overrides defaults if found)
     if (config_store.hasSavedConfig()) {
         if (config_store.loadFromDisk()) {
             serial.writeString("[OK]   Config restored from disk\n");
@@ -228,10 +232,8 @@ export fn kernel_main() noreturn {
         serial.writeString("[OK]   Config initialized (defaults)\n");
     }
 
-    // Initialize identity store
     identity_store.init();
 
-    // Try to load identities from disk
     if (identity_store.hasSavedIdentities()) {
         if (identity_store.loadFromDisk()) {
             serial.writeString("[OK]   Identities restored from disk (");
@@ -336,6 +338,8 @@ fn printSystemSummary() void {
     serial.writeString(if (boot_verify.isVerified()) "Verified\n" else "Unverified\n");
     serial.writeString("  Crypto:     ");
     serial.writeString(if (crypto.isInitialized()) "OK\n" else "NO\n");
+    serial.writeString("  Caps(E3.1): ");
+    serial.writeString(if (capability.isInitialized()) "ACTIVE\n" else "NO\n");
     serial.writeString("  Storage:    ");
     serial.writeString(if (storage.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  FAT32:      ");
@@ -378,6 +382,9 @@ fn printSystemSummary() void {
     serial.writeString(if (firewall.isInitialized()) "Active\n" else "NO\n");
     serial.writeString("  Processes:  ");
     printDecSerial(process.getCount());
+    serial.writeString("\n");
+    serial.writeString("  Violations: ");
+    printDecSerial(capability.getTotalViolations());
     serial.writeString("\n");
     serial.writeString("  -----------------------------\n");
     serial.writeString("  Type 'help' for commands\n\n");
