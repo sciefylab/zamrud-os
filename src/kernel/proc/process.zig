@@ -4,6 +4,7 @@ const serial = @import("../drivers/serial/serial.zig");
 const heap = @import("../mm/heap.zig");
 const switch_ctx = @import("../arch/x86_64/switch.zig");
 const capability = @import("../security/capability.zig");
+const unveil = @import("../security/unveil.zig");
 
 // ============================================================================
 // Constants
@@ -38,11 +39,11 @@ pub const Process = struct {
     priority: u8 = 0,
     time_slice: u32 = 0,
     total_ticks: u64 = 0,
-    caps: u32 = capability.CAP_ALL, // E3.1: Capability bitset
+    caps: u32 = capability.CAP_ALL,
 };
 
 // ============================================================================
-// Globals - PROPERLY INITIALIZED (not undefined!)
+// Globals
 // ============================================================================
 
 pub var process_table: [MAX_PROCESSES]Process = [_]Process{.{}} ** MAX_PROCESSES;
@@ -60,7 +61,6 @@ var initialized: bool = false;
 pub fn init() void {
     serial.writeString("[PROC] Initializing...\n");
 
-    // Reset semua slot
     var i: usize = 0;
     while (i < MAX_PROCESSES) : (i += 1) {
         process_used[i] = false;
@@ -85,20 +85,16 @@ pub fn init() void {
     serial.writeString("[PROC] Initialized!\n");
 }
 
-// ============================================================================
-// Check if initialized
-// ============================================================================
-
 pub fn isInitialized() bool {
     return initialized;
 }
 
 // ============================================================================
-// Slot helpers (0..7 used by scheduler)
+// Slot helpers
 // ============================================================================
 
 fn findFreeSlot() ?usize {
-    var slot: usize = 1; // slot 0 reserved for idle
+    var slot: usize = 1;
     while (slot < MAX_SLOTS_USED) : (slot += 1) {
         if (!process_used[slot]) return slot;
     }
@@ -121,12 +117,10 @@ pub fn create(entry: u64) ?u32 {
     return createWithEntry("unnamed", entry, 0);
 }
 
-/// Create process with default capabilities (CAP_ALL for backward compat)
 pub fn createWithEntry(name: []const u8, entry: u64, arg: u64) ?u32 {
     return createWithCaps(name, entry, arg, capability.CAP_ALL);
 }
 
-/// Create process with specific capabilities (E3.1)
 pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
     _ = name;
 
@@ -144,7 +138,6 @@ pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
         return null;
     };
 
-    // Allocate stack
     const stack_ptr = heap.kmalloc(KERNEL_STACK_SIZE) orelse {
         serial.writeString("[PROC] ERROR: Stack allocation failed!\n");
         return null;
@@ -167,13 +160,12 @@ pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
         .caps = caps,
     };
 
-    // Setup initial stack (must match switch.zig stack layout)
     process_table[slot].rsp = switch_ctx.setupProcessStack(stack_top, entry, arg);
 
     process_used[slot] = true;
     process_count += 1;
 
-    // Register in capability system
+    // E3.1: Register in capability system
     if (capability.isInitialized()) {
         _ = capability.registerProcess(pid, caps);
     }
@@ -198,15 +190,18 @@ pub fn terminate(pid: u32) bool {
 
     const slot = getSlotByPid(pid) orelse return false;
 
-    // Jangan terminate idle
     if (slot == 0) return false;
 
-    // Unregister capabilities
+    // E3.1: Unregister capabilities
     if (capability.isInitialized()) {
         capability.unregisterProcess(pid);
     }
 
-    // Free stack jika valid
+    // E3.2: Destroy unveil table
+    if (unveil.isInitialized()) {
+        unveil.destroyTable(pid);
+    }
+
     if (process_table[slot].kernel_stack != 0) {
         const stack_ptr: [*]u8 = @ptrFromInt(process_table[slot].kernel_stack);
         heap.kfree(stack_ptr);
@@ -233,12 +228,10 @@ pub fn terminate(pid: u32) bool {
 // Capability Accessors (E3.1)
 // ============================================================================
 
-/// Get capabilities for current running process
 pub fn getCurrentCaps() u32 {
     return getProcessCaps(current_pid);
 }
 
-/// Get capabilities for specific PID
 pub fn getProcessCaps(pid: u32) u32 {
     if (pid == 0) return capability.CAP_ALL;
 
@@ -246,7 +239,6 @@ pub fn getProcessCaps(pid: u32) u32 {
     return process_table[slot].caps;
 }
 
-/// Set capabilities for specific PID
 pub fn setProcessCaps(pid: u32, caps: u32) bool {
     const slot = getSlotByPid(pid) orelse return false;
     process_table[slot].caps = caps;
@@ -257,7 +249,6 @@ pub fn setProcessCaps(pid: u32, caps: u32) bool {
     return true;
 }
 
-/// Grant capability to process
 pub fn grantProcessCap(pid: u32, cap: u32) bool {
     const slot = getSlotByPid(pid) orelse return false;
     process_table[slot].caps |= cap;
@@ -268,7 +259,6 @@ pub fn grantProcessCap(pid: u32, cap: u32) bool {
     return true;
 }
 
-/// Revoke capability from process
 pub fn revokeProcessCap(pid: u32, cap: u32) bool {
     const slot = getSlotByPid(pid) orelse return false;
     process_table[slot].caps &= ~cap;
@@ -291,7 +281,6 @@ pub fn createIdleProcess() void {
 
     serial.writeString("[PROC] Creating idle...\n");
 
-    // Jika idle sudah ada, skip
     if (process_used[0]) {
         serial.writeString("[PROC] Idle already exists\n");
         return;
@@ -313,7 +302,7 @@ pub fn createIdleProcess() void {
         .priority = 255,
         .time_slice = 1,
         .total_ticks = 0,
-        .caps = capability.CAP_ALL, // Idle/kernel = full caps
+        .caps = capability.CAP_ALL,
     };
 
     process_table[0].rsp = switch_ctx.setupProcessStack(
@@ -324,7 +313,6 @@ pub fn createIdleProcess() void {
 
     process_used[0] = true;
 
-    // Register idle in cap system
     if (capability.isInitialized()) {
         _ = capability.registerProcess(0, capability.CAP_ALL);
     }

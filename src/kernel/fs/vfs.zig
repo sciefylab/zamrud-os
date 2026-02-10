@@ -1,9 +1,11 @@
 //! Zamrud OS - Virtual File System (VFS)
-//! Main VFS interface that uses modular components
+//! Main VFS interface with E3.2 Unveil enforcement
 
 const serial = @import("../drivers/serial/serial.zig");
 const heap = @import("../mm/heap.zig");
 const path = @import("path.zig");
+const process = @import("../proc/process.zig");
+const unveil = @import("../security/unveil.zig");
 
 // Import modular components
 pub const inode_mod = @import("inode.zig");
@@ -140,6 +142,34 @@ pub fn init() void {
 }
 
 // =============================================================================
+// E3.2: Unveil Check Helper
+// =============================================================================
+
+/// Check unveil permission for current process
+/// Returns true if access allowed
+fn checkUnveil(file_path: []const u8, perm: u8) bool {
+    if (!unveil.isInitialized()) return true;
+
+    const pid = process.getCurrentPid();
+    return unveil.checkAndEnforce(pid, file_path, perm);
+}
+
+/// Check unveil for read operations
+fn checkUnveilRead(file_path: []const u8) bool {
+    return checkUnveil(file_path, unveil.PERM_READ);
+}
+
+/// Check unveil for write operations
+fn checkUnveilWrite(file_path: []const u8) bool {
+    return checkUnveil(file_path, unveil.PERM_WRITE);
+}
+
+/// Check unveil for create operations (mkdir, touch)
+fn checkUnveilCreate(file_path: []const u8) bool {
+    return checkUnveil(file_path, unveil.PERM_CREATE);
+}
+
+// =============================================================================
 // Mount / Unmount
 // =============================================================================
 
@@ -251,16 +281,22 @@ fn resolveInMountPoint(mp_path: []const u8, rel_path: []const u8) ?*Inode {
 }
 
 // =============================================================================
-// File Operations
+// File Operations (with E3.2 unveil checks)
 // =============================================================================
 
 pub fn open(file_path: []const u8, flags: OpenFlags) ?*File {
     if (!initialized) return null;
     if (root_fs == null) return null;
 
+    // E3.2: Unveil check
+    if (flags.read and !checkUnveilRead(file_path)) return null;
+    if (flags.write and !checkUnveilWrite(file_path)) return null;
+
     const inode = resolvePath(file_path) orelse {
         if (flags.create) {
-            const new_inode = createFile(file_path) orelse return null;
+            // E3.2: Need create permission
+            if (!checkUnveilCreate(file_path)) return null;
+            const new_inode = createFileInternal(file_path) orelse return null;
             return openInode(new_inode, file_path, flags);
         }
         return null;
@@ -286,7 +322,6 @@ fn openInode(inode: *Inode, file_path: []const u8, flags: OpenFlags) ?*File {
     file.ref_count = 1;
     file.ops = null;
 
-    // Determine which filesystem's file_ops to use
     if (inode.file_type == .CharDevice or inode.file_type == .BlockDevice) {
         if (getMountPointFs("/dev")) |fs| {
             file.ops = fs.file_ops;
@@ -396,13 +431,16 @@ pub fn seek(file: *File, offset: i64, whence: SeekWhence) i64 {
 }
 
 // =============================================================================
-// Directory Operations
+// Directory Operations (with E3.2 unveil checks)
 // =============================================================================
 
 pub fn readdir(dir_path: []const u8, index: usize) ?*DirEntry {
     if (!initialized) return null;
 
-    // Handle /disk path - delegate to FAT32 mount point
+    // E3.2: Unveil check for directory read
+    if (!checkUnveilRead(dir_path)) return null;
+
+    // Handle /disk path
     if (dir_path.len >= 5 and
         dir_path[0] == '/' and
         dir_path[1] == 'd' and
@@ -446,6 +484,9 @@ pub fn getcwd() []const u8 {
 pub fn chdir(dir_path: []const u8) bool {
     if (!initialized) return false;
     if (dir_path.len == 0) return false;
+
+    // E3.2: Unveil check for directory access
+    if (!checkUnveilRead(dir_path)) return false;
 
     if (dir_path.len == 1 and dir_path[0] == '/') {
         if (root_fs == null or root_fs.?.root == null) return false;
@@ -534,7 +575,6 @@ pub fn resolvePath(file_path: []const u8) ?*Inode {
     if (root_fs == null) return null;
     if (root_fs.?.root == null) return null;
 
-    // Check if path starts with /dev/
     if (file_path.len >= 5 and
         file_path[0] == '/' and
         file_path[1] == 'd' and
@@ -546,7 +586,6 @@ pub fn resolvePath(file_path: []const u8) ?*Inode {
         return resolveInMountPoint("/dev", dev_path);
     }
 
-    // Check if path is exactly "/dev"
     if (file_path.len == 4 and
         file_path[0] == '/' and
         file_path[1] == 'd' and
@@ -556,7 +595,6 @@ pub fn resolvePath(file_path: []const u8) ?*Inode {
         return getMountPointRoot("/dev");
     }
 
-    // Check if path starts with /disk/
     if (file_path.len >= 6 and
         file_path[0] == '/' and
         file_path[1] == 'd' and
@@ -569,7 +607,6 @@ pub fn resolvePath(file_path: []const u8) ?*Inode {
         return resolveInMountPoint("/disk", disk_path);
     }
 
-    // Check if path is exactly "/disk"
     if (file_path.len == 5 and
         file_path[0] == '/' and
         file_path[1] == 'd' and
@@ -644,7 +681,6 @@ pub fn resolvePath(file_path: []const u8) ?*Inode {
             continue;
         }
 
-        // Check if this component is a mount point
         if (component.len == 3 and component[0] == 'd' and component[1] == 'e' and component[2] == 'v') {
             if (getMountPointRoot("/dev")) |dev_root| {
                 current = dev_root;
@@ -653,7 +689,6 @@ pub fn resolvePath(file_path: []const u8) ?*Inode {
             }
         }
 
-        // Check if this component is /disk mount point
         if (component.len == 4 and component[0] == 'd' and component[1] == 'i' and component[2] == 's' and component[3] == 'k') {
             if (getMountPointRoot("/disk")) |disk_root| {
                 current = disk_root;
@@ -684,7 +719,7 @@ pub fn resolvePath(file_path: []const u8) ?*Inode {
 }
 
 // =============================================================================
-// Higher-Level File Operations
+// Higher-Level File Operations (with E3.2 unveil checks)
 // =============================================================================
 
 fn getParentInode(file_path: []const u8) ?*Inode {
@@ -704,7 +739,8 @@ fn getParentInode(file_path: []const u8) ?*Inode {
     return resolvePath(parent_path);
 }
 
-pub fn createFile(file_path: []const u8) ?*Inode {
+/// Internal createFile without unveil check (used by open with create flag)
+fn createFileInternal(file_path: []const u8) ?*Inode {
     if (root_fs == null) return null;
 
     const file_name = path.basename(file_path);
@@ -721,8 +757,19 @@ pub fn createFile(file_path: []const u8) ?*Inode {
     return null;
 }
 
+/// Public createFile with E3.2 unveil check
+pub fn createFile(file_path: []const u8) ?*Inode {
+    // E3.2: Unveil check for create
+    if (!checkUnveilCreate(file_path)) return null;
+
+    return createFileInternal(file_path);
+}
+
 pub fn createDir(dir_path: []const u8) ?*Inode {
     if (root_fs == null) return null;
+
+    // E3.2: Unveil check for create
+    if (!checkUnveilCreate(dir_path)) return null;
 
     const dir_name = path.basename(dir_path);
     if (dir_name.len == 0) return null;
@@ -741,6 +788,9 @@ pub fn createDir(dir_path: []const u8) ?*Inode {
 pub fn removeFile(file_path: []const u8) bool {
     if (root_fs == null) return false;
 
+    // E3.2: Unveil check for write (delete = write)
+    if (!checkUnveilWrite(file_path)) return false;
+
     const file_name = path.basename(file_path);
     if (file_name.len == 0) return false;
 
@@ -757,6 +807,9 @@ pub fn removeFile(file_path: []const u8) bool {
 
 pub fn removeDir(dir_path: []const u8) bool {
     if (root_fs == null) return false;
+
+    // E3.2: Unveil check for write (delete = write)
+    if (!checkUnveilWrite(dir_path)) return false;
 
     const dir_name = path.basename(dir_path);
     if (dir_name.len == 0) return false;

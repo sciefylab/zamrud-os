@@ -114,6 +114,14 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "sandbox")) {
         process_cmd.cmdSpawnSandbox(args);
     }
+    // === E3.2: Unveil Commands ===
+    else if (helpers.strEql(command, "unveil")) {
+        process_cmd.cmdUnveil(args);
+    } else if (helpers.strEql(command, "paths")) {
+        process_cmd.cmdPaths(args);
+    } else if (helpers.strEql(command, "sandbox-fs")) {
+        process_cmd.cmdSandboxFs(args);
+    }
     // Crypto command
     else if (helpers.strEql(command, "crypto")) {
         crypto_cmd.execute(args);

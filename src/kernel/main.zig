@@ -52,6 +52,9 @@ const identity_store = @import("persist/identity_store.zig");
 // E3.1: Process Capabilities
 const capability = @import("security/capability.zig");
 
+// E3.2: Filesystem Sandbox
+const unveil = @import("security/unveil.zig");
+
 // ============================================================================
 // Limine Requests
 // ============================================================================
@@ -143,6 +146,10 @@ export fn kernel_main() noreturn {
     capability.init();
     serial.writeString("[OK]   Capabilities ready (E3.1)\n");
 
+    // E3.2: Filesystem sandbox
+    unveil.init();
+    serial.writeString("[OK]   Unveil sandbox ready (E3.2)\n");
+
     crypto.init();
     serial.writeString("[OK]   Crypto ready\n");
 
@@ -150,7 +157,6 @@ export fn kernel_main() noreturn {
     serial.writeString("[OK]   Integrity ready\n");
 
     // NOTE: Blockchain init moved AFTER storage for disk persistence
-    // Will be initialized after FAT32 is mounted
 
     identity.init();
     serial.writeString("[OK]   Identity ready\n");
@@ -186,16 +192,13 @@ export fn kernel_main() noreturn {
     printLine();
     serial.writeString("[STORAGE]\n");
 
-    // Initialize storage subsystem (ATA + MBR + auto-format)
     storage.init();
     serial.writeString("[OK]   Storage ready\n");
 
-    // Initialize FAT32 filesystem driver
     fat32.init();
     if (fat32.isMounted()) {
         serial.writeString("[OK]   FAT32 mounted\n");
 
-        // Mount FAT32 to VFS at /disk
         if (fat32.mountToVfs()) {
             serial.writeString("[OK]   FAT32 -> VFS /disk\n");
         } else {
@@ -205,7 +208,6 @@ export fn kernel_main() noreturn {
         serial.writeString("[WARN] FAT32 not mounted\n");
     }
 
-    // Initialize blockchain AFTER storage (for persistence)
     if (chain.init()) {
         serial.writeString("[OK]   Blockchain ready");
         if (chain.hasSavedChain()) {
@@ -340,6 +342,8 @@ fn printSystemSummary() void {
     serial.writeString(if (crypto.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  Caps(E3.1): ");
     serial.writeString(if (capability.isInitialized()) "ACTIVE\n" else "NO\n");
+    serial.writeString("  Unveil(E3.2):");
+    serial.writeString(if (unveil.isInitialized()) "ACTIVE\n" else "NO\n");
     serial.writeString("  Storage:    ");
     serial.writeString(if (storage.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  FAT32:      ");
@@ -386,6 +390,11 @@ fn printSystemSummary() void {
     serial.writeString("  Violations: ");
     printDecSerial(capability.getTotalViolations());
     serial.writeString("\n");
+    serial.writeString("  FS Sandbox: ");
+    printDecSerial(unveil.getTableCount());
+    serial.writeString(" tables, ");
+    printDecSerial(unveil.getViolationCount());
+    serial.writeString(" violations\n");
     serial.writeString("  -----------------------------\n");
     serial.writeString("  Type 'help' for commands\n\n");
 }
