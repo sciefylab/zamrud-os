@@ -1,5 +1,5 @@
 //! Zamrud OS - Main Kernel with Security Integration
-//! Phases A-E3.4 Complete
+//! Phases A-E3.5 Complete
 
 const cpu = @import("core/cpu.zig");
 const limine = @import("core/limine.zig");
@@ -61,6 +61,9 @@ const binaryverify = @import("security/binaryverify.zig");
 
 // E3.4: Network Capability
 const net_capability = @import("security/net_capability.zig");
+
+// E3.5: Unified Violation Handler
+const violation = @import("security/violation.zig");
 
 // ============================================================================
 // Limine Requests
@@ -160,6 +163,10 @@ export fn kernel_main() noreturn {
     // E3.3: Binary verification
     binaryverify.init();
     serial.writeString("[OK]   Binary verify ready (E3.3)\n");
+
+    // E3.5: Unified violation handler
+    violation.init();
+    serial.writeString("[OK]   Violation handler ready (E3.5)\n");
 
     crypto.init();
     serial.writeString("[OK]   Crypto ready\n");
@@ -378,6 +385,17 @@ fn printSystemSummary() void {
     } else {
         serial.writeString("NO\n");
     }
+    serial.writeString("  ViolHdl(E3.5):");
+    if (violation.isInitialized()) {
+        printDecSerial(violation.getStats().total_incidents);
+        serial.writeString(" incidents (");
+        printDecSerial(violation.getStats().kills);
+        serial.writeString(" kills, ");
+        printDecSerial(violation.getStats().blacklists);
+        serial.writeString(" bans)\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
     serial.writeString("  Storage:    ");
     serial.writeString(if (storage.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  FAT32:      ");
@@ -434,6 +452,15 @@ fn printSystemSummary() void {
     serial.writeString(" (");
     printDecSerial(net_capability.getStats().processes_killed);
     serial.writeString(" killed)\n");
+    serial.writeString("  Sec Pipeline:");
+    printDecSerial(violation.getStats().total_incidents);
+    serial.writeString(" total, ");
+    printDecSerial(violation.getStats().warns);
+    serial.writeString(" warn, ");
+    printDecSerial(violation.getStats().kills);
+    serial.writeString(" kill, ");
+    printDecSerial(violation.getStats().blacklists);
+    serial.writeString(" ban\n");
     serial.writeString("  -----------------------------\n");
     serial.writeString("  Type 'help' for commands\n\n");
 }

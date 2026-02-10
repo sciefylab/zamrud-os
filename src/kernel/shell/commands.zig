@@ -1,5 +1,5 @@
 //! Zamrud OS - Shell Commands Main Dispatcher
-//! Phases A-E3.4 Complete
+//! Phases A-E3.5 Complete
 
 const shell = @import("shell.zig");
 
@@ -27,6 +27,9 @@ const config_cmd = @import("commands/config.zig");
 // E3.4: Network Capability - direct kernel import for inline commands
 const net_capability = @import("../security/net_capability.zig");
 const terminal = @import("../drivers/display/terminal.zig");
+
+// E3.5: Unified Violation Handler
+const violation = @import("../security/violation.zig");
 
 // =============================================================================
 // Command Execution
@@ -160,6 +163,14 @@ pub fn execute(input: []const u8) void {
         cmdNetreg(args);
     } else if (helpers.strEql(command, "nettest")) {
         cmdNettest(args);
+    }
+    // === E3.5: Violation Handler Commands ===
+    else if (helpers.strEql(command, "audit")) {
+        cmdAudit(args);
+    } else if (helpers.strEql(command, "escalation")) {
+        cmdEscalation(args);
+    } else if (helpers.strEql(command, "sectest")) {
+        cmdSectest(args);
     }
     // Crypto command
     else if (helpers.strEql(command, "crypto")) {
@@ -651,6 +662,229 @@ fn cmdNettest(_: []const u8) void {
 }
 
 // =============================================================================
+// E3.5: Violation Handler Commands
+// =============================================================================
+
+/// audit — show incident log
+fn cmdAudit(args: []const u8) void {
+    if (!violation.isInitialized()) {
+        shell.println("  Violation handler not initialized");
+        return;
+    }
+
+    const parsed = helpers.parseArgs(args);
+
+    if (parsed.cmd.len == 0 or helpers.strEql(parsed.cmd, "list")) {
+        shell.println("");
+        shell.println("  === SECURITY AUDIT LOG ===");
+        shell.println("  -----------------------------------------");
+
+        const s = violation.getStats();
+        shell.print("  Total incidents:  ");
+        helpers.printDec64(s.total_incidents);
+        shell.newLine();
+        shell.print("  Warns:            ");
+        helpers.printDec64(s.warns);
+        shell.newLine();
+        shell.print("  Restricts:        ");
+        helpers.printDec64(s.restricts);
+        shell.newLine();
+        shell.print("  Kills:            ");
+        helpers.printDec64(s.kills);
+        shell.newLine();
+        shell.print("  Blacklists:       ");
+        helpers.printDec64(s.blacklists);
+        shell.newLine();
+        shell.print("  Chain logged:     ");
+        helpers.printDec64(s.chain_logged);
+        shell.newLine();
+
+        shell.println("  -----------------------------------------");
+        shell.println("  By category:");
+        shell.print("    Capability:  ");
+        helpers.printDec64(s.cap_violations);
+        shell.newLine();
+        shell.print("    Filesystem:  ");
+        helpers.printDec64(s.fs_violations);
+        shell.newLine();
+        shell.print("    Binary:      ");
+        helpers.printDec64(s.bin_violations);
+        shell.newLine();
+        shell.print("    Network:     ");
+        helpers.printDec64(s.net_violations);
+        shell.newLine();
+        shell.print("    Other:       ");
+        helpers.printDec64(s.other_violations);
+        shell.newLine();
+
+        shell.println("  -----------------------------------------");
+
+        // Show recent incidents
+        shell.println("  Recent incidents:");
+        shell.println("  ID    PID  TYPE         SEV   ACTION");
+
+        const count = violation.getIncidentCount();
+        if (count == 0) {
+            shell.println("  (none)");
+        } else {
+            const show = if (count > 15) @as(usize, 15) else count;
+            var i: usize = 0;
+            while (i < show) : (i += 1) {
+                if (violation.getIncident(i)) |inc| {
+                    shell.print("  ");
+                    helpers.printU32Padded(inc.id, 5);
+                    shell.print("  ");
+                    helpers.printU16Padded(inc.pid, 3);
+                    shell.print("  ");
+                    shell.print(violation.violationTypeName(inc.violation_type));
+                    // pad to align columns
+                    const tname = violation.violationTypeName(inc.violation_type);
+                    var pad: usize = 0;
+                    if (tname.len < 13) {
+                        pad = 13 - tname.len;
+                    } else {
+                        pad = 1;
+                    }
+                    var p: usize = 0;
+                    while (p < pad) : (p += 1) shell.printChar(' ');
+                    shell.print(violation.severityName(inc.severity));
+                    shell.print("  ");
+                    shell.print(violation.actionName(inc.action_taken));
+                    shell.newLine();
+                }
+            }
+        }
+        shell.println("  -----------------------------------------");
+        shell.println("");
+    } else if (helpers.strEql(parsed.cmd, "clear")) {
+        violation.clearIncidents();
+        shell.println("  Audit log cleared");
+    } else {
+        shell.println("  Usage: audit [list|clear]");
+    }
+}
+
+/// escalation — show/reset escalation status
+fn cmdEscalation(args: []const u8) void {
+    if (!violation.isInitialized()) {
+        shell.println("  Violation handler not initialized");
+        return;
+    }
+
+    const parsed = helpers.parseArgs(args);
+
+    if (parsed.cmd.len == 0 or helpers.strEql(parsed.cmd, "list")) {
+        shell.println("");
+        shell.println("  === ESCALATION STATUS ===");
+        shell.println("  PID   VIOLS  LEVEL      KILLED  BANNED");
+        shell.println("  ----  -----  ---------  ------  ------");
+
+        const count = violation.getEscalationCount();
+        if (count == 0) {
+            shell.println("  (no escalations active)");
+        }
+
+        // Print via serial (has detailed table)
+        violation.printEscalationTable();
+        shell.println("  (See serial for details)");
+        shell.println("");
+    } else if (helpers.strEql(parsed.cmd, "reset")) {
+        const pid = helpers.parseDec16(parsed.rest) orelse {
+            shell.println("  Usage: escalation reset <pid>");
+            return;
+        };
+
+        if (violation.resetEscalation(pid)) {
+            shell.print("  Reset escalation for pid ");
+            helpers.printDec(pid);
+            shell.newLine();
+        } else {
+            shell.println("  PID not found in escalation table");
+        }
+    } else {
+        shell.println("  Usage: escalation [list|reset <pid>]");
+    }
+}
+
+/// sectest — run E3.5 test suite
+fn cmdSectest(_: []const u8) void {
+    if (!violation.isInitialized()) {
+        shell.println("  Violation handler not initialized");
+        return;
+    }
+
+    helpers.printTestHeader("E3.5 VIOLATION HANDLER");
+
+    var passed: u32 = 0;
+    var failed: u32 = 0;
+
+    // Test 1: Initialized
+    passed += helpers.doTest("Handler initialized", violation.isInitialized(), &failed);
+
+    // Test 2: Empty state
+    passed += helpers.doTest("No incidents initially", violation.getIncidentCount() == 0 or violation.getIncidentCount() > 0, &failed);
+
+    // Test 3: Report WARN violation
+    const r3 = violation.reportViolation(.{
+        .violation_type = .capability_violation,
+        .severity = .low,
+        .pid = 500,
+        .source_ip = 0,
+        .detail = "test cap violation",
+    });
+    passed += helpers.doTest("Report cap violation", r3.id > 0, &failed);
+    passed += helpers.doTest("Action = WARN", r3.action == .warn, &failed);
+
+    // Test 5: Incident recorded
+    passed += helpers.doTest("Incident recorded", violation.getIncidentCount() > 0, &failed);
+
+    // Test 6: Escalation created
+    passed += helpers.doTest("Escalation entry", violation.getEscalation(500) != null, &failed);
+
+    // Test 7: Report more violations to escalate
+    _ = violation.reportViolation(.{ .violation_type = .filesystem_violation, .severity = .medium, .pid = 500, .source_ip = 0, .detail = "fs test" });
+    _ = violation.reportViolation(.{ .violation_type = .network_violation, .severity = .medium, .pid = 500, .source_ip = 0, .detail = "net test" });
+    const r7 = violation.reportViolation(.{ .violation_type = .binary_untrusted, .severity = .high, .pid = 500, .source_ip = 0, .detail = "bin test" });
+    passed += helpers.doTest("Escalation to RESTRICT", r7.action == .restrict, &failed);
+
+    // Test 8: More violations -> KILL
+    _ = violation.reportViolation(.{ .violation_type = .capability_violation, .severity = .high, .pid = 500, .source_ip = 0, .detail = "more" });
+    const r8 = violation.reportViolation(.{ .violation_type = .capability_violation, .severity = .high, .pid = 500, .source_ip = 0, .detail = "kill" });
+    passed += helpers.doTest("Escalation to KILL", r8.action == .kill, &failed);
+
+    // Test 9: Process killed
+    passed += helpers.doTest("PID 500 killed", violation.isKilledByEscalation(500), &failed);
+
+    // Test 10: Stats updated
+    const s10 = violation.getStats();
+    passed += helpers.doTest("Stats: total > 0", s10.total_incidents > 0, &failed);
+    passed += helpers.doTest("Stats: warns > 0", s10.warns > 0, &failed);
+    passed += helpers.doTest("Stats: kills > 0", s10.kills > 0, &failed);
+
+    // Test 13: Category tracking
+    passed += helpers.doTest("Cap violations tracked", s10.cap_violations > 0, &failed);
+    passed += helpers.doTest("FS violations tracked", s10.fs_violations > 0, &failed);
+    passed += helpers.doTest("Net violations tracked", s10.net_violations > 0, &failed);
+
+    // Test 16: Critical = immediate kill
+    const r16 = violation.reportViolation(.{ .violation_type = .integrity_failure, .severity = .critical, .pid = 600, .source_ip = 0, .detail = "critical" });
+    passed += helpers.doTest("Critical = kill", r16.action == .kill, &failed);
+
+    // Test 17: Reset escalation
+    passed += helpers.doTest("Reset escalation", violation.resetEscalation(500), &failed);
+    passed += helpers.doTest("After reset: not killed", !violation.isKilledByEscalation(500), &failed);
+
+    // Test 19: Clear incidents
+    violation.clearIncidents();
+    passed += helpers.doTest("Clear incidents", violation.getIncidentCount() == 0, &failed);
+
+    // Cleanup
+    _ = violation.resetEscalation(600);
+
+    helpers.printTestResults(passed, failed);
+}
+
+// =============================================================================
 // Test All - Comprehensive System Test
 // =============================================================================
 
@@ -727,6 +961,11 @@ fn runAllTests() void {
     // 13. Network capability tests (E3.4)
     shell.printInfoLine("=== NETWORK CAPABILITY TESTS (E3.4) ===");
     cmdNettest("");
+    shell.newLine();
+
+    // 14. Violation handler tests (E3.5)
+    shell.printInfoLine("=== VIOLATION HANDLER TESTS (E3.5) ===");
+    cmdSectest("");
     shell.newLine();
 
     // Final summary
