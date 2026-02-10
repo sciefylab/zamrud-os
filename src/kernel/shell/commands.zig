@@ -1,5 +1,5 @@
 //! Zamrud OS - Shell Commands Main Dispatcher
-//! Phases A-E3.5 Complete
+//! Phases A-F1 Complete
 
 const shell = @import("shell.zig");
 
@@ -24,12 +24,18 @@ const smoke_cmd = @import("commands/smoke.zig");
 const disk_cmd = @import("commands/disk.zig");
 const config_cmd = @import("commands/config.zig");
 
-// E3.4: Network Capability - direct kernel import for inline commands
+// E3.4: Network Capability
 const net_capability = @import("../security/net_capability.zig");
 const terminal = @import("../drivers/display/terminal.zig");
 
 // E3.5: Unified Violation Handler
 const violation = @import("../security/violation.zig");
+
+// E3.1: Capabilities (for ipctest)
+const capability = @import("../security/capability.zig");
+
+// F1: IPC
+const ipc = @import("../ipc/ipc.zig");
 
 // =============================================================================
 // Command Execution
@@ -172,6 +178,16 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "sectest")) {
         cmdSectest(args);
     }
+    // === F1: IPC Commands ===
+    else if (helpers.strEql(command, "ipc")) {
+        cmdIpc(args);
+    } else if (helpers.strEql(command, "msgsend")) {
+        cmdMsgSend(args);
+    } else if (helpers.strEql(command, "msgrecv")) {
+        cmdMsgRecv(args);
+    } else if (helpers.strEql(command, "ipctest")) {
+        cmdIpcTest(args);
+    }
     // Crypto command
     else if (helpers.strEql(command, "crypto")) {
         crypto_cmd.execute(args);
@@ -272,10 +288,9 @@ pub fn execute(input: []const u8) void {
 }
 
 // =============================================================================
-// E3.4: Network Capability Commands (inline)
+// E3.4: Network Capability Commands
 // =============================================================================
 
-/// netcap — show network capability status
 fn cmdNetcap(_: []const u8) void {
     if (!net_capability.isInitialized()) {
         shell.println("  Network capability not initialized");
@@ -284,7 +299,7 @@ fn cmdNetcap(_: []const u8) void {
 
     shell.println("");
     shell.println("  === NETWORK CAPABILITY STATUS (E3.4) ===");
-    shell.println("  ─────────────────────────────────────────");
+    shell.println("  -----------------------------------------");
 
     const s = net_capability.getStats();
 
@@ -300,7 +315,7 @@ fn cmdNetcap(_: []const u8) void {
     helpers.printDec(net_capability.getNetRuleCount());
     shell.newLine();
 
-    shell.println("  ─────────────────────────────────────────");
+    shell.println("  -----------------------------------------");
 
     shell.print("  Checks total:     ");
     helpers.printDec64(s.checks_total);
@@ -330,11 +345,10 @@ fn cmdNetcap(_: []const u8) void {
     helpers.printDec64(s.sockets_closed);
     shell.newLine();
 
-    shell.println("  ─────────────────────────────────────────");
+    shell.println("  -----------------------------------------");
     shell.println("");
 }
 
-/// netprocs — show per-process network table
 fn cmdNetprocs(_: []const u8) void {
     if (!net_capability.isInitialized()) {
         shell.println("  Network capability not initialized");
@@ -344,16 +358,14 @@ fn cmdNetprocs(_: []const u8) void {
     shell.println("");
     shell.println("  === NET-CAP PROCESS TABLE ===");
     shell.println("  PID  NET  MODE        SOCKS  VIOLS  STATUS");
-    shell.println("  ───  ───  ──────────  ─────  ─────  ──────");
+    shell.println("  ---  ---  ----------  -----  -----  ------");
 
-    // Use serial print since it has the table display
     net_capability.printProcessTable();
 
     shell.println("  (See serial output for detailed table)");
     shell.println("");
 }
 
-/// netsockets — show socket ownership
 fn cmdNetsockets(_: []const u8) void {
     if (!net_capability.isInitialized()) {
         shell.println("  Network capability not initialized");
@@ -389,23 +401,18 @@ fn cmdNetsockets(_: []const u8) void {
     shell.println("");
 }
 
-/// netreg <pid> [caps] — register process for net capability tracking
 fn cmdNetreg(args: []const u8) void {
     if (args.len == 0) {
         shell.println("  Usage: netreg <pid> [caps_hex]");
-        shell.println("  Example: netreg 5 0008    (register pid 5 with CAP_NET)");
-        shell.println("  Example: netreg 10 0000   (register pid 10, no net)");
         return;
     }
 
-    // Parse PID
     const parsed = helpers.parseArgs(args);
     const pid = helpers.parseDec16(parsed.cmd) orelse {
         shell.println("  Invalid PID");
         return;
     };
 
-    // Parse optional caps
     var caps: u32 = 0;
     if (parsed.rest.len > 0) {
         caps = helpers.parseHex32(parsed.rest) orelse 0;
@@ -423,7 +430,6 @@ fn cmdNetreg(args: []const u8) void {
     }
 }
 
-/// netallow <pid> — grant CAP_NET to process
 fn cmdNetallow(args: []const u8) void {
     if (args.len == 0) {
         shell.println("  Usage: netallow <pid>");
@@ -444,7 +450,6 @@ fn cmdNetallow(args: []const u8) void {
     }
 }
 
-/// netdeny <pid> — set deny_all mode (block ALL network)
 fn cmdNetdeny(args: []const u8) void {
     if (args.len == 0) {
         shell.println("  Usage: netdeny <pid>");
@@ -459,13 +464,12 @@ fn cmdNetdeny(args: []const u8) void {
     if (net_capability.setNetMode(pid, .deny_all)) {
         shell.print("  Set DENY_ALL for pid ");
         helpers.printDec(pid);
-        shell.println(" — all network blocked");
+        shell.println(" -- all network blocked");
     } else {
         shell.println("  Failed: process not registered");
     }
 }
 
-/// netrevoke <pid> — revoke CAP_NET + close all sockets
 fn cmdNetrevoke(args: []const u8) void {
     if (args.len == 0) {
         shell.println("  Usage: netrevoke <pid>");
@@ -480,17 +484,15 @@ fn cmdNetrevoke(args: []const u8) void {
     if (net_capability.revokeNetCapability(pid)) {
         shell.print("  Revoked CAP_NET for pid ");
         helpers.printDec(pid);
-        shell.println(" — sockets closed");
+        shell.println(" -- sockets closed");
     } else {
         shell.println("  Failed: process not registered");
     }
 }
 
-/// netrestrict <pid> — set restricted mode (only allowed IPs/ports)
 fn cmdNetrestrict(args: []const u8) void {
     if (args.len == 0) {
         shell.println("  Usage: netrestrict <pid>");
-        shell.println("  Then use addip/addport to configure allowlist");
         return;
     }
 
@@ -508,7 +510,6 @@ fn cmdNetrestrict(args: []const u8) void {
     }
 }
 
-/// netreset <pid> — reset violations and un-kill process
 fn cmdNetreset(args: []const u8) void {
     if (args.len == 0) {
         shell.println("  Usage: netreset <pid>");
@@ -526,7 +527,6 @@ fn cmdNetreset(args: []const u8) void {
     shell.newLine();
 }
 
-/// netviolations — show all violation stats
 fn cmdNetviolations(_: []const u8) void {
     if (!net_capability.isInitialized()) {
         shell.println("  Network capability not initialized");
@@ -535,7 +535,7 @@ fn cmdNetviolations(_: []const u8) void {
 
     shell.println("");
     shell.println("  === NETWORK VIOLATION REPORT ===");
-    shell.println("  ────────────────────────────────");
+    shell.println("  --------------------------------");
 
     const s = net_capability.getStats();
 
@@ -555,15 +555,13 @@ fn cmdNetviolations(_: []const u8) void {
     helpers.printDec64(s.processes_killed);
     shell.newLine();
 
-    shell.println("  ────────────────────────────────");
+    shell.println("  --------------------------------");
 
-    // Show per-process detail via serial
     net_capability.printProcessTable();
     shell.println("  (Detailed table on serial)");
     shell.println("");
 }
 
-/// nettest — run E3.4 test suite (simple format like other tests)
 fn cmdNettest(_: []const u8) void {
     if (!net_capability.isInitialized()) {
         shell.println("  Network capability not initialized");
@@ -575,85 +573,62 @@ fn cmdNettest(_: []const u8) void {
     var passed: u32 = 0;
     var failed: u32 = 0;
 
-    // Test 1
     passed += helpers.doTest("NetCap initialized", net_capability.isInitialized(), &failed);
 
-    // Test 2
     passed += helpers.doTest("Register pid=100 +NET", net_capability.registerProcess(100, 0x0008), &failed);
-
-    // Test 3
     passed += helpers.doTest("Register pid=200 noNET", net_capability.registerProcess(200, 0x0000), &failed);
 
-    // Test 4
     const r4 = net_capability.checkCreate(0);
     passed += helpers.doTest("Kernel create allowed", r4.action == .allowed, &failed);
 
-    // Test 5
     const r5 = net_capability.checkCreate(100);
     passed += helpers.doTest("pid=100 create OK", r5.action == .allowed, &failed);
 
-    // Test 6
     const r6 = net_capability.checkCreate(200);
     passed += helpers.doTest("pid=200 create BLOCKED", r6.action == .blocked_no_cap, &failed);
 
-    // Test 7
     _ = net_capability.registerSocket(0, 100, 1, 8080);
     const owner7 = net_capability.getSocketOwner(0);
     passed += helpers.doTest("Socket ownership", owner7 != null and owner7.? == 100, &failed);
 
-    // Test 8
     const r8 = net_capability.checkBind(100, 0, 8080);
     passed += helpers.doTest("pid=100 bind OK", r8.action == .allowed, &failed);
 
-    // Test 9
     const r9 = net_capability.checkBind(200, 0, 8080);
     passed += helpers.doTest("pid=200 bind BLOCKED", r9.action == .blocked_no_cap, &failed);
 
-    // Test 10
     const r10 = net_capability.checkConnect(100, 0x0A000203, 53);
     passed += helpers.doTest("pid=100 connect OK", r10.action == .allowed, &failed);
 
-    // Test 11
     const r11 = net_capability.checkConnect(200, 0x0A000203, 53);
     passed += helpers.doTest("pid=200 connect BLOCK", r11.action == .blocked_no_cap, &failed);
 
-    // Test 12
     const r12 = net_capability.checkSend(100);
     passed += helpers.doTest("pid=100 send OK", r12.action == .allowed, &failed);
 
-    // Test 13
     const r13 = net_capability.checkSend(200);
     passed += helpers.doTest("pid=200 send BLOCKED", r13.action != .allowed, &failed);
 
-    // Test 14
     passed += helpers.doTest("pid=200 violations>=3", net_capability.getViolations(200) >= 3, &failed);
-
-    // Test 15
     passed += helpers.doTest("pid=200 auto-killed", net_capability.isKilled(200), &failed);
 
-    // Test 16
     _ = net_capability.registerProcess(300, 0x0008);
     const set_ok = net_capability.setNetMode(300, .restricted);
     const add_ok = net_capability.addAllowedIP(300, 0x01020304);
     passed += helpers.doTest("Restricted mode setup", set_ok and add_ok, &failed);
 
-    // Test 17
     const r17 = net_capability.checkConnect(300, 0x01020304, 80);
     passed += helpers.doTest("Allowed IP connect OK", r17.action == .allowed, &failed);
 
-    // Test 18
     const r18 = net_capability.checkConnect(300, 0x05060708, 80);
     passed += helpers.doTest("Bad IP BLOCKED", r18.action == .blocked_restricted, &failed);
 
-    // Test 19
     const revoked = net_capability.revokeNetCapability(100);
     passed += helpers.doTest("Revoke CAP_NET", revoked and !net_capability.hasNetCapability(100), &failed);
 
-    // Test 20
     const r20 = net_capability.checkCreate(100);
     passed += helpers.doTest("After revoke BLOCKED", r20.action == .blocked_no_cap, &failed);
 
-    // Cleanup
     net_capability.unregisterProcess(100);
     net_capability.unregisterProcess(200);
     net_capability.unregisterProcess(300);
@@ -665,7 +640,6 @@ fn cmdNettest(_: []const u8) void {
 // E3.5: Violation Handler Commands
 // =============================================================================
 
-/// audit — show incident log
 fn cmdAudit(args: []const u8) void {
     if (!violation.isInitialized()) {
         shell.println("  Violation handler not initialized");
@@ -719,7 +693,6 @@ fn cmdAudit(args: []const u8) void {
 
         shell.println("  -----------------------------------------");
 
-        // Show recent incidents
         shell.println("  Recent incidents:");
         shell.println("  ID    PID  TYPE         SEV   ACTION");
 
@@ -737,7 +710,6 @@ fn cmdAudit(args: []const u8) void {
                     helpers.printU16Padded(inc.pid, 3);
                     shell.print("  ");
                     shell.print(violation.violationTypeName(inc.violation_type));
-                    // pad to align columns
                     const tname = violation.violationTypeName(inc.violation_type);
                     var pad: usize = 0;
                     if (tname.len < 13) {
@@ -764,7 +736,6 @@ fn cmdAudit(args: []const u8) void {
     }
 }
 
-/// escalation — show/reset escalation status
 fn cmdEscalation(args: []const u8) void {
     if (!violation.isInitialized()) {
         shell.println("  Violation handler not initialized");
@@ -784,7 +755,6 @@ fn cmdEscalation(args: []const u8) void {
             shell.println("  (no escalations active)");
         }
 
-        // Print via serial (has detailed table)
         violation.printEscalationTable();
         shell.println("  (See serial for details)");
         shell.println("");
@@ -806,7 +776,6 @@ fn cmdEscalation(args: []const u8) void {
     }
 }
 
-/// sectest — run E3.5 test suite
 fn cmdSectest(_: []const u8) void {
     if (!violation.isInitialized()) {
         shell.println("  Violation handler not initialized");
@@ -818,13 +787,9 @@ fn cmdSectest(_: []const u8) void {
     var passed: u32 = 0;
     var failed: u32 = 0;
 
-    // Test 1: Initialized
     passed += helpers.doTest("Handler initialized", violation.isInitialized(), &failed);
-
-    // Test 2: Empty state
     passed += helpers.doTest("No incidents initially", violation.getIncidentCount() == 0 or violation.getIncidentCount() > 0, &failed);
 
-    // Test 3: Report WARN violation
     const r3 = violation.reportViolation(.{
         .violation_type = .capability_violation,
         .severity = .low,
@@ -835,51 +800,281 @@ fn cmdSectest(_: []const u8) void {
     passed += helpers.doTest("Report cap violation", r3.id > 0, &failed);
     passed += helpers.doTest("Action = WARN", r3.action == .warn, &failed);
 
-    // Test 5: Incident recorded
     passed += helpers.doTest("Incident recorded", violation.getIncidentCount() > 0, &failed);
-
-    // Test 6: Escalation created
     passed += helpers.doTest("Escalation entry", violation.getEscalation(500) != null, &failed);
 
-    // Test 7: Report more violations to escalate
     _ = violation.reportViolation(.{ .violation_type = .filesystem_violation, .severity = .medium, .pid = 500, .source_ip = 0, .detail = "fs test" });
     _ = violation.reportViolation(.{ .violation_type = .network_violation, .severity = .medium, .pid = 500, .source_ip = 0, .detail = "net test" });
     const r7 = violation.reportViolation(.{ .violation_type = .binary_untrusted, .severity = .high, .pid = 500, .source_ip = 0, .detail = "bin test" });
     passed += helpers.doTest("Escalation to RESTRICT", r7.action == .restrict, &failed);
 
-    // Test 8: More violations -> KILL
     _ = violation.reportViolation(.{ .violation_type = .capability_violation, .severity = .high, .pid = 500, .source_ip = 0, .detail = "more" });
     const r8 = violation.reportViolation(.{ .violation_type = .capability_violation, .severity = .high, .pid = 500, .source_ip = 0, .detail = "kill" });
     passed += helpers.doTest("Escalation to KILL", r8.action == .kill, &failed);
 
-    // Test 9: Process killed
     passed += helpers.doTest("PID 500 killed", violation.isKilledByEscalation(500), &failed);
 
-    // Test 10: Stats updated
     const s10 = violation.getStats();
     passed += helpers.doTest("Stats: total > 0", s10.total_incidents > 0, &failed);
     passed += helpers.doTest("Stats: warns > 0", s10.warns > 0, &failed);
     passed += helpers.doTest("Stats: kills > 0", s10.kills > 0, &failed);
 
-    // Test 13: Category tracking
     passed += helpers.doTest("Cap violations tracked", s10.cap_violations > 0, &failed);
     passed += helpers.doTest("FS violations tracked", s10.fs_violations > 0, &failed);
     passed += helpers.doTest("Net violations tracked", s10.net_violations > 0, &failed);
 
-    // Test 16: Critical = immediate kill
     const r16 = violation.reportViolation(.{ .violation_type = .integrity_failure, .severity = .critical, .pid = 600, .source_ip = 0, .detail = "critical" });
     passed += helpers.doTest("Critical = kill", r16.action == .kill, &failed);
 
-    // Test 17: Reset escalation
     passed += helpers.doTest("Reset escalation", violation.resetEscalation(500), &failed);
     passed += helpers.doTest("After reset: not killed", !violation.isKilledByEscalation(500), &failed);
 
-    // Test 19: Clear incidents
     violation.clearIncidents();
     passed += helpers.doTest("Clear incidents", violation.getIncidentCount() == 0, &failed);
 
-    // Cleanup
     _ = violation.resetEscalation(600);
+
+    helpers.printTestResults(passed, failed);
+}
+
+// =============================================================================
+// F1: IPC Commands
+// =============================================================================
+
+/// ipc -- show IPC status
+fn cmdIpc(args: []const u8) void {
+    if (!ipc.isInitialized()) {
+        shell.println("  IPC not initialized");
+        return;
+    }
+
+    const parsed = helpers.parseArgs(args);
+
+    if (parsed.cmd.len == 0 or helpers.strEql(parsed.cmd, "status")) {
+        shell.println("");
+        shell.println("  === IPC STATUS (F1) ===");
+        shell.println("  -----------------------------");
+
+        const ms = ipc.message.getStats();
+        shell.print("  Mailboxes:    ");
+        helpers.printDec(ipc.message.getMailboxCount());
+        shell.newLine();
+        shell.print("  Msgs sent:    ");
+        helpers.printDec64(ms.total_sent);
+        shell.newLine();
+        shell.print("  Msgs recv:    ");
+        helpers.printDec64(ms.total_received);
+        shell.newLine();
+        shell.print("  Msgs dropped: ");
+        helpers.printDec64(ms.total_dropped);
+        shell.newLine();
+
+        const ps = ipc.pipe.getStats();
+        shell.println("  -----------------------------");
+        shell.print("  Pipes active: ");
+        helpers.printDec(ipc.pipe.getActivePipeCount());
+        shell.newLine();
+        shell.print("  Pipe bytes W: ");
+        helpers.printDec64(ps.total_bytes_written);
+        shell.newLine();
+        shell.print("  Pipe bytes R: ");
+        helpers.printDec64(ps.total_bytes_read);
+        shell.newLine();
+
+        const ss = ipc.signal.getStats();
+        shell.println("  -----------------------------");
+        shell.print("  Sig procs:    ");
+        helpers.printDec(ipc.signal.getRegisteredCount());
+        shell.newLine();
+        shell.print("  Sigs sent:    ");
+        helpers.printDec64(ss.total_sent);
+        shell.newLine();
+        shell.print("  Sigs delivered:");
+        helpers.printDec64(ss.total_delivered);
+        shell.newLine();
+        shell.print("  Sig kills:    ");
+        helpers.printDec64(ss.total_kills);
+        shell.newLine();
+
+        shell.println("  -----------------------------");
+        shell.println("");
+    } else {
+        shell.println("  Usage: ipc [status]");
+    }
+}
+
+/// msgsend <pid> <message> -- send message to process
+fn cmdMsgSend(args: []const u8) void {
+    if (!ipc.isInitialized()) {
+        shell.println("  IPC not initialized");
+        return;
+    }
+
+    const parsed = helpers.parseArgs(args);
+    if (parsed.cmd.len == 0 or parsed.rest.len == 0) {
+        shell.println("  Usage: msgsend <pid> <message>");
+        return;
+    }
+
+    const pid = helpers.parseDec16(parsed.cmd) orelse {
+        shell.println("  Invalid PID");
+        return;
+    };
+
+    const result = ipc.message.send(0, pid, .data, parsed.rest);
+    switch (result) {
+        .ok => {
+            shell.print("  Sent to pid=");
+            helpers.printDec(pid);
+            shell.newLine();
+        },
+        .no_mailbox => shell.println("  No mailbox for that PID (create first)"),
+        .mailbox_full => shell.println("  Mailbox full"),
+        else => shell.println("  Send failed"),
+    }
+}
+
+/// msgrecv <pid> -- receive messages for process
+fn cmdMsgRecv(args: []const u8) void {
+    if (!ipc.isInitialized()) {
+        shell.println("  IPC not initialized");
+        return;
+    }
+
+    if (args.len == 0) {
+        shell.println("  Usage: msgrecv <pid>");
+        return;
+    }
+
+    const pid = helpers.parseDec16(args) orelse {
+        shell.println("  Invalid PID");
+        return;
+    };
+
+    const pending = ipc.message.pendingCount(pid);
+    shell.print("  Pending messages for pid=");
+    helpers.printDec(pid);
+    shell.print(": ");
+    helpers.printDec(pending);
+    shell.newLine();
+
+    var count: u32 = 0;
+    while (count < 10) : (count += 1) {
+        const result = ipc.message.recv(pid);
+        if (!result.success) {
+            shell.println("  (no cap or no mailbox)");
+            break;
+        }
+        if (result.message) |msg| {
+            shell.print("  [");
+            helpers.printDec(count);
+            shell.print("] from=");
+            helpers.printDec(msg.sender_pid);
+            shell.print(" \"");
+            shell.print(msg.getData());
+            shell.println("\"");
+        } else break;
+    }
+
+    if (count == 0) {
+        shell.println("  (no messages)");
+    }
+}
+
+/// ipctest -- run F1 IPC test suite
+fn cmdIpcTest(_: []const u8) void {
+    if (!ipc.isInitialized()) {
+        shell.println("  IPC not initialized");
+        return;
+    }
+
+    helpers.printTestHeader("F1 IPC SUBSYSTEM");
+
+    var passed: u32 = 0;
+    var failed: u32 = 0;
+
+    // === Message Tests ===
+    passed += helpers.doTest("IPC initialized", ipc.isInitialized(), &failed);
+
+    passed += helpers.doTest("Create mailbox pid=10", ipc.message.createMailbox(10), &failed);
+    passed += helpers.doTest("Create mailbox pid=20", ipc.message.createMailbox(20), &failed);
+    passed += helpers.doTest("Mailbox count>=2", ipc.message.getMailboxCount() >= 2, &failed);
+
+    const s1 = ipc.message.send(0, 10, .data, "hello from kernel");
+    passed += helpers.doTest("Send kernel->10", s1 == .ok, &failed);
+
+    passed += helpers.doTest("Pending=1 for pid=10", ipc.message.pendingCount(10) == 1, &failed);
+
+    const r1 = ipc.message.recv(10);
+    passed += helpers.doTest("Recv success", r1.success, &failed);
+    passed += helpers.doTest("Recv has message", r1.message != null, &failed);
+
+    passed += helpers.doTest("Pending=0 after recv", ipc.message.pendingCount(10) == 0, &failed);
+
+    // Send between processes (need CAP_IPC)
+    if (capability.isInitialized()) {
+        _ = capability.registerProcess(10, capability.CAP_IPC);
+        _ = capability.registerProcess(20, capability.CAP_IPC);
+    }
+    const s2 = ipc.message.send(10, 20, .request, "ping");
+    passed += helpers.doTest("Send 10->20 with CAP", s2 == .ok, &failed);
+
+    const bc = ipc.message.broadcast(0, .system, "system broadcast");
+    passed += helpers.doTest("Broadcast delivered", bc >= 1, &failed);
+
+    // === Pipe Tests ===
+    const pipe_id = ipc.pipe.create(10, 20);
+    passed += helpers.doTest("Create pipe 10->20", pipe_id != null, &failed);
+
+    if (pipe_id) |pid| {
+        const wr = ipc.pipe.write(pid, 10, "hello pipe");
+        passed += helpers.doTest("Pipe write ok", wr.result == .ok, &failed);
+        passed += helpers.doTest("Pipe wrote 10 bytes", wr.written == 10, &failed);
+
+        passed += helpers.doTest("Pipe avail=10", ipc.pipe.available(pid) == 10, &failed);
+
+        var rbuf: [64]u8 = undefined;
+        const rd = ipc.pipe.read(pid, 20, &rbuf);
+        passed += helpers.doTest("Pipe read ok", rd.result == .ok, &failed);
+        passed += helpers.doTest("Pipe read 10 bytes", rd.bytes_read == 10, &failed);
+
+        passed += helpers.doTest("Pipe empty after read", ipc.pipe.available(pid) == 0, &failed);
+
+        passed += helpers.doTest("Pipe close", ipc.pipe.close(pid), &failed);
+    }
+
+    // === Signal Tests ===
+    _ = ipc.signal.registerProcess(10);
+    _ = ipc.signal.registerProcess(20);
+
+    const sig1 = ipc.signal.sendSignal(0, 10, ipc.signal.SIG_USR1);
+    passed += helpers.doTest("Send SIGUSR1->10", sig1 == .ok, &failed);
+
+    passed += helpers.doTest("Signal pending", ipc.signal.hasPending(10), &failed);
+
+    const consumed = ipc.signal.consumeNext(10);
+    passed += helpers.doTest("Consume signal", consumed != null, &failed);
+    if (consumed) |c| {
+        passed += helpers.doTest("Signal=SIGUSR1", c.signal == ipc.signal.SIG_USR1, &failed);
+    } else {
+        passed += helpers.doTest("Signal=SIGUSR1", false, &failed);
+    }
+
+    passed += helpers.doTest("No more pending", !ipc.signal.hasPending(10), &failed);
+
+    passed += helpers.doTest("Block SIGUSR2", ipc.signal.blockSignal(10, ipc.signal.SIG_USR2), &failed);
+    const sig2 = ipc.signal.sendSignal(0, 10, ipc.signal.SIG_USR2);
+    passed += helpers.doTest("SIGUSR2 blocked", sig2 == .signal_blocked, &failed);
+
+    passed += helpers.doTest("Cannot block SIGKILL", !ipc.signal.blockSignal(10, ipc.signal.SIG_KILL), &failed);
+
+    // Cleanup
+    ipc.cleanupProcess(10);
+    ipc.cleanupProcess(20);
+    if (capability.isInitialized()) {
+        capability.unregisterProcess(10);
+        capability.unregisterProcess(20);
+    }
 
     helpers.printTestResults(passed, failed);
 }
@@ -966,6 +1161,11 @@ fn runAllTests() void {
     // 14. Violation handler tests (E3.5)
     shell.printInfoLine("=== VIOLATION HANDLER TESTS (E3.5) ===");
     cmdSectest("");
+    shell.newLine();
+
+    // 15. IPC tests (F1)
+    shell.printInfoLine("=== IPC TESTS (F1) ===");
+    cmdIpcTest("");
     shell.newLine();
 
     // Final summary

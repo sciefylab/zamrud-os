@@ -1,5 +1,5 @@
 //! Zamrud OS - Main Kernel with Security Integration
-//! Phases A-E3.5 Complete
+//! Phases A-F1 Complete
 
 const cpu = @import("core/cpu.zig");
 const limine = @import("core/limine.zig");
@@ -64,6 +64,9 @@ const net_capability = @import("security/net_capability.zig");
 
 // E3.5: Unified Violation Handler
 const violation = @import("security/violation.zig");
+
+// F1: IPC
+const ipc = @import("ipc/ipc.zig");
 
 // ============================================================================
 // Limine Requests
@@ -188,6 +191,10 @@ export fn kernel_main() noreturn {
 
     scheduler.init();
     serial.writeString("[OK]   Scheduler ready\n");
+
+    // F1: IPC subsystem
+    ipc.init();
+    serial.writeString("[OK]   IPC ready (F1)\n");
 
     printLine();
     serial.writeString("[FILESYSTEM]\n");
@@ -393,6 +400,18 @@ fn printSystemSummary() void {
         serial.writeString(" kills, ");
         printDecSerial(violation.getStats().blacklists);
         serial.writeString(" bans)\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+    serial.writeString("  IPC(F1):    ");
+    if (ipc.isInitialized()) {
+        serial.writeString("OK (");
+        printDecSerial(ipc.message.getMailboxCount());
+        serial.writeString(" mbox, ");
+        printDecSerial(ipc.pipe.getActivePipeCount());
+        serial.writeString(" pipes, ");
+        printDecSerial(ipc.signal.getRegisteredCount());
+        serial.writeString(" sig)\n");
     } else {
         serial.writeString("Not initialized\n");
     }
