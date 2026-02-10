@@ -1,8 +1,10 @@
 //! Zamrud OS - Process Capability System (E3.1)
 //! Bitwise capability enforcement per-process
 //! Design: ZERO-overhead when all caps granted (bitwise AND check)
+//! E3.6: Wired to violation.zig unified pipeline
 
 const serial = @import("../drivers/serial/serial.zig");
+const violation = @import("violation.zig");
 
 // =============================================================================
 // Capability Bits - Each bit = one permission
@@ -203,11 +205,11 @@ pub fn shouldKill(pid: u32) bool {
 }
 
 // =============================================================================
-// Violation Recording
+// Violation Recording — E3.6: Now reports to unified pipeline
 // =============================================================================
 
 fn recordViolation(pid: u32, attempted_cap: u32, syscall_num: u64, timestamp: u64) void {
-    // Store in circular buffer
+    // Store in local circular buffer (backward compat)
     violations[violation_head] = .{
         .pid = pid,
         .attempted_cap = attempted_cap,
@@ -220,14 +222,14 @@ fn recordViolation(pid: u32, attempted_cap: u32, syscall_num: u64, timestamp: u6
     if (violation_head >= MAX_VIOLATIONS) violation_head = 0;
     violation_count += 1;
 
-    // Increment per-process counter by cap_table slot (not raw PID)
+    // Increment per-process counter by cap_table slot
     if (findSlotByPid(pid)) |slot| {
         if (pid_violation_count[slot] < 65535) {
             pid_violation_count[slot] += 1;
         }
     }
 
-    // Log to serial
+    // Log to serial (local)
     serial.writeString("[CAP] VIOLATION: PID=");
     printDec32(pid);
     serial.writeString(" cap=0x");
@@ -237,6 +239,79 @@ fn recordViolation(pid: u32, attempted_cap: u32, syscall_num: u64, timestamp: u6
     serial.writeString(" count=");
     printDec16(getViolationCount(pid));
     serial.writeString("\n");
+
+    // === E3.6: Report to unified violation handler ===
+    if (violation.isInitialized()) {
+        // Build detail string
+        var detail_buf: [48]u8 = [_]u8{0} ** 48;
+        const detail_str = buildCapDetail(&detail_buf, attempted_cap, syscall_num);
+
+        // Determine severity based on violation count
+        const vcount = getViolationCount(pid);
+        const severity: violation.ViolationSeverity = if (vcount >= KILL_THRESHOLD)
+            .high
+        else if (vcount >= 2)
+            .medium
+        else
+            .low;
+
+        _ = violation.reportViolation(.{
+            .violation_type = .capability_violation,
+            .severity = severity,
+            .pid = @intCast(pid & 0xFFFF),
+            .source_ip = 0,
+            .detail = detail_str,
+        });
+    }
+}
+
+/// Build detail string for violation report
+fn buildCapDetail(buf: []u8, cap: u32, syscall_num: u64) []const u8 {
+    // Format: "cap=0xXXXX sys=NNN"
+    var pos: usize = 0;
+    const prefix = "cap=0x";
+    for (prefix) |c| {
+        if (pos >= buf.len) break;
+        buf[pos] = c;
+        pos += 1;
+    }
+    // Write hex cap (4 hex digits)
+    const hex = "0123456789ABCDEF";
+    if (pos + 4 <= buf.len) {
+        buf[pos] = hex[@intCast((cap >> 12) & 0xF)];
+        buf[pos + 1] = hex[@intCast((cap >> 8) & 0xF)];
+        buf[pos + 2] = hex[@intCast((cap >> 4) & 0xF)];
+        buf[pos + 3] = hex[@intCast(cap & 0xF)];
+        pos += 4;
+    }
+    const mid = " sys=";
+    for (mid) |c| {
+        if (pos >= buf.len) break;
+        buf[pos] = c;
+        pos += 1;
+    }
+    // Write syscall number as decimal
+    if (syscall_num == 0) {
+        if (pos < buf.len) {
+            buf[pos] = '0';
+            pos += 1;
+        }
+    } else {
+        var tmp: [20]u8 = undefined;
+        var tlen: usize = 0;
+        var v = syscall_num;
+        while (v > 0) : (tlen += 1) {
+            tmp[tlen] = @intCast((v % 10) + '0');
+            v /= 10;
+        }
+        while (tlen > 0) {
+            tlen -= 1;
+            if (pos >= buf.len) break;
+            buf[pos] = tmp[tlen];
+            pos += 1;
+        }
+    }
+    return buf[0..pos];
 }
 
 /// Public wrapper for table.zig

@@ -1,15 +1,10 @@
 //! Zamrud OS - Filesystem Sandbox / Unveil System (E3.2)
 //! Per-process path visibility control
 //! Inspired by OpenBSD unveil(2)
-//!
-//! Design:
-//!   - Each process has up to MAX_UNVEIL_ENTRIES visible paths
-//!   - Paths not in the table = BLOCKED
-//!   - No table registered = FULL ACCESS (backward compat)
-//!   - Once locked, no more paths can be added
-//!   - ~O(n) check where n = entries per process (max 16)
+//! E3.6: Wired to violation.zig unified pipeline
 
 const serial = @import("../drivers/serial/serial.zig");
+const violation = @import("violation.zig");
 
 // =============================================================================
 // Constants
@@ -255,10 +250,6 @@ pub fn isLocked(pid: u32) bool {
 // =============================================================================
 
 /// Check if process is allowed to access path with given permission
-/// Returns true if:
-///   - PID is 0 (kernel)
-///   - Process has no unveil table (backward compat = full access)
-///   - Path matches an entry with required permission
 pub inline fn checkAccess(pid: u32, file_path: []const u8, required_perm: u8) bool {
     // Kernel always allowed
     if (pid == 0) return true;
@@ -284,11 +275,11 @@ pub inline fn checkAccess(pid: u32, file_path: []const u8, required_perm: u8) bo
     return false;
 }
 
-/// Check and log violation
+/// Check and log violation — E3.6: Now reports to unified pipeline
 pub fn checkAndEnforce(pid: u32, file_path: []const u8, required_perm: u8) bool {
     if (checkAccess(pid, file_path, required_perm)) return true;
 
-    // Record violation
+    // Record violation (local counter)
     violation_count += 1;
 
     serial.writeString("[UNVEIL] VIOLATION: PID=");
@@ -299,6 +290,54 @@ pub fn checkAndEnforce(pid: u32, file_path: []const u8, required_perm: u8) bool 
     printPermStr(required_perm);
     serial.writeString("\n");
 
+    // === E3.6: Report to unified violation handler ===
+    if (violation.isInitialized()) {
+        // Build detail: copy path (truncated to 48 chars)
+        var detail_buf: [48]u8 = [_]u8{0} ** 48;
+        const copy_len = @min(file_path.len, 44);
+        for (0..copy_len) |i| {
+            detail_buf[i] = file_path[i];
+        }
+        // Append perm info
+        var pos = copy_len;
+        if (pos + 3 < 48) {
+            detail_buf[pos] = ' ';
+            pos += 1;
+            if ((required_perm & PERM_READ) != 0 and pos < 48) {
+                detail_buf[pos] = 'r';
+                pos += 1;
+            }
+            if ((required_perm & PERM_WRITE) != 0 and pos < 48) {
+                detail_buf[pos] = 'w';
+                pos += 1;
+            }
+            if ((required_perm & PERM_EXEC) != 0 and pos < 48) {
+                detail_buf[pos] = 'x';
+                pos += 1;
+            }
+            if ((required_perm & PERM_CREATE) != 0 and pos < 48) {
+                detail_buf[pos] = 'c';
+                pos += 1;
+            }
+        }
+
+        // Severity based on violation count for this process
+        const severity: violation.ViolationSeverity = if (violation_count >= 10)
+            .high
+        else if (violation_count >= 3)
+            .medium
+        else
+            .low;
+
+        _ = violation.reportViolation(.{
+            .violation_type = .filesystem_violation,
+            .severity = severity,
+            .pid = @intCast(pid & 0xFFFF),
+            .source_ip = 0,
+            .detail = detail_buf[0..pos],
+        });
+    }
+
     return false;
 }
 
@@ -306,9 +345,6 @@ pub fn checkAndEnforce(pid: u32, file_path: []const u8, required_perm: u8) bool 
 // Path Matching
 // =============================================================================
 
-/// Check if file_path falls under (or equals) an unveil entry path
-/// "/home" matches "/home", "/home/user", "/home/user/file.txt"
-/// "/" matches everything
 fn pathMatchesEntry(file_path: []const u8, entry_path: []const u8) bool {
     // Root entry matches everything
     if (entry_path.len == 1 and entry_path[0] == '/') return true;
@@ -322,7 +358,6 @@ fn pathMatchesEntry(file_path: []const u8, entry_path: []const u8) bool {
         while (i < entry_path.len) : (i += 1) {
             if (file_path[i] != entry_path[i]) return false;
         }
-        // Next char must be '/' for directory prefix match
         if (file_path[entry_path.len] == '/') return true;
     }
 

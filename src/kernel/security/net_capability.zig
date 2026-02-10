@@ -1,24 +1,15 @@
 //! Zamrud OS - E3.4 Network Capability Enforcement
 //! Per-process network access control with socket ownership
-//!
-//! ┌──────────┐  create/bind/  ┌───────────────┐  allowed?  ┌──────────┐
-//! │ Process   │──────────────▶│ NetCapability  │──────────▶│ Socket   │
-//! │ (pid=10)  │  connect/send │ check CAP_NET  │           │ (owned)  │
-//! └──────────┘               └───────┬───────┘           └──────────┘
-//!                                     │ violation?
-//!                              ┌──────▼───────┐
-//!                              │ auto-kill if  │
-//!                              │ >= 3 strikes  │
-//!                              └──────────────┘
+//! E3.6: Wired to violation.zig unified pipeline
 
 const serial = @import("../drivers/serial/serial.zig");
 const timer = @import("../drivers/timer/timer.zig");
+const violation = @import("violation.zig");
 
 // ============================================================================
 // Constants
 // ============================================================================
 
-/// Must match capability.zig CAP_NET bit
 pub const CAP_NET: u32 = 0x0008;
 
 pub const MAX_PROCESSES = 64;
@@ -33,13 +24,9 @@ pub const MAX_NET_RULES = 128;
 // ============================================================================
 
 pub const NetMode = enum(u8) {
-    /// Use CAP_NET from process capabilities (default)
     inherit = 0,
-    /// Allow all network ops (requires CAP_NET)
     allow_all = 1,
-    /// Only allowed IPs/ports (requires CAP_NET)
     restricted = 2,
-    /// No network access whatsoever
     deny_all = 3,
 };
 
@@ -76,7 +63,7 @@ pub const SocketOwner = struct {
     socket_idx: u8,
     pid: u16,
     active: bool,
-    sock_type: u8, // 0=tcp, 1=udp, 2=raw
+    sock_type: u8,
     local_port: u16,
     remote_ip: u32,
     remote_port: u16,
@@ -215,9 +202,7 @@ fn emptyRule() NetRule {
 // Process Registration
 // ============================================================================
 
-/// Register process for network capability tracking.
 pub fn registerProcess(pid: u16, capabilities: u32) bool {
-    // Update if already registered
     if (findProcess(pid)) |entry| {
         entry.capabilities = capabilities;
         entry.active = true;
@@ -244,7 +229,6 @@ pub fn registerProcess(pid: u16, capabilities: u32) bool {
     return true;
 }
 
-/// Remove process from tracking (on exit).
 pub fn unregisterProcess(pid: u16) void {
     closeProcessSockets(pid);
     if (findProcess(pid)) |entry| {
@@ -252,14 +236,12 @@ pub fn unregisterProcess(pid: u16) void {
     }
 }
 
-/// Sync capabilities when E3.1 grant/revoke changes
 pub fn updateCapabilities(pid: u16, capabilities: u32) void {
     if (findProcess(pid)) |entry| {
         const had_net = (entry.capabilities & CAP_NET) != 0;
         const has_net = (capabilities & CAP_NET) != 0;
         entry.capabilities = capabilities;
 
-        // If CAP_NET was revoked, close sockets
         if (had_net and !has_net) {
             serial.writeString("[NET-CAP] CAP_NET revoked pid=");
             printNumber(pid);
@@ -269,7 +251,6 @@ pub fn updateCapabilities(pid: u16, capabilities: u32) void {
     }
 }
 
-/// Set network mode for a process
 pub fn setNetMode(pid: u16, mode: NetMode) bool {
     if (findProcess(pid)) |entry| {
         entry.mode = mode;
@@ -288,7 +269,6 @@ pub fn setNetMode(pid: u16, mode: NetMode) bool {
     return false;
 }
 
-/// Set maximum sockets a process can open
 pub fn setMaxSockets(pid: u16, max: u8) bool {
     if (findProcess(pid)) |entry| {
         entry.max_sockets = max;
@@ -324,10 +304,48 @@ pub fn getProcessCount() usize {
 }
 
 // ============================================================================
-// Permission Enforcement
+// Permission Enforcement — E3.6: Reports to unified pipeline
 // ============================================================================
 
-/// Check: can this process create a socket?
+/// Determine violation type for unified handler
+fn netActionToViolationType(action: NetAction) violation.ViolationType {
+    return switch (action) {
+        .blocked_no_cap => .network_violation,
+        .blocked_restricted => .network_restricted,
+        .blocked_deny_all => .network_violation,
+        .blocked_no_policy => .network_violation,
+        .blocked_socket_limit => .socket_unauthorized,
+        .blocked_killed => .network_violation,
+        .allowed => .network_violation,
+    };
+}
+
+/// Report a network violation to the unified handler
+fn reportNetViolation(pid: u16, action: NetAction, reason: []const u8, remote_ip: u32) void {
+    if (!violation.isInitialized()) return;
+
+    const vtype = netActionToViolationType(action);
+
+    // Determine severity
+    const severity: violation.ViolationSeverity = switch (action) {
+        .blocked_killed => .critical,
+        .blocked_deny_all => .high,
+        .blocked_no_cap => .medium,
+        .blocked_restricted => .medium,
+        .blocked_socket_limit => .low,
+        .blocked_no_policy => .low,
+        .allowed => .info,
+    };
+
+    _ = violation.reportViolation(.{
+        .violation_type = vtype,
+        .severity = severity,
+        .pid = pid,
+        .source_ip = remote_ip,
+        .detail = reason,
+    });
+}
+
 pub fn checkCreate(pid: u16) NetCheckResult {
     stats.checks_total += 1;
 
@@ -348,12 +366,14 @@ pub fn checkCreate(pid: u16) NetCheckResult {
 
     if (entry.mode == .deny_all) {
         recordViolation(entry, "socket create in deny_all");
+        reportNetViolation(pid, .blocked_deny_all, "socket create deny_all", 0);
         stats.checks_blocked += 1;
         return .{ .action = .blocked_deny_all, .reason = "Mode: deny_all" };
     }
 
     if ((entry.capabilities & CAP_NET) == 0) {
         recordViolation(entry, "socket create without CAP_NET");
+        reportNetViolation(pid, .blocked_no_cap, "create without CAP_NET", 0);
         stats.checks_blocked += 1;
         return .{ .action = .blocked_no_cap, .reason = "No CAP_NET" };
     }
@@ -367,7 +387,6 @@ pub fn checkCreate(pid: u16) NetCheckResult {
     return .{ .action = .allowed, .reason = "OK" };
 }
 
-/// Check: can this process bind to address:port?
 pub fn checkBind(pid: u16, bind_ip: u32, port: u16) NetCheckResult {
     stats.checks_total += 1;
 
@@ -388,15 +407,15 @@ pub fn checkBind(pid: u16, bind_ip: u32, port: u16) NetCheckResult {
 
     if ((entry.capabilities & CAP_NET) == 0) {
         recordViolation(entry, "bind without CAP_NET");
+        reportNetViolation(pid, .blocked_no_cap, "bind without CAP_NET", bind_ip);
         stats.checks_blocked += 1;
         return .{ .action = .blocked_no_cap, .reason = "No CAP_NET" };
     }
 
-    // Restricted mode: only allowed ports
     if (entry.mode == .restricted) {
-        _ = bind_ip;
         if (!isPortAllowed(entry, port)) {
             recordViolation(entry, "bind to restricted port");
+            reportNetViolation(pid, .blocked_restricted, "bind restricted port", 0);
             stats.checks_blocked += 1;
             return .{ .action = .blocked_restricted, .reason = "Port not in allowlist" };
         }
@@ -406,7 +425,6 @@ pub fn checkBind(pid: u16, bind_ip: u32, port: u16) NetCheckResult {
     return .{ .action = .allowed, .reason = "OK" };
 }
 
-/// Check: can this process connect to remote_ip:remote_port?
 pub fn checkConnect(pid: u16, remote_ip: u32, remote_port: u16) NetCheckResult {
     stats.checks_total += 1;
 
@@ -427,34 +445,37 @@ pub fn checkConnect(pid: u16, remote_ip: u32, remote_port: u16) NetCheckResult {
 
     if (entry.mode == .deny_all) {
         recordViolation(entry, "connect in deny_all");
+        reportNetViolation(pid, .blocked_deny_all, "connect deny_all", remote_ip);
         stats.checks_blocked += 1;
         return .{ .action = .blocked_deny_all, .reason = "Mode: deny_all" };
     }
 
     if ((entry.capabilities & CAP_NET) == 0) {
         recordViolation(entry, "connect without CAP_NET");
+        reportNetViolation(pid, .blocked_no_cap, "connect no CAP_NET", remote_ip);
         stats.checks_blocked += 1;
         return .{ .action = .blocked_no_cap, .reason = "No CAP_NET" };
     }
 
-    // Restricted mode: check IP and port allowlists
     if (entry.mode == .restricted) {
         if (!isIPAllowed(entry, remote_ip)) {
             recordViolation(entry, "connect to restricted IP");
+            reportNetViolation(pid, .blocked_restricted, "connect restricted IP", remote_ip);
             stats.checks_blocked += 1;
             return .{ .action = .blocked_restricted, .reason = "IP not in allowlist" };
         }
         if (!isPortAllowed(entry, remote_port)) {
             recordViolation(entry, "connect to restricted port");
+            reportNetViolation(pid, .blocked_restricted, "connect restricted port", remote_ip);
             stats.checks_blocked += 1;
             return .{ .action = .blocked_restricted, .reason = "Port not in allowlist" };
         }
     }
 
-    // Per-process rules
     if (checkNetRules(pid, remote_ip, remote_port)) |rule| {
         if (!rule.allow) {
             recordViolation(entry, "denied by net rule");
+            reportNetViolation(pid, .blocked_restricted, "denied by rule", remote_ip);
             stats.checks_blocked += 1;
             return .{ .action = .blocked_restricted, .reason = "Rule denied" };
         }
@@ -464,7 +485,6 @@ pub fn checkConnect(pid: u16, remote_ip: u32, remote_port: u16) NetCheckResult {
     return .{ .action = .allowed, .reason = "OK" };
 }
 
-/// Check: can this process send data on its socket?
 pub fn checkSend(pid: u16) NetCheckResult {
     stats.checks_total += 1;
 
@@ -485,12 +505,14 @@ pub fn checkSend(pid: u16) NetCheckResult {
 
     if (entry.mode == .deny_all) {
         recordViolation(entry, "send in deny_all");
+        reportNetViolation(pid, .blocked_deny_all, "send deny_all", 0);
         stats.checks_blocked += 1;
         return .{ .action = .blocked_deny_all, .reason = "Mode: deny_all" };
     }
 
     if ((entry.capabilities & CAP_NET) == 0) {
         recordViolation(entry, "send without CAP_NET");
+        reportNetViolation(pid, .blocked_no_cap, "send no CAP_NET", 0);
         stats.checks_blocked += 1;
         return .{ .action = .blocked_no_cap, .reason = "No CAP_NET" };
     }
@@ -500,15 +522,13 @@ pub fn checkSend(pid: u16) NetCheckResult {
 }
 
 // ============================================================================
-// IP / Port Allowlists (for restricted mode)
+// IP / Port Allowlists
 // ============================================================================
 
-/// Add IP to process allowlist
 pub fn addAllowedIP(pid: u16, ip: u32) bool {
     const entry = findProcess(pid) orelse return false;
     if (entry.ip_count >= MAX_ALLOWED_IPS) return false;
 
-    // Deduplicate
     for (0..entry.ip_count) |i| {
         if (entry.allowed_ips[i] == ip) return true;
     }
@@ -518,7 +538,6 @@ pub fn addAllowedIP(pid: u16, ip: u32) bool {
     return true;
 }
 
-/// Remove IP from allowlist
 pub fn removeAllowedIP(pid: u16, ip: u32) bool {
     const entry = findProcess(pid) orelse return false;
     for (0..entry.ip_count) |i| {
@@ -534,7 +553,6 @@ pub fn removeAllowedIP(pid: u16, ip: u32) bool {
     return false;
 }
 
-/// Add port to process allowlist
 pub fn addAllowedPort(pid: u16, port: u16) bool {
     const entry = findProcess(pid) orelse return false;
     if (entry.port_count >= MAX_ALLOWED_PORTS) return false;
@@ -548,7 +566,6 @@ pub fn addAllowedPort(pid: u16, port: u16) bool {
     return true;
 }
 
-/// Remove port from allowlist
 pub fn removeAllowedPort(pid: u16, port: u16) bool {
     const entry = findProcess(pid) orelse return false;
     for (0..entry.port_count) |i| {
@@ -565,7 +582,7 @@ pub fn removeAllowedPort(pid: u16, port: u16) bool {
 }
 
 fn isIPAllowed(entry: *const NetProcessEntry, ip: u32) bool {
-    if (entry.ip_count == 0) return true; // Empty = no restriction
+    if (entry.ip_count == 0) return true;
     for (0..entry.ip_count) |i| {
         if (entry.allowed_ips[i] == ip) return true;
     }
@@ -573,7 +590,7 @@ fn isIPAllowed(entry: *const NetProcessEntry, ip: u32) bool {
 }
 
 fn isPortAllowed(entry: *const NetProcessEntry, port: u16) bool {
-    if (entry.port_count == 0) return true; // Empty = no restriction
+    if (entry.port_count == 0) return true;
     for (0..entry.port_count) |i| {
         if (entry.allowed_ports[i] == port) return true;
     }
@@ -584,7 +601,6 @@ fn isPortAllowed(entry: *const NetProcessEntry, port: u16) bool {
 // Per-Process Network Rules
 // ============================================================================
 
-/// Add a per-process network rule (IP range + port range)
 pub fn addNetRule(
     pid: u16,
     remote_ip: u32,
@@ -613,7 +629,6 @@ pub fn addNetRule(
     return id;
 }
 
-/// Remove a per-process rule by ID
 pub fn removeNetRule(id: u32) bool {
     for (0..net_rule_count) |i| {
         if (net_rules[i].id == id) {
@@ -637,12 +652,10 @@ fn checkNetRules(pid: u16, remote_ip: u32, remote_port: u16) ?*NetRule {
         const rule = &net_rules[i];
         if (!rule.enabled or rule.pid != pid) continue;
 
-        // IP match (0 = any)
         if (rule.remote_ip != 0) {
             if ((remote_ip & rule.remote_mask) != (rule.remote_ip & rule.remote_mask)) continue;
         }
 
-        // Port range match (0,0 = any)
         if (rule.remote_port_start != 0 or rule.remote_port_end != 0) {
             if (remote_port < rule.remote_port_start or remote_port > rule.remote_port_end) continue;
         }
@@ -657,7 +670,6 @@ fn checkNetRules(pid: u16, remote_ip: u32, remote_port: u16) ?*NetRule {
 // Socket Ownership
 // ============================================================================
 
-/// Record that socket_idx is owned by pid
 pub fn registerSocket(socket_idx: u8, pid: u16, sock_type: u8, local_port: u16) bool {
     if (findProcess(pid)) |entry| {
         entry.current_sockets += 1;
@@ -682,7 +694,6 @@ pub fn registerSocket(socket_idx: u8, pid: u16, sock_type: u8, local_port: u16) 
     return false;
 }
 
-/// Release socket ownership
 pub fn unregisterSocket(socket_idx: u8) void {
     for (&owners) |*o| {
         if (o.active and o.socket_idx == socket_idx) {
@@ -696,7 +707,6 @@ pub fn unregisterSocket(socket_idx: u8) void {
     }
 }
 
-/// Update remote endpoint info after connect
 pub fn updateSocketRemote(socket_idx: u8, remote_ip: u32, remote_port: u16) void {
     for (&owners) |*o| {
         if (o.active and o.socket_idx == socket_idx) {
@@ -707,7 +717,6 @@ pub fn updateSocketRemote(socket_idx: u8, remote_ip: u32, remote_port: u16) void
     }
 }
 
-/// Get which PID owns a given socket
 pub fn getSocketOwner(socket_idx: u8) ?u16 {
     for (&owners) |*o| {
         if (o.active and o.socket_idx == socket_idx) return o.pid;
@@ -715,7 +724,6 @@ pub fn getSocketOwner(socket_idx: u8) ?u16 {
     return null;
 }
 
-/// Count active owned sockets
 pub fn getActiveSocketCount() usize {
     var count: usize = 0;
     for (&owners) |*o| {
@@ -724,7 +732,6 @@ pub fn getActiveSocketCount() usize {
     return count;
 }
 
-/// Close all sockets belonging to a PID
 pub fn closeProcessSockets(pid: u16) void {
     for (&owners) |*o| {
         if (o.active and o.pid == pid) {
@@ -737,7 +744,6 @@ pub fn closeProcessSockets(pid: u16) void {
     }
 }
 
-/// Get socket owner entry by index (for display)
 pub fn getSocketOwnerEntry(index: usize) ?*const SocketOwner {
     var count: usize = 0;
     for (&owners) |*o| {
@@ -750,7 +756,7 @@ pub fn getSocketOwnerEntry(index: usize) ?*const SocketOwner {
 }
 
 // ============================================================================
-// Violation Tracking & Auto-Kill
+// Violation Tracking & Auto-Kill — E3.6: Also reports to unified pipeline
 // ============================================================================
 
 fn recordViolation(entry: *NetProcessEntry, reason: []const u8) void {
@@ -780,22 +786,30 @@ fn recordViolation(entry: *NetProcessEntry, reason: []const u8) void {
         serial.writeString(" *** (");
         printNumber(entry.violations);
         serial.writeString(" violations)\n");
+
+        // E3.6: Report kill event to unified handler
+        if (violation.isInitialized()) {
+            _ = violation.reportViolation(.{
+                .violation_type = .network_violation,
+                .severity = .critical,
+                .pid = entry.pid,
+                .source_ip = 0,
+                .detail = "auto-killed: max violations",
+            });
+        }
     }
 }
 
-/// Get violation count for a process
 pub fn getViolations(pid: u16) u32 {
     if (findProcess(pid)) |entry| return entry.violations;
     return 0;
 }
 
-/// Check if process was killed
 pub fn isKilled(pid: u16) bool {
     if (findProcess(pid)) |entry| return entry.killed;
     return false;
 }
 
-/// Reset violations and un-kill a process
 pub fn resetViolations(pid: u16) void {
     if (findProcess(pid)) |entry| {
         entry.violations = 0;
@@ -804,10 +818,9 @@ pub fn resetViolations(pid: u16) void {
 }
 
 // ============================================================================
-// Capability Bridge (E3.1 integration)
+// Capability Bridge
 // ============================================================================
 
-/// Grant CAP_NET to a registered process
 pub fn grantNetCapability(pid: u16) bool {
     if (findProcess(pid)) |entry| {
         entry.capabilities |= CAP_NET;
@@ -816,7 +829,6 @@ pub fn grantNetCapability(pid: u16) bool {
     return false;
 }
 
-/// Revoke CAP_NET (closes all sockets immediately)
 pub fn revokeNetCapability(pid: u16) bool {
     if (findProcess(pid)) |entry| {
         entry.capabilities &= ~CAP_NET;
@@ -826,7 +838,6 @@ pub fn revokeNetCapability(pid: u16) bool {
     return false;
 }
 
-/// Query if process has CAP_NET
 pub fn hasNetCapability(pid: u16) bool {
     if (pid == 0) return true;
     if (findProcess(pid)) |entry| return (entry.capabilities & CAP_NET) != 0;
@@ -1002,11 +1013,9 @@ fn printNumber64(n: u64) void {
         printNumber(@as(u32, @intCast(n)));
         return;
     }
-    // For large numbers, split into billions
     const hi: u32 = @intCast(n / 1_000_000_000);
     const lo: u32 = @intCast(n % 1_000_000_000);
     printNumber(hi);
-    // Pad lo with leading zeros (9 digits)
     var digits: usize = 0;
     const tmp = lo;
     if (tmp == 0) {

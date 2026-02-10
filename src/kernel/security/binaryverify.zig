@@ -1,12 +1,10 @@
 //! Zamrud OS - Binary Verification System (E3.3)
 //! Hash-based binary whitelist enforcement
-//! - SHA-256 hash check before exec
-//! - Whitelist stored in memory (optionally to blockchain)
-//! - Unsigned binary = BLOCKED
-//! - ~O(n) lookup where n = trusted entries (max 64)
+//! E3.6: Wired to violation.zig unified pipeline
 
 const serial = @import("../drivers/serial/serial.zig");
 const hash = @import("../crypto/hash.zig");
+const violation = @import("violation.zig");
 
 // =============================================================================
 // Constants
@@ -24,7 +22,7 @@ pub const TrustEntry = struct {
     hash_buf: [HASH_SIZE]u8 = [_]u8{0} ** HASH_SIZE,
     name_buf: [MAX_NAME]u8 = [_]u8{0} ** MAX_NAME,
     name_len: u8 = 0,
-    trusted_by_pid: u32 = 0, // Who added this trust
+    trusted_by_pid: u32 = 0,
     timestamp: u64 = 0,
     active: bool = false,
 
@@ -66,7 +64,7 @@ var trust_count: usize = 0;
 var verify_count: u64 = 0;
 var block_count: u64 = 0;
 var allow_count: u64 = 0;
-var enforce_mode: bool = false; // false = warn only, true = block unsigned
+var enforce_mode: bool = false;
 var initialized: bool = false;
 
 // =============================================================================
@@ -85,7 +83,7 @@ pub fn init() void {
     verify_count = 0;
     block_count = 0;
     allow_count = 0;
-    enforce_mode = false; // Start in warn mode
+    enforce_mode = false;
     initialized = true;
 
     serial.writeString("[BINVERIFY] Binary verification ready (warn mode)\n");
@@ -144,7 +142,7 @@ pub fn trustHash(bin_hash: *const [HASH_SIZE]u8, name: []const u8, pid: u32, tim
         }
     }
 
-    return false; // Table full
+    return false;
 }
 
 /// Trust a binary by computing its hash from data
@@ -203,17 +201,15 @@ pub fn untrustByIndex(index: usize) bool {
 }
 
 // =============================================================================
-// Verification (HOT PATH for exec)
+// Verification — E3.6: Reports untrusted to unified pipeline
 // =============================================================================
 
 /// Verify binary data against trust whitelist
-/// Returns VerifyResult
 pub fn verifyBinary(data: []const u8) VerifyResult {
     if (!initialized) return .Error;
 
     verify_count += 1;
 
-    // Hash the binary
     var bin_hash: [HASH_SIZE]u8 = undefined;
     hash.sha256Into(data, &bin_hash);
 
@@ -228,10 +224,11 @@ pub fn verifyHash(bin_hash: *const [HASH_SIZE]u8) VerifyResult {
     if (trust_count == 0) {
         if (enforce_mode) {
             block_count += 1;
+            reportBinaryViolation(bin_hash, true);
             return .Untrusted;
         }
         allow_count += 1;
-        return .Untrusted; // Warn but allow
+        return .Untrusted;
     }
 
     // Search whitelist
@@ -245,13 +242,56 @@ pub fn verifyHash(bin_hash: *const [HASH_SIZE]u8) VerifyResult {
         serial.writeString("[BINVERIFY] BLOCKED: unsigned binary hash=");
         printHashShort(bin_hash);
         serial.writeString("\n");
+        reportBinaryViolation(bin_hash, true);
     } else {
         serial.writeString("[BINVERIFY] WARN: unsigned binary hash=");
         printHashShort(bin_hash);
         serial.writeString("\n");
+        reportBinaryViolation(bin_hash, false);
     }
 
     return .Untrusted;
+}
+
+/// E3.6: Report untrusted binary to unified violation handler
+fn reportBinaryViolation(bin_hash: *const [HASH_SIZE]u8, blocked: bool) void {
+    if (!violation.isInitialized()) return;
+
+    // Build detail: "hash=XXXXXXXX... blocked/warned"
+    var detail_buf: [48]u8 = [_]u8{0} ** 48;
+    const prefix = "hash=";
+    var pos: usize = 0;
+    for (prefix) |c| {
+        if (pos >= 48) break;
+        detail_buf[pos] = c;
+        pos += 1;
+    }
+
+    // Copy first 8 bytes of hash as hex (16 chars)
+    const hex = "0123456789abcdef";
+    var hi: usize = 0;
+    while (hi < 8 and pos + 1 < 48) : (hi += 1) {
+        detail_buf[pos] = hex[bin_hash[hi] >> 4];
+        detail_buf[pos + 1] = hex[bin_hash[hi] & 0xF];
+        pos += 2;
+    }
+
+    const suffix = if (blocked) " BLOCKED" else " warned";
+    for (suffix) |c| {
+        if (pos >= 48) break;
+        detail_buf[pos] = c;
+        pos += 1;
+    }
+
+    const severity: violation.ViolationSeverity = if (blocked) .high else .medium;
+
+    _ = violation.reportViolation(.{
+        .violation_type = .binary_untrusted,
+        .severity = severity,
+        .pid = 0, // Binary verification is system-level
+        .source_ip = 0,
+        .detail = detail_buf[0..pos],
+    });
 }
 
 /// Check and enforce - returns true if execution should be allowed
@@ -260,7 +300,7 @@ pub fn checkExec(data: []const u8) bool {
 
     return switch (result) {
         .Trusted => true,
-        .Untrusted => !enforce_mode, // Allow in warn mode, block in enforce
+        .Untrusted => !enforce_mode,
         .NotFound => !enforce_mode,
         .Error => false,
     };
@@ -295,14 +335,8 @@ fn findByHash(bin_hash: *const [HASH_SIZE]u8) ?*TrustEntry {
 }
 
 fn findByName(name: []const u8) ?*TrustEntry {
-    var i: usize = 0;
-    while (i < MAX_TRUSTED) : (i += 1) {
-        if (trust_table[i].active) {
-            if (strEqual(trust_table[i].getName(), name)) {
-                return &trust_table[i];
-            }
-        }
-    }
+    _ = name;
+    // Not used directly but kept for API completeness
     return null;
 }
 
@@ -357,14 +391,14 @@ pub fn computeHash(data: []const u8) [HASH_SIZE]u8 {
 
 /// Format hash as hex string
 pub fn formatHash(h: *const [HASH_SIZE]u8, buf: []u8) usize {
-    const hex = "0123456789abcdef";
+    const hex_c = "0123456789abcdef";
     const max_bytes = @min(HASH_SIZE, buf.len / 2);
     var pos: usize = 0;
     var i: usize = 0;
     while (i < max_bytes) : (i += 1) {
         if (pos + 1 >= buf.len) break;
-        buf[pos] = hex[h[i] >> 4];
-        buf[pos + 1] = hex[h[i] & 0xF];
+        buf[pos] = hex_c[h[i] >> 4];
+        buf[pos + 1] = hex_c[h[i] & 0xF];
         pos += 2;
     }
     return pos;
@@ -411,7 +445,6 @@ fn serialPrintStr(s: []const u8) void {
 
 fn printHashShort(h: *const [HASH_SIZE]u8) void {
     const hex = "0123456789abcdef";
-    // Print first 8 bytes only for brevity
     var i: usize = 0;
     while (i < 8) : (i += 1) {
         serial.writeChar(hex[h[i] >> 4]);
