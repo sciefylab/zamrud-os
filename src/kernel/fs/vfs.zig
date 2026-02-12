@@ -1,11 +1,12 @@
 //! Zamrud OS - Virtual File System (VFS)
-//! Main VFS interface with E3.2 Unveil enforcement
+//! Main VFS interface with E3.2 Unveil + F3 Permission enforcement
 
 const serial = @import("../drivers/serial/serial.zig");
 const heap = @import("../mm/heap.zig");
 const path = @import("path.zig");
 const process = @import("../proc/process.zig");
 const unveil = @import("../security/unveil.zig");
+const users = @import("../security/users.zig");
 
 // Import modular components
 pub const inode_mod = @import("inode.zig");
@@ -170,6 +171,33 @@ fn checkUnveilCreate(file_path: []const u8) bool {
 }
 
 // =============================================================================
+// F3: File Permission Check Helper
+// =============================================================================
+
+/// Check Unix-style file permissions for current user on an inode
+/// Called AFTER unveil check, BEFORE actual I/O
+fn checkFilePerm(inode: *Inode, file_path: []const u8, perm: users.PermCheck) bool {
+    if (!users.isInitialized()) return true; // Not initialized = allow all
+    if (!users.isLoggedIn()) return true; // No session = kernel mode, allow all
+
+    return users.checkAndEnforceFilePermission(
+        file_path,
+        inode.uid,
+        inode.gid,
+        inode.mode,
+        perm,
+    );
+}
+
+/// Set owner on newly created inode to current user
+fn setInodeOwner(inode: *Inode) void {
+    if (users.isInitialized() and users.isLoggedIn()) {
+        inode.uid = users.getCurrentUid();
+        inode.gid = users.getCurrentGid();
+    }
+}
+
+// =============================================================================
 // Mount / Unmount
 // =============================================================================
 
@@ -281,7 +309,7 @@ fn resolveInMountPoint(mp_path: []const u8, rel_path: []const u8) ?*Inode {
 }
 
 // =============================================================================
-// File Operations (with E3.2 unveil checks)
+// File Operations (with E3.2 unveil + F3 permission checks)
 // =============================================================================
 
 pub fn open(file_path: []const u8, flags: OpenFlags) ?*File {
@@ -297,10 +325,18 @@ pub fn open(file_path: []const u8, flags: OpenFlags) ?*File {
             // E3.2: Need create permission
             if (!checkUnveilCreate(file_path)) return null;
             const new_inode = createFileInternal(file_path) orelse return null;
+
+            // F3: Set owner to current user
+            setInodeOwner(new_inode);
+
             return openInode(new_inode, file_path, flags);
         }
         return null;
     };
+
+    // F3: Permission check
+    if (flags.read and !checkFilePerm(inode, file_path, .read)) return null;
+    if (flags.write and !checkFilePerm(inode, file_path, .write)) return null;
 
     return openInode(inode, file_path, flags);
 }
@@ -431,7 +467,7 @@ pub fn seek(file: *File, offset: i64, whence: SeekWhence) i64 {
 }
 
 // =============================================================================
-// Directory Operations (with E3.2 unveil checks)
+// Directory Operations (with E3.2 unveil + F3 permission checks)
 // =============================================================================
 
 pub fn readdir(dir_path: []const u8, index: usize) ?*DirEntry {
@@ -460,6 +496,9 @@ pub fn readdir(dir_path: []const u8, index: usize) ?*DirEntry {
 
     const inode = resolvePath(dir_path) orelse return null;
     if (inode.file_type != .Directory) return null;
+
+    // F3: Permission check for directory read
+    if (!checkFilePerm(inode, dir_path, .read)) return null;
 
     if (inode.ops) |ops| {
         if (ops.readdir) |readdir_fn| {
@@ -538,6 +577,9 @@ pub fn chdir(dir_path: []const u8) bool {
 
     const inode = resolvePath(dir_path) orelse return false;
     if (inode.file_type != .Directory) return false;
+
+    // F3: Check read+exec permission on target directory
+    if (!checkFilePerm(inode, dir_path, .exec)) return false;
 
     if (dir_path[0] == '/') {
         var i: usize = 0;
@@ -719,7 +761,7 @@ pub fn resolvePath(file_path: []const u8) ?*Inode {
 }
 
 // =============================================================================
-// Higher-Level File Operations (with E3.2 unveil checks)
+// Higher-Level File Operations (with E3.2 unveil + F3 permission checks)
 // =============================================================================
 
 fn getParentInode(file_path: []const u8) ?*Inode {
@@ -739,7 +781,7 @@ fn getParentInode(file_path: []const u8) ?*Inode {
     return resolvePath(parent_path);
 }
 
-/// Internal createFile without unveil check (used by open with create flag)
+/// Internal createFile without unveil/perm check (used by open with create flag)
 fn createFileInternal(file_path: []const u8) ?*Inode {
     if (root_fs == null) return null;
 
@@ -757,12 +799,24 @@ fn createFileInternal(file_path: []const u8) ?*Inode {
     return null;
 }
 
-/// Public createFile with E3.2 unveil check
+/// Public createFile with E3.2 unveil + F3 permission check
 pub fn createFile(file_path: []const u8) ?*Inode {
     // E3.2: Unveil check for create
     if (!checkUnveilCreate(file_path)) return null;
 
-    return createFileInternal(file_path);
+    // F3: Check write permission on parent directory
+    const parent = getParentInode(file_path);
+    if (parent != null) {
+        const parent_path = path.dirname(file_path);
+        if (!checkFilePerm(parent.?, parent_path, .write)) return null;
+    }
+
+    const inode = createFileInternal(file_path) orelse return null;
+
+    // F3: Set owner
+    setInodeOwner(inode);
+
+    return inode;
 }
 
 pub fn createDir(dir_path: []const u8) ?*Inode {
@@ -776,9 +830,18 @@ pub fn createDir(dir_path: []const u8) ?*Inode {
 
     const parent_inode = getParentInode(dir_path) orelse return null;
 
+    // F3: Check write permission on parent directory
+    const parent_path = path.dirname(dir_path);
+    if (!checkFilePerm(parent_inode, parent_path, .write)) return null;
+
     if (parent_inode.ops) |ops| {
         if (ops.mkdir) |mkdir_fn| {
-            return mkdir_fn(parent_inode, dir_name, FileMode.directory());
+            const new_dir = mkdir_fn(parent_inode, dir_name, FileMode.directory()) orelse return null;
+
+            // F3: Set owner
+            setInodeOwner(new_dir);
+
+            return new_dir;
         }
     }
 
@@ -791,10 +854,18 @@ pub fn removeFile(file_path: []const u8) bool {
     // E3.2: Unveil check for write (delete = write)
     if (!checkUnveilWrite(file_path)) return false;
 
+    // F3: Check write permission on the file
+    const inode = resolvePath(file_path) orelse return false;
+    if (!checkFilePerm(inode, file_path, .write)) return false;
+
     const file_name = path.basename(file_path);
     if (file_name.len == 0) return false;
 
     const parent_inode = getParentInode(file_path) orelse return false;
+
+    // F3: Also need write permission on parent directory
+    const parent_path = path.dirname(file_path);
+    if (!checkFilePerm(parent_inode, parent_path, .write)) return false;
 
     if (parent_inode.ops) |ops| {
         if (ops.unlink) |unlink_fn| {
@@ -811,10 +882,18 @@ pub fn removeDir(dir_path: []const u8) bool {
     // E3.2: Unveil check for write (delete = write)
     if (!checkUnveilWrite(dir_path)) return false;
 
+    // F3: Check write permission
+    const inode = resolvePath(dir_path) orelse return false;
+    if (!checkFilePerm(inode, dir_path, .write)) return false;
+
     const dir_name = path.basename(dir_path);
     if (dir_name.len == 0) return false;
 
     const parent_inode = getParentInode(dir_path) orelse return false;
+
+    // F3: Need write permission on parent
+    const parent_path = path.dirname(dir_path);
+    if (!checkFilePerm(parent_inode, parent_path, .write)) return false;
 
     if (parent_inode.ops) |ops| {
         if (ops.rmdir) |rmdir_fn| {

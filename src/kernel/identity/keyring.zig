@@ -329,6 +329,26 @@ pub fn findIdentityByAddress(address: *const [50]u8) ?*Identity {
     return null;
 }
 
+/// Find identity by public key
+pub fn findIdentityByPubkey(pubkey: *const [32]u8) ?*Identity {
+    var i: usize = 0;
+    while (i < identity_count) : (i += 1) {
+        if (!identities[i].active) continue;
+
+        var match = true;
+        var j: usize = 0;
+        while (j < 32) : (j += 1) {
+            if (identities[i].keypair.public_key[j] != pubkey[j]) {
+                match = false;
+                break;
+            }
+        }
+
+        if (match) return &identities[i];
+    }
+    return null;
+}
+
 fn namesMatch(a: []const u8, b: []const u8) bool {
     var a_start: usize = 0;
     var b_start: usize = 0;

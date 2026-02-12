@@ -1,4 +1,5 @@
 //! Zamrud OS - Process Management
+//! Updated: F3 User/Group context per-process
 
 const serial = @import("../drivers/serial/serial.zig");
 const heap = @import("../mm/heap.zig");
@@ -40,6 +41,21 @@ pub const Process = struct {
     time_slice: u32 = 0,
     total_ticks: u64 = 0,
     caps: u32 = capability.CAP_ALL,
+
+    // === F3: User context ===
+    uid: u16 = 0,
+    gid: u16 = 0,
+    euid: u16 = 0,
+    egid: u16 = 0,
+
+    // === F3: Process name ===
+    name: [32]u8 = [_]u8{0} ** 32,
+    name_len: u8 = 0,
+
+    pub fn getName(self: *const Process) []const u8 {
+        if (self.name_len == 0) return "unnamed";
+        return self.name[0..self.name_len];
+    }
 };
 
 // ============================================================================
@@ -74,6 +90,11 @@ pub fn init() void {
             .time_slice = 0,
             .total_ticks = 0,
             .caps = capability.CAP_NONE,
+            .uid = 0,
+            .gid = 0,
+            .euid = 0,
+            .egid = 0,
+            .name_len = 0,
         };
     }
 
@@ -122,8 +143,6 @@ pub fn createWithEntry(name: []const u8, entry: u64, arg: u64) ?u32 {
 }
 
 pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
-    _ = name;
-
     if (!initialized) {
         serial.writeString("[PROC] ERROR: Not initialized!\n");
         return null;
@@ -148,6 +167,22 @@ pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
     const pid = next_pid;
     next_pid += 1;
 
+    // F3: Determine user context and effective caps
+    var proc_uid: u16 = 0;
+    var proc_gid: u16 = 0;
+    var proc_caps: u32 = caps;
+
+    const users_mod = @import("../security/users.zig");
+    if (users_mod.isInitialized() and users_mod.isLoggedIn()) {
+        proc_uid = users_mod.getCurrentUid();
+        proc_gid = users_mod.getCurrentGid();
+
+        // If caller passed CAP_ALL, use role-based caps instead
+        if (caps == capability.CAP_ALL) {
+            proc_caps = users_mod.getCurrentRole().defaultCaps();
+        }
+    }
+
     process_table[slot] = .{
         .pid = pid,
         .state = .Ready,
@@ -157,8 +192,20 @@ pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
         .priority = 1,
         .time_slice = 10,
         .total_ticks = 0,
-        .caps = caps,
+        .caps = proc_caps,
+        .uid = proc_uid,
+        .gid = proc_gid,
+        .euid = proc_uid,
+        .egid = proc_gid,
     };
+
+    // F3: Copy process name
+    const nlen = @min(name.len, 32);
+    var ni: usize = 0;
+    while (ni < nlen) : (ni += 1) {
+        process_table[slot].name[ni] = name[ni];
+    }
+    process_table[slot].name_len = @intCast(nlen);
 
     process_table[slot].rsp = switch_ctx.setupProcessStack(stack_top, entry, arg);
 
@@ -167,7 +214,7 @@ pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
 
     // E3.1: Register in capability system
     if (capability.isInitialized()) {
-        _ = capability.registerProcess(pid, caps);
+        _ = capability.registerProcess(pid, proc_caps);
     }
 
     serial.writeString("[PROC] Created PID=0x");
@@ -175,7 +222,9 @@ pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
     serial.writeString(" slot=");
     serial.writeChar('0' + @as(u8, @intCast(slot)));
     serial.writeString(" caps=0x");
-    printHex32(caps);
+    printHex32(proc_caps);
+    serial.writeString(" uid=");
+    printDec16(proc_uid);
     serial.writeString("\n");
 
     return pid;
@@ -218,6 +267,10 @@ pub fn terminate(pid: u32) bool {
         .time_slice = 0,
         .total_ticks = 0,
         .caps = capability.CAP_NONE,
+        .uid = 0,
+        .gid = 0,
+        .euid = 0,
+        .egid = 0,
     };
 
     if (process_count > 0) process_count -= 1;
@@ -270,6 +323,36 @@ pub fn revokeProcessCap(pid: u32, cap: u32) bool {
 }
 
 // ============================================================================
+// F3: User Context Accessors
+// ============================================================================
+
+pub fn getProcessUid(pid: u32) u16 {
+    if (pid == 0) return 0;
+    const slot = getSlotByPid(pid) orelse return 0;
+    return process_table[slot].euid;
+}
+
+pub fn getProcessGid(pid: u32) u16 {
+    if (pid == 0) return 0;
+    const slot = getSlotByPid(pid) orelse return 0;
+    return process_table[slot].egid;
+}
+
+pub fn setProcessUid(pid: u32, uid: u16) bool {
+    const slot = getSlotByPid(pid) orelse return false;
+    process_table[slot].uid = uid;
+    process_table[slot].euid = uid;
+    return true;
+}
+
+pub fn setProcessGid(pid: u32, gid: u16) bool {
+    const slot = getSlotByPid(pid) orelse return false;
+    process_table[slot].gid = gid;
+    process_table[slot].egid = gid;
+    return true;
+}
+
+// ============================================================================
 // Idle Process
 // ============================================================================
 
@@ -303,7 +386,19 @@ pub fn createIdleProcess() void {
         .time_slice = 1,
         .total_ticks = 0,
         .caps = capability.CAP_ALL,
+        .uid = 0,
+        .gid = 0,
+        .euid = 0,
+        .egid = 0,
     };
+
+    // Set name for idle
+    const idle_name = "idle";
+    var ni: usize = 0;
+    while (ni < idle_name.len) : (ni += 1) {
+        process_table[0].name[ni] = idle_name[ni];
+    }
+    process_table[0].name_len = @intCast(idle_name.len);
 
     process_table[0].rsp = switch_ctx.setupProcessStack(
         stack_top,
@@ -347,7 +442,7 @@ pub fn getMaxSlots() usize {
 }
 
 // ============================================================================
-// Safe access for shell
+// Safe access for shell — F3: includes uid/gid/name
 // ============================================================================
 
 pub fn getProcessInfo(slot: usize) ?struct {
@@ -355,6 +450,9 @@ pub fn getProcessInfo(slot: usize) ?struct {
     state: ProcessState,
     priority: u8,
     caps: u32,
+    uid: u16,
+    gid: u16,
+    name: []const u8,
 } {
     if (slot >= MAX_SLOTS_USED) return null;
     if (!process_used[slot]) return null;
@@ -364,6 +462,9 @@ pub fn getProcessInfo(slot: usize) ?struct {
         .state = process_table[slot].state,
         .priority = process_table[slot].priority,
         .caps = process_table[slot].caps,
+        .uid = process_table[slot].euid,
+        .gid = process_table[slot].egid,
+        .name = process_table[slot].getName(),
     };
 }
 
@@ -384,6 +485,10 @@ pub fn printProcessList() void {
             printHex8(@intFromEnum(process_table[i].state));
             serial.writeString(" caps=0x");
             printHex32(process_table[i].caps);
+            serial.writeString(" uid=");
+            printDec16(process_table[i].euid);
+            serial.writeString(" ");
+            serial.writeString(process_table[i].getName());
             serial.writeString(" rsp=0x");
             printHex64(process_table[i].rsp);
             serial.writeString("\n");
@@ -432,5 +537,23 @@ fn printHex64(val: u64) void {
         serial.writeChar(hex[@intCast((val >> i) & 0xF)]);
         if (i == 0) break;
         i -= 4;
+    }
+}
+
+fn printDec16(val: u16) void {
+    if (val == 0) {
+        serial.writeChar('0');
+        return;
+    }
+    var buf: [5]u8 = undefined;
+    var i: usize = 0;
+    var v = val;
+    while (v > 0) : (i += 1) {
+        buf[i] = @intCast((v % 10) + '0');
+        v /= 10;
+    }
+    while (i > 0) {
+        i -= 1;
+        serial.writeChar(buf[i]);
     }
 }

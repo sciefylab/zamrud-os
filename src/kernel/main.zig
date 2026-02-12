@@ -1,5 +1,5 @@
 //! Zamrud OS - Main Kernel with Security Integration
-//! Phases A-F1 Complete
+//! Phases A-F3 Complete
 
 const cpu = @import("core/cpu.zig");
 const limine = @import("core/limine.zig");
@@ -67,6 +67,10 @@ const violation = @import("security/violation.zig");
 
 // F1: IPC
 const ipc = @import("ipc/ipc.zig");
+
+// F3: User/Group Permissions
+const users = @import("security/users.zig");
+const user_chain = @import("security/user_chain.zig");
 
 // ============================================================================
 // Limine Requests
@@ -273,6 +277,42 @@ export fn kernel_main() noreturn {
         serial.writeString("[OK]   Identity store ready (no saved identities)\n");
     }
 
+    // === F3: User/Group System ===
+    // MUST be after: identity, capability, violation, crypto
+    printLine();
+    serial.writeString("[USER SYSTEM]\n");
+
+    user_chain.init();
+    serial.writeString("[OK]   User/Chain bridge ready\n");
+
+    users.init();
+    serial.writeString("[OK]   User/Group system ready (F3)\n");
+
+    // Auto-create root user from first identity if exists
+    if (identity.getIdentityCount() > 0) {
+        const first_id = identity.getCurrentIdentity();
+        if (first_id != null and first_id.?.has_name) {
+            const id_name = first_id.?.getName();
+            if (users.findUserByName(id_name) == null) {
+                if (users.createUser(id_name) != null) {
+                    serial.writeString("[OK]   Root user auto-created from identity: ");
+                    serial.writeString(id_name);
+                    serial.writeString("\n");
+                }
+            } else {
+                serial.writeString("[OK]   User already exists: ");
+                serial.writeString(id_name);
+                serial.writeString("\n");
+            }
+        }
+    }
+
+    serial.writeString("[OK]   Users: ");
+    printDecSerial(users.getUserCount());
+    serial.writeString(", Groups: ");
+    printDecSerial(users.getGroupCount());
+    serial.writeString("\n");
+
     printLine();
     serial.writeString("[NETWORK]\n");
 
@@ -412,6 +452,21 @@ fn printSystemSummary() void {
         serial.writeString(" pipes, ");
         printDecSerial(ipc.signal.getRegisteredCount());
         serial.writeString(" sig)\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+    serial.writeString("  Users(F3):  ");
+    if (users.isInitialized()) {
+        serial.writeString("OK (");
+        printDecSerial(users.getUserCount());
+        serial.writeString(" users, ");
+        printDecSerial(users.getGroupCount());
+        serial.writeString(" groups");
+        if (users.isLoggedIn()) {
+            serial.writeString(", logged in: ");
+            serial.writeString(users.getCurrentSession().getName());
+        }
+        serial.writeString(")\n");
     } else {
         serial.writeString("Not initialized\n");
     }

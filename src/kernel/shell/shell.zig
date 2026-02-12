@@ -356,6 +356,9 @@ fn findCommandCompletions(prefix: []const u8) void {
         "identity",     "syscall",  "boot",    "whoami",   "theme",
         "reboot",       "shutdown", "exit",    "test-all", "test-fs",
         "test-syscall",
+        // F3: User/Group
+        "login",    "logout",  "id",       "su",
+        "sudo",         "sudoend",  "user",    "usertest",
     };
 
     for (cmds) |cmd| {

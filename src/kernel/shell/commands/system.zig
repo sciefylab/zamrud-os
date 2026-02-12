@@ -61,6 +61,9 @@ pub fn cmdHelp(_: []const u8) void {
     shell.println("    crypto, chain, integrity, identity, boot, syscall");
     shell.newLine();
 
+    shell.println("  User/Group (F3):");
+    shell.println("    login logout whoami id su sudo sudoend user usertest");
+
     shell.println("  Test:");
     shell.println("    testall, smoke");
     shell.newLine();

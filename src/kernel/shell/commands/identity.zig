@@ -440,20 +440,3 @@ fn showPrivacy() void {
 
     shell.newLine();
 }
-
-pub fn whoami() void {
-    if (!identity.isInitialized()) {
-        shell.printErrorLine("Identity not initialized");
-        return;
-    }
-    if (identity.getCurrentIdentity()) |id| {
-        const name = id.getName();
-        if (name.len > 0) shell.print(name) else shell.print("(anonymous)");
-        shell.print(" (");
-        shell.print(id.getAddress());
-        shell.println(")");
-        if (!id.unlocked) shell.printWarningLine("  [LOCKED]");
-    } else {
-        shell.printWarningLine("No identity set");
-    }
-}

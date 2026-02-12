@@ -29,6 +29,8 @@ const violation = @import("../security/violation.zig");
 const capability = @import("../security/capability.zig");
 const ipc = @import("../ipc/ipc.zig");
 
+const user_cmd = @import("commands/user.zig");
+
 // =============================================================================
 // Command Execution
 // =============================================================================
@@ -186,6 +188,28 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "shmtest")) {
         cmdShmTest(args);
     }
+
+    // F3: User/Group
+    else if (helpers.strEql(command, "login")) {
+        user_cmd.cmdLogin(args);
+    } else if (helpers.strEql(command, "logout")) {
+        user_cmd.cmdLogout(args);
+    } else if (helpers.strEql(command, "whoami")) {
+        user_cmd.cmdWhoami(args);
+    } else if (helpers.strEql(command, "id")) {
+        user_cmd.cmdId(args);
+    } else if (helpers.strEql(command, "su")) {
+        user_cmd.cmdSu(args);
+    } else if (helpers.strEql(command, "sudo")) {
+        user_cmd.cmdSudo(args);
+    } else if (helpers.strEql(command, "sudoend")) {
+        user_cmd.cmdSudoEnd(args);
+    } else if (helpers.strEql(command, "user")) {
+        user_cmd.execute(args);
+    } else if (helpers.strEql(command, "usertest")) {
+        user_cmd.execute("test");
+    }
+
     // Crypto
     else if (helpers.strEql(command, "crypto")) {
         crypto_cmd.execute(args);
@@ -201,9 +225,8 @@ pub fn execute(input: []const u8) void {
     // Identity
     else if (helpers.strEql(command, "identity")) {
         identity_cmd.execute(args);
-    } else if (helpers.strEql(command, "whoami")) {
-        identity_cmd.whoami();
     }
+
     // Network
     else if (helpers.strEql(command, "net")) {
         network_cmd.execute(args);
@@ -1069,6 +1092,10 @@ fn runAllTests() void {
 
     shell.printInfoLine("=== SHARED MEMORY TESTS (F2) ===");
     cmdShmTest("");
+    shell.newLine();
+
+    shell.printInfoLine("=== USER/GROUP TESTS (F3) ===");
+    user_cmd.execute("test");
     shell.newLine();
 
     shell.printInfoLine("########################################");
