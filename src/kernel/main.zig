@@ -72,6 +72,9 @@ const ipc = @import("ipc/ipc.zig");
 const users = @import("security/users.zig");
 const user_chain = @import("security/user_chain.zig");
 
+// F4: Encrypted Filesystem
+const encryptfs = @import("fs/encryptfs.zig");
+
 // ============================================================================
 // Limine Requests
 // ============================================================================
@@ -199,6 +202,10 @@ export fn kernel_main() noreturn {
     // F1: IPC subsystem
     ipc.init();
     serial.writeString("[OK]   IPC ready (F1)\n");
+
+    // F4: Encrypted Filesystem
+    encryptfs.init();
+    serial.writeString("[OK]   EncryptFS ready (F4)\n");
 
     printLine();
     serial.writeString("[FILESYSTEM]\n");
@@ -470,6 +477,18 @@ fn printSystemSummary() void {
     } else {
         serial.writeString("Not initialized\n");
     }
+
+    serial.writeString("  EncFS(F4):  ");
+    if (encryptfs.isInitialized()) {
+        serial.writeString("OK (");
+        printDecSerial(encryptfs.getStats().files);
+        serial.writeString(" files, ");
+        serial.writeString(if (encryptfs.isKeySet()) "unlocked" else "locked");
+        serial.writeString(")\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+
     serial.writeString("  Storage:    ");
     serial.writeString(if (storage.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  FAT32:      ");

@@ -6,18 +6,25 @@ pub const hash = @import("hash.zig");
 pub const random = @import("random.zig");
 pub const keys = @import("keys.zig");
 pub const signature = @import("signature.zig");
+pub const aes = @import("aes.zig");
 
 // Re-exports
 pub const Sha256 = hash.Sha256;
 pub const sha256 = hash.sha256;
 pub const sha256Into = hash.sha256Into;
-pub const sha256Ptr = hash.sha256Ptr; // <-- TAMBAH INI
+pub const sha256Ptr = hash.sha256Ptr;
 pub const hashEqual = hash.hashEqual;
 
 pub const KeyPair = signature.KeyPair;
 pub const verify = signature.verify;
 
 pub const SeedPhrase = keys.SeedPhrase;
+
+// AES re-exports
+pub const AES = aes;
+pub const encryptCBC = aes.encryptCBC;
+pub const decryptCBC = aes.decryptCBC;
+pub const deriveKey = aes.deriveKey;
 
 pub fn init() void {
     serial.writeString("[CRYPTO] Initializing...\n");
@@ -89,6 +96,17 @@ pub fn runTests() bool {
     } else {
         failed += 1;
         serial.writeString("[DEBUG] Signature test FAILED\n");
+    }
+    serial.writeString("\n");
+
+    // Test 6: AES-256
+    serial.writeString("[DEBUG] Starting AES-256 test...\n");
+    if (aes.test_aes()) {
+        passed += 1;
+        serial.writeString("[DEBUG] AES-256 test completed OK\n");
+    } else {
+        failed += 1;
+        serial.writeString("[DEBUG] AES-256 test FAILED\n");
     }
 
     serial.writeString("\n========================================\n");
