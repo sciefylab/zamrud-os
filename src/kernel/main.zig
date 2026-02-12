@@ -1,5 +1,5 @@
 //! Zamrud OS - Main Kernel with Security Integration
-//! Phases A-F3 Complete
+//! Phases A-F4.1 Complete
 
 const cpu = @import("core/cpu.zig");
 const limine = @import("core/limine.zig");
@@ -74,6 +74,9 @@ const user_chain = @import("security/user_chain.zig");
 
 // F4: Encrypted Filesystem
 const encryptfs = @import("fs/encryptfs.zig");
+
+// F4.1: Encryption Integration
+const enc_integration = @import("fs/enc_integration.zig");
 
 // ============================================================================
 // Limine Requests
@@ -205,7 +208,11 @@ export fn kernel_main() noreturn {
 
     // F4: Encrypted Filesystem
     encryptfs.init();
-    serial.writeString("[OK]   EncryptFS ready (F4)\n");
+    serial.writeString("[OK]   EncryptFS ready (F4.0)\n");
+
+    // F4.1: Encryption Integration
+    enc_integration.init();
+    serial.writeString("[OK]   EncFS Integration ready (F4.1)\n");
 
     printLine();
     serial.writeString("[FILESYSTEM]\n");
@@ -478,12 +485,23 @@ fn printSystemSummary() void {
         serial.writeString("Not initialized\n");
     }
 
-    serial.writeString("  EncFS(F4):  ");
+    serial.writeString("  EncFS(F4.0):");
     if (encryptfs.isInitialized()) {
         serial.writeString("OK (");
         printDecSerial(encryptfs.getStats().files);
         serial.writeString(" files, ");
         serial.writeString(if (encryptfs.isKeySet()) "unlocked" else "locked");
+        serial.writeString(")\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+
+    serial.writeString("  EncInt(F4.1):");
+    if (enc_integration.isInitialized()) {
+        serial.writeString("OK (");
+        serial.writeString(if (enc_integration.isKeyActive()) "active" else "locked");
+        serial.writeString(", role=");
+        serial.writeString(enc_integration.getCurrentOwnerRole().toString());
         serial.writeString(")\n");
     } else {
         serial.writeString("Not initialized\n");

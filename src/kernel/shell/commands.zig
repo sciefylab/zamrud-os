@@ -1,5 +1,5 @@
 //! Zamrud OS - Shell Commands Main Dispatcher
-//! Phases A-F2 Complete
+//! Phases A-F4.1 Complete
 
 const shell = @import("shell.zig");
 
@@ -28,6 +28,7 @@ const shmem_cmd = @import("commands/shmem.zig");
 const vio_cmd = @import("commands/violation.zig");
 const user_cmd = @import("commands/user.zig");
 const encfs_cmd = @import("commands/encfs.zig");
+const enc_int_cmd = @import("commands/enc_int.zig"); // F4.1
 
 // =============================================================================
 // Command Execution
@@ -186,7 +187,6 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "shmtest")) {
         shmem_cmd.cmdShmTest(args);
     }
-
     // F3: User/Group
     else if (helpers.strEql(command, "login")) {
         user_cmd.cmdLogin(args);
@@ -207,7 +207,6 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "usertest")) {
         user_cmd.execute("test");
     }
-
     // F4: Encrypted Filesystem
     else if (helpers.strEql(command, "encfs")) {
         encfs_cmd.execute(args);
@@ -222,7 +221,14 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "enctest")) {
         encfs_cmd.cmdEncTest();
     }
-
+    // F4.1: Encryption Integration
+    else if (helpers.strEql(command, "encwho")) {
+        enc_int_cmd.encWhoCommand(args);
+    } else if (helpers.strEql(command, "encfiles")) {
+        enc_int_cmd.encFilesCommand(args);
+    } else if (helpers.strEql(command, "encinttest")) {
+        enc_int_cmd.encIntTestCommand(args);
+    }
     // Crypto
     else if (helpers.strEql(command, "crypto")) {
         crypto_cmd.execute(args);
@@ -239,7 +245,6 @@ pub fn execute(input: []const u8) void {
     else if (helpers.strEql(command, "identity")) {
         identity_cmd.execute(args);
     }
-
     // Network
     else if (helpers.strEql(command, "net")) {
         network_cmd.execute(args);
@@ -397,8 +402,12 @@ fn runAllTests() void {
     user_cmd.execute("test");
     shell.newLine();
 
-    shell.printInfoLine("=== ENCRYPTED FS TESTS (F4) ===");
+    shell.printInfoLine("=== ENCRYPTED FS TESTS (F4.0) ===");
     encfs_cmd.cmdEncTest();
+    shell.newLine();
+
+    shell.printInfoLine("=== ENC INTEGRATION TESTS (F4.1) ===");
+    enc_int_cmd.encIntTestCommand("");
     shell.newLine();
 
     shell.printInfoLine("########################################");

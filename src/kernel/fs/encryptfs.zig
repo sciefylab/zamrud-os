@@ -1,12 +1,13 @@
 //! Zamrud OS - Encrypted Filesystem Layer (F4)
-//! Transparent per-file encryption using AES-256-CBC
-//! Integrates with VFS, RAMFS, and FAT32
+//! F4.0: Core AES-256-CBC per-file encryption
+//! F4.1: User-hierarchy ownership (owner_uid, owner_role)
+//!       + findFileMut() + getFileInfo() for integration layer
 //!
 //! Architecture:
 //!   User writes "hello" to /enc/secret.txt
 //!     → encryptfs intercepts
 //!     → AES-256-CBC encrypt with identity-derived key
-//!     → stores: [16-byte IV][ciphertext] in backing store
+//!     → stores: [MAGIC(4)][IV(16)][ciphertext] in backing store
 //!   User reads /enc/secret.txt
 //!     → encryptfs intercepts
 //!     → reads [IV][ciphertext] from backing store
@@ -22,6 +23,7 @@ const random = @import("../crypto/random.zig");
 const capability = @import("../security/capability.zig");
 const violation = @import("../security/violation.zig");
 const process = @import("../proc/process.zig");
+const users = @import("../security/users.zig"); // F4.1
 
 // =============================================================================
 // Constants
@@ -34,7 +36,7 @@ pub const MAGIC: [4]u8 = .{ 'Z', 'E', 'N', 'C' }; // Zamrud ENCrypted
 pub const HEADER_SIZE: usize = 4 + aes.IV_SIZE; // magic(4) + IV(16) = 20
 
 // =============================================================================
-// Encrypted File Entry
+// Encrypted File Entry — F4.1: added owner_role
 // =============================================================================
 
 pub const EncryptedFile = struct {
@@ -45,7 +47,8 @@ pub const EncryptedFile = struct {
     data_len: usize = 0,
     /// Original plaintext size (for stat)
     original_size: usize = 0,
-    owner_uid: u32 = 0,
+    owner_uid: u16 = 0,
+    owner_role: users.UserRole = .guest, // F4.1: role of file creator
     active: bool = false,
 
     pub fn getName(self: *const EncryptedFile) []const u8 {
@@ -159,7 +162,7 @@ pub fn setKeyFromIdentity(pubkey: *const [32]u8) bool {
     return true;
 }
 
-/// Set key directly (for testing)
+/// Set key directly (for testing and enc_integration)
 pub fn setKeyDirect(key: *const [aes.KEY_SIZE]u8) void {
     var i: usize = 0;
     while (i < aes.KEY_SIZE) : (i += 1) {
@@ -201,7 +204,7 @@ pub fn encryptFile(name: []const u8, plaintext: []const u8) bool {
     }
 
     // Check if file already exists
-    if (findFile(name) != null) {
+    if (findFileConst(name) != null) {
         serial.writeString("[ENCFS] File already exists: ");
         serial.writeString(name);
         serial.writeString("\n");
@@ -261,7 +264,8 @@ pub fn encryptFile(name: []const u8, plaintext: []const u8) bool {
 
     f.data_len = pos;
     f.original_size = plaintext.len;
-    f.owner_uid = 0; // TODO: from current user
+    f.owner_uid = 0; // F4.1: will be stamped by enc_integration
+    f.owner_role = .guest; // F4.1: will be stamped by enc_integration
     f.active = true;
 
     file_count += 1;
@@ -271,7 +275,7 @@ pub fn encryptFile(name: []const u8, plaintext: []const u8) bool {
     serial.writeString(name);
     serial.writeString("' (");
     printU32(@intCast(plaintext.len));
-    serial.writeString(" → ");
+    serial.writeString(" -> ");
     printU32(@intCast(pos));
     serial.writeString(" bytes)\n");
 
@@ -294,7 +298,7 @@ pub fn decryptFile(name: []const u8) ?[]const u8 {
         return null;
     }
 
-    const f = findFile(name) orelse {
+    const f = findFileConst(name) orelse {
         serial.writeString("[ENCFS] File not found: ");
         serial.writeString(name);
         serial.writeString("\n");
@@ -354,6 +358,8 @@ pub fn deleteFile(name: []const u8) bool {
             files[i].data_len = 0;
             files[i].original_size = 0;
             files[i].name_len = 0;
+            files[i].owner_uid = 0;
+            files[i].owner_role = .guest; // F4.1: reset role
             if (file_count > 0) file_count -= 1;
 
             serial.writeString("[ENCFS] Deleted '");
@@ -367,10 +373,11 @@ pub fn deleteFile(name: []const u8) bool {
 }
 
 // =============================================================================
-// Query
+// Query — F4.1: added findFileMut, getFileInfo
 // =============================================================================
 
-fn findFile(name: []const u8) ?*EncryptedFile {
+/// Internal const lookup
+fn findFileConst(name: []const u8) ?*const EncryptedFile {
     var i: usize = 0;
     while (i < MAX_ENCRYPTED_FILES) : (i += 1) {
         if (files[i].active and strEqual(files[i].getName(), name)) {
@@ -380,8 +387,35 @@ fn findFile(name: []const u8) ?*EncryptedFile {
     return null;
 }
 
+/// F4.1: Mutable file lookup (for stamping ownership after encrypt)
+pub fn findFileMut(name: []const u8) ?*EncryptedFile {
+    var i: usize = 0;
+    while (i < MAX_ENCRYPTED_FILES) : (i += 1) {
+        if (files[i].active and strEqual(files[i].getName(), name)) {
+            return &files[i];
+        }
+    }
+    return null;
+}
+
+/// F4.1: Get file info for access control checks (read-only)
+pub fn getFileInfo(name: []const u8) ?struct {
+    owner_uid: u16,
+    owner_role: users.UserRole,
+    original_size: usize,
+    data_len: usize,
+} {
+    const f = findFileConst(name) orelse return null;
+    return .{
+        .owner_uid = f.owner_uid,
+        .owner_role = f.owner_role,
+        .original_size = f.original_size,
+        .data_len = f.data_len,
+    };
+}
+
 pub fn fileExists(name: []const u8) bool {
-    return findFile(name) != null;
+    return findFileConst(name) != null;
 }
 
 pub fn getFileCount() usize {
@@ -459,7 +493,7 @@ fn printU32(val: u32) void {
 }
 
 // =============================================================================
-// Tests
+// Tests (F4.0 — preserved, unchanged logic)
 // =============================================================================
 
 pub fn test_encryptfs() bool {
@@ -494,7 +528,7 @@ pub fn test_encryptfs() bool {
     }
 
     // Test 3: Set key from passphrase
-    serial.writeString("  Set key (passphrase)...... ");
+    serial.writeString("  Set key (direct).......... ");
     var test_key: [aes.KEY_SIZE]u8 = [_]u8{0} ** aes.KEY_SIZE;
     test_key[0] = 0xDE;
     test_key[1] = 0xAD;
@@ -653,7 +687,7 @@ pub fn test_encryptfs() bool {
         failed += 1;
     }
 
-    // Test 16: Stats
+    // Test 16: Stats encrypts
     serial.writeString("  Stats: encrypts > 0....... ");
     if (stats_encrypts > 0) {
         serial.writeString("PASS\n");
@@ -713,18 +747,95 @@ pub fn test_encryptfs() bool {
         failed += 1;
     }
 
+    // F4.1 Test 21: findFileMut works
+    serial.writeString("  findFileMut works......... ");
+    setKeyDirect(&test_key);
+    _ = encryptFile("mut_test.enc", "mutable test");
+    if (findFileMut("mut_test.enc")) |mf| {
+        mf.owner_uid = 42;
+        mf.owner_role = .admin;
+        if (mf.owner_uid == 42 and mf.owner_role == .admin) {
+            serial.writeString("PASS\n");
+            passed += 1;
+        } else {
+            serial.writeString("FAIL\n");
+            failed += 1;
+        }
+    } else {
+        serial.writeString("FAIL (not found)\n");
+        failed += 1;
+    }
+
+    // F4.1 Test 22: getFileInfo works
+    serial.writeString("  getFileInfo works......... ");
+    if (getFileInfo("mut_test.enc")) |info| {
+        if (info.owner_uid == 42 and info.owner_role == .admin and info.original_size > 0) {
+            serial.writeString("PASS\n");
+            passed += 1;
+        } else {
+            serial.writeString("FAIL (wrong info)\n");
+            failed += 1;
+        }
+    } else {
+        serial.writeString("FAIL (null)\n");
+        failed += 1;
+    }
+
+    // F4.1 Test 23: getFileInfo nonexist
+    serial.writeString("  getFileInfo nonexist...... ");
+    if (getFileInfo("no_such_file.enc") == null) {
+        serial.writeString("PASS\n");
+        passed += 1;
+    } else {
+        serial.writeString("FAIL\n");
+        failed += 1;
+    }
+
+    // F4.1 Test 24: owner_role persists after delete/recreate
+    serial.writeString("  owner_role reset on delete ");
+    _ = deleteFile("mut_test.enc");
+    // Recreate same name
+    _ = encryptFile("mut_test2.enc", "new file");
+    if (findFileMut("mut_test2.enc")) |mf2| {
+        // New file should have default role (.guest)
+        if (mf2.owner_role == .guest) {
+            serial.writeString("PASS\n");
+            passed += 1;
+        } else {
+            serial.writeString("FAIL\n");
+            failed += 1;
+        }
+    } else {
+        serial.writeString("FAIL\n");
+        failed += 1;
+    }
+
+    // F4.1 Test 25: findFileMut nonexist returns null
+    serial.writeString("  findFileMut nonexist...... ");
+    if (findFileMut("nonexist_mut.enc") == null) {
+        serial.writeString("PASS\n");
+        passed += 1;
+    } else {
+        serial.writeString("FAIL\n");
+        failed += 1;
+    }
+
+    clearKey();
+
     serial.writeString("\n========================================\n");
-    serial.writeString("  Results: ");
+    serial.writeString("  F4.0+F4.1 Results: ");
     printU32(passed);
     serial.writeString(" passed, ");
     printU32(failed);
-    serial.writeString(" failed\n");
+    serial.writeString(" failed (");
+    printU32(passed + failed);
+    serial.writeString(" total)\n");
     serial.writeString("========================================\n\n");
 
     if (failed == 0) {
-        serial.writeString("All tests PASSED!\n");
+        serial.writeString("All F4 tests PASSED!\n");
     } else {
-        serial.writeString("Some tests FAILED!\n");
+        serial.writeString("Some F4 tests FAILED!\n");
     }
 
     return failed == 0;

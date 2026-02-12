@@ -1,5 +1,5 @@
 //! Zamrud OS - F3: User/Group Permission System
-//! Identity-based user management with role enforcement
+//! F4.1: Encryption integration hooks on login/logout/switchUser
 //!
 //! Architecture:
 //!   Identity (blockchain) → User (kernel) → Process
@@ -19,8 +19,10 @@ const hash = @import("../crypto/hash.zig");
 const capability = @import("capability.zig");
 const violation = @import("violation.zig");
 const timer = @import("../drivers/timer/timer.zig");
-
 const user_chain = @import("user_chain.zig");
+
+// F4.1: Encryption integration
+const enc_integration = @import("../fs/enc_integration.zig");
 
 // =============================================================================
 // Constants
@@ -449,8 +451,6 @@ pub fn createUserWithRole(identity_name: []const u8, role: UserRole) ?*User {
     return u;
 }
 
-// === REPLACE deleteUser — add blockchain recording ===
-
 /// Delete user by name — records revocation in blockchain
 pub fn deleteUser(name: []const u8) bool {
     if (current_session.active and !current_session.isRoot()) {
@@ -505,8 +505,6 @@ pub fn deleteUser(name: []const u8) bool {
     return true;
 }
 
-// === REPLACE setUserRole — add blockchain recording ===
-
 /// Set user role (admin operation) — records in blockchain
 pub fn setUserRole(name: []const u8, role: UserRole) bool {
     if (current_session.active and !current_session.isRoot()) {
@@ -531,7 +529,6 @@ pub fn setUserRole(name: []const u8, role: UserRole) bool {
     if (user_chain.isInitialized() and u.identity_index >= 0) {
         const idx: usize = @intCast(u.identity_index);
         if (keyring.getSlotPtr(idx)) |target_id| {
-            // Get current user's pubkey as assigner
             const current_user = findUserByUid(getCurrentUid());
             if (current_user != null and current_user.?.identity_index >= 0) {
                 const auth_idx: usize = @intCast(current_user.?.identity_index);
@@ -548,6 +545,7 @@ pub fn setUserRole(name: []const u8, role: UserRole) bool {
 
     return true;
 }
+
 // =============================================================================
 // User Lookup
 // =============================================================================
@@ -632,7 +630,7 @@ pub fn addUserToGroup(uid: u16, gid: u16) bool {
 }
 
 // =============================================================================
-// Session Management (Login/Logout)
+// Session Management (Login/Logout) — F4.1: encryption hooks
 // =============================================================================
 
 /// Login with identity name and PIN
@@ -697,6 +695,11 @@ pub fn login(identity_name: []const u8, pin: []const u8) bool {
     // Update user last login
     u.last_login = timer.getTicks();
 
+    // F4.1: Auto-set encryption key for this user
+    if (enc_integration.isInitialized()) {
+        enc_integration.onLogin(u.uid, u.role, u.identity_index);
+    }
+
     serial.writeString("[USERS] Login successful: ");
     serial.writeString(current_session.getName());
     serial.writeString(" (uid=");
@@ -718,6 +721,11 @@ pub fn logout() void {
 
     // Lock identity auth
     auth.lock();
+
+    // F4.1: Clear encryption key
+    if (enc_integration.isInitialized()) {
+        enc_integration.onLogout();
+    }
 
     // Clear session
     current_session = .{};
@@ -756,6 +764,11 @@ pub fn switchUser(target_name: []const u8, pin: []const u8) bool {
     }
     current_session.name_len = @intCast(nlen);
 
+    // F4.1: Switch encryption key to target user
+    if (enc_integration.isInitialized()) {
+        enc_integration.onLogin(target.uid, target.role, target.identity_index);
+    }
+
     serial.writeString("[USERS] Switched to user: ");
     serial.writeString(current_session.getName());
     serial.writeString("\n");
@@ -779,9 +792,6 @@ pub fn sudo(root_pin: []const u8) bool {
         return false;
     }
 
-    // Need CAP_ADMIN
-    // (In a real system, we'd check process caps. Here check role.)
-
     // Verify root identity's PIN
     // Find root user
     const root_user = findUserByUid(ROOT_UID) orelse {
@@ -794,7 +804,6 @@ pub fn sudo(root_pin: []const u8) bool {
         reportPermissionViolation("sudo: invalid root credentials");
 
         // Re-unlock original user's session
-        // (auth.unlock changes the current identity, so we re-auth)
         _ = auth.unlock(current_session.getName(), ""); // This will fail, but that's ok
         return false;
     }
@@ -1245,7 +1254,6 @@ pub fn runTests() bool {
 
     // Test 15: Normal user cannot write to root-owned file
     serial.writeString("  Test 15: Permission check (owner write)\n");
-    // File owned by root (uid=0), mode 0644
     const file_mode = @import("../fs/inode.zig").FileMode.regular(); // 0644
     if (!checkFilePermission(0, 0, file_mode, .write)) {
         serial.writeString("    OK (denied)\n");
@@ -1359,8 +1367,7 @@ pub fn runTests() bool {
 
     // Test 24: Delete user
     serial.writeString("  Test 24: Delete user\n");
-    if (deleteUser("testguest") or true) { // guest wasn't created, but test the path
-        // Create guest then delete
+    if (deleteUser("testguest") or true) {
         _ = createUser("testguest");
         if (deleteUser("testguest")) {
             serial.writeString("    OK\n");
