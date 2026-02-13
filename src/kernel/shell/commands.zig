@@ -29,6 +29,7 @@ const vio_cmd = @import("commands/violation.zig");
 const user_cmd = @import("commands/user.zig");
 const encfs_cmd = @import("commands/encfs.zig");
 const enc_int_cmd = @import("commands/enc_int.zig"); // F4.1
+const sys_encrypt_cmd = @import("commands/sys_encrypt.zig"); // F4.2
 
 // =============================================================================
 // Command Execution
@@ -229,6 +230,12 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "encinttest")) {
         enc_int_cmd.encIntTestCommand(args);
     }
+    // F4.2: System Encryption
+    else if (helpers.strEql(command, "sysenc")) {
+        sys_encrypt_cmd.cmdSysEnc(args);
+    } else if (helpers.strEql(command, "sysenctest")) {
+        sys_encrypt_cmd.cmdSysEncTest(args);
+    }
     // Crypto
     else if (helpers.strEql(command, "crypto")) {
         crypto_cmd.execute(args);
@@ -408,6 +415,10 @@ fn runAllTests() void {
 
     shell.printInfoLine("=== ENC INTEGRATION TESTS (F4.1) ===");
     enc_int_cmd.encIntTestCommand("");
+    shell.newLine();
+
+    shell.printInfoLine("=== SYSTEM ENCRYPTION TESTS (F4.2) ===");
+    sys_encrypt_cmd.cmdSysEncTest("");
     shell.newLine();
 
     shell.printInfoLine("########################################");

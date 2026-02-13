@@ -1,12 +1,12 @@
 //! Zamrud OS - F1: IPC Message Passing
-//! Send/receive messages between processes
+//! F4.2: Optional encrypted message channels
 //! Capability-gated: requires CAP_IPC
-//! Violations reported to unified pipeline
 
 const serial = @import("../drivers/serial/serial.zig");
 const timer = @import("../drivers/timer/timer.zig");
 const capability = @import("../security/capability.zig");
 const violation = @import("../security/violation.zig");
+const sys_encrypt = @import("../crypto/sys_encrypt.zig");
 
 // ============================================================================
 // Constants
@@ -16,6 +16,9 @@ pub const MAX_MAILBOXES = 64;
 pub const MAX_MESSAGES_PER_BOX = 16;
 pub const MAX_MSG_DATA = 64;
 pub const MAX_MSG_TOTAL = MAX_MAILBOXES * MAX_MESSAGES_PER_BOX;
+
+// F4.2: Encrypted message buffer (IV + ciphertext for 64-byte payload)
+pub const MAX_ENC_MSG_DATA = 96; // IV(16) + encrypted(80 max with padding)
 
 // ============================================================================
 // Types
@@ -28,6 +31,7 @@ pub const MsgType = enum(u8) {
     reply = 3,
     broadcast = 4,
     system = 5,
+    encrypted = 6, // F4.2: encrypted payload
 };
 
 pub const Message = struct {
@@ -39,6 +43,10 @@ pub const Message = struct {
     data: [MAX_MSG_DATA]u8 = [_]u8{0} ** MAX_MSG_DATA,
     data_len: u8 = 0,
     valid: bool = false,
+    /// F4.2: encrypted data (stored alongside or instead of .data)
+    enc_data: [MAX_ENC_MSG_DATA]u8 = [_]u8{0} ** MAX_ENC_MSG_DATA,
+    enc_data_len: u8 = 0,
+    is_encrypted: bool = false,
 
     pub fn getData(self: *const Message) []const u8 {
         return self.data[0..self.data_len];
@@ -54,6 +62,8 @@ pub const Mailbox = struct {
     count: u8 = 0,
     total_received: u64 = 0,
     total_dropped: u64 = 0,
+    /// F4.2: if true, ALL messages to this mailbox are auto-encrypted
+    encrypt_mode: bool = false,
 };
 
 pub const SendResult = enum(u8) {
@@ -64,6 +74,7 @@ pub const SendResult = enum(u8) {
     invalid_pid = 4,
     self_send = 5,
     killed = 6,
+    encrypt_failed = 7, // F4.2
 };
 
 pub const RecvResult = struct {
@@ -77,6 +88,8 @@ pub const MsgStats = struct {
     total_dropped: u64 = 0,
     total_broadcasts: u64 = 0,
     cap_violations: u64 = 0,
+    encrypted_sent: u64 = 0, // F4.2
+    encrypted_recv: u64 = 0, // F4.2
 };
 
 // ============================================================================
@@ -113,10 +126,9 @@ pub fn isInitialized() bool {
 // Mailbox Management
 // ============================================================================
 
-/// Create mailbox for a process
 pub fn createMailbox(pid: u16) bool {
     if (!initialized) return false;
-    if (findMailbox(pid) != null) return true; // already exists
+    if (findMailbox(pid) != null) return true;
 
     for (&mailboxes) |*mb| {
         if (!mb.active) {
@@ -131,10 +143,9 @@ pub fn createMailbox(pid: u16) bool {
             return true;
         }
     }
-    return false; // full
+    return false;
 }
 
-/// Destroy mailbox (on process exit)
 pub fn destroyMailbox(pid: u16) void {
     if (findMailbox(pid)) |mb| {
         mb.active = false;
@@ -144,9 +155,26 @@ pub fn destroyMailbox(pid: u16) void {
     }
 }
 
-/// Check if process has a mailbox
 pub fn hasMailbox(pid: u16) bool {
     return findMailbox(pid) != null;
+}
+
+/// F4.2: Enable encryption mode for a mailbox
+pub fn setEncryptMode(pid: u16, enabled: bool) bool {
+    const mb = findMailbox(pid) orelse return false;
+    mb.encrypt_mode = enabled;
+    serial.writeString("[IPC-MSG] Encrypt mode ");
+    serial.writeString(if (enabled) "ON" else "OFF");
+    serial.writeString(" for pid=");
+    printNum(pid);
+    serial.writeString("\n");
+    return true;
+}
+
+/// F4.2: Check if mailbox has encryption mode
+pub fn isEncryptMode(pid: u16) bool {
+    const mb = findMailbox(pid) orelse return false;
+    return mb.encrypt_mode;
 }
 
 fn findMailbox(pid: u16) ?*Mailbox {
@@ -160,11 +188,8 @@ fn findMailbox(pid: u16) ?*Mailbox {
 // Send Message — CAP_IPC enforced
 // ============================================================================
 
-/// Send a message from sender_pid to receiver_pid
 pub fn send(sender_pid: u16, receiver_pid: u16, msg_type: MsgType, data: []const u8) SendResult {
-    // Kernel (pid=0) always allowed
     if (sender_pid != 0) {
-        // Check CAP_IPC
         if (!capability.check(sender_pid, capability.CAP_IPC)) {
             stats.cap_violations += 1;
             reportIpcViolation(sender_pid, "send without CAP_IPC");
@@ -172,22 +197,16 @@ pub fn send(sender_pid: u16, receiver_pid: u16, msg_type: MsgType, data: []const
         }
     }
 
-    // No self-send
     if (sender_pid == receiver_pid and sender_pid != 0) return .self_send;
 
-    // Find receiver mailbox
-    const mb = findMailbox(receiver_pid) orelse {
-        return .no_mailbox;
-    };
+    const mb = findMailbox(receiver_pid) orelse return .no_mailbox;
 
-    // Check full
     if (mb.count >= MAX_MESSAGES_PER_BOX) {
         mb.total_dropped += 1;
         stats.total_dropped += 1;
         return .mailbox_full;
     }
 
-    // Build message
     const msg_id = next_msg_id;
     next_msg_id += 1;
 
@@ -205,7 +224,28 @@ pub fn send(sender_pid: u16, receiver_pid: u16, msg_type: MsgType, data: []const
     }
     msg.data_len = @intCast(copy_len);
 
-    // Enqueue (ring buffer)
+    // F4.2: Auto-encrypt if receiver mailbox has encrypt_mode
+    if (mb.encrypt_mode and msg_type != .encrypted) {
+        if (sys_encrypt.isInitialized() and sys_encrypt.isMasterKeySet()) {
+            const enc_len = sys_encrypt.encryptIpcMsg(
+                data[0..copy_len],
+                &msg.enc_data,
+            );
+            if (enc_len > 0) {
+                msg.enc_data_len = @intCast(enc_len);
+                msg.is_encrypted = true;
+                msg.msg_type = .encrypted;
+                // Clear plaintext
+                for (0..MAX_MSG_DATA) |ci| {
+                    msg.data[ci] = 0;
+                }
+                msg.data_len = 0;
+                stats.encrypted_sent += 1;
+            }
+            // If encryption fails, send plaintext (graceful degradation)
+        }
+    }
+
     mb.messages[mb.tail] = msg;
     mb.tail = (mb.tail + 1) % MAX_MESSAGES_PER_BOX;
     mb.count += 1;
@@ -216,12 +256,67 @@ pub fn send(sender_pid: u16, receiver_pid: u16, msg_type: MsgType, data: []const
 }
 
 // ============================================================================
-// Receive Message — CAP_IPC enforced
+// F4.2: Send Encrypted Message (explicit)
 // ============================================================================
 
-/// Receive next message for pid (non-blocking)
+/// Send a message with explicit encryption regardless of mailbox mode
+pub fn sendEncrypted(sender_pid: u16, receiver_pid: u16, data: []const u8) SendResult {
+    if (!sys_encrypt.isInitialized() or !sys_encrypt.isMasterKeySet()) {
+        return .encrypt_failed;
+    }
+
+    if (sender_pid != 0) {
+        if (!capability.check(sender_pid, capability.CAP_IPC)) {
+            stats.cap_violations += 1;
+            reportIpcViolation(sender_pid, "sendEncrypted without CAP_IPC");
+            return .no_cap;
+        }
+    }
+
+    if (sender_pid == receiver_pid and sender_pid != 0) return .self_send;
+
+    const mb = findMailbox(receiver_pid) orelse return .no_mailbox;
+
+    if (mb.count >= MAX_MESSAGES_PER_BOX) {
+        mb.total_dropped += 1;
+        stats.total_dropped += 1;
+        return .mailbox_full;
+    }
+
+    var msg = Message{};
+    msg.sender_pid = sender_pid;
+    msg.receiver_pid = receiver_pid;
+    msg.msg_type = .encrypted;
+    msg.msg_id = next_msg_id;
+    next_msg_id += 1;
+    msg.timestamp = timer.getTicks();
+    msg.valid = true;
+    msg.is_encrypted = true;
+
+    const copy_len = @min(data.len, MAX_MSG_DATA);
+    const enc_len = sys_encrypt.encryptIpcMsg(
+        data[0..copy_len],
+        &msg.enc_data,
+    );
+    if (enc_len == 0) return .encrypt_failed;
+
+    msg.enc_data_len = @intCast(enc_len);
+    stats.encrypted_sent += 1;
+
+    mb.messages[mb.tail] = msg;
+    mb.tail = (mb.tail + 1) % MAX_MESSAGES_PER_BOX;
+    mb.count += 1;
+    mb.total_received += 1;
+    stats.total_sent += 1;
+
+    return .ok;
+}
+
+// ============================================================================
+// Receive Message — CAP_IPC enforced, auto-decrypt
+// ============================================================================
+
 pub fn recv(pid: u16) RecvResult {
-    // Kernel always allowed
     if (pid != 0) {
         if (!capability.check(pid, capability.CAP_IPC)) {
             stats.cap_violations += 1;
@@ -235,37 +330,55 @@ pub fn recv(pid: u16) RecvResult {
     };
 
     if (mb.count == 0) {
-        return .{ .success = true, .message = null }; // empty, no error
+        return .{ .success = true, .message = null };
     }
 
-    // Dequeue
-    const msg = mb.messages[mb.head];
+    var msg = mb.messages[mb.head];
     mb.messages[mb.head] = Message{};
     mb.head = (mb.head + 1) % MAX_MESSAGES_PER_BOX;
     mb.count -= 1;
     stats.total_received += 1;
 
+    // F4.2: Auto-decrypt encrypted messages
+    if (msg.is_encrypted and msg.enc_data_len > 0) {
+        if (sys_encrypt.isInitialized() and sys_encrypt.isMasterKeySet()) {
+            var dec_buf: [MAX_MSG_DATA]u8 = [_]u8{0} ** MAX_MSG_DATA;
+            const dec_len = sys_encrypt.decryptIpcMsg(
+                msg.enc_data[0..msg.enc_data_len],
+                &dec_buf,
+            );
+            if (dec_len > 0) {
+                // Restore plaintext
+                for (0..dec_len) |di| {
+                    msg.data[di] = dec_buf[di];
+                }
+                msg.data_len = @intCast(dec_len);
+                msg.is_encrypted = false;
+                msg.msg_type = .data; // Restore original type
+                stats.encrypted_recv += 1;
+            }
+            // If decrypt fails, return encrypted message as-is
+        }
+    }
+
     return .{ .success = true, .message = msg };
 }
 
-/// Peek at next message without removing it
 pub fn peek(pid: u16) ?*const Message {
     const mb = findMailbox(pid) orelse return null;
     if (mb.count == 0) return null;
     return &mb.messages[mb.head];
 }
 
-/// Get pending message count
 pub fn pendingCount(pid: u16) u8 {
     const mb = findMailbox(pid) orelse return 0;
     return mb.count;
 }
 
 // ============================================================================
-// Broadcast — send to ALL mailboxes
+// Broadcast
 // ============================================================================
 
-/// Broadcast message to all active mailboxes
 pub fn broadcast(sender_pid: u16, msg_type: MsgType, data: []const u8) u32 {
     if (sender_pid != 0) {
         if (!capability.check(sender_pid, capability.CAP_IPC)) {
@@ -288,7 +401,7 @@ pub fn broadcast(sender_pid: u16, msg_type: MsgType, data: []const u8) u32 {
 }
 
 // ============================================================================
-// Violation Reporting — E3.6 integration
+// Violation Reporting
 // ============================================================================
 
 fn reportIpcViolation(pid: u16, reason: []const u8) void {
@@ -327,12 +440,14 @@ pub fn getMailboxInfo(pid: u16) ?struct {
     pending: u8,
     total_received: u64,
     total_dropped: u64,
+    encrypt_mode: bool,
 } {
     const mb = findMailbox(pid) orelse return null;
     return .{
         .pending = mb.count,
         .total_received = mb.total_received,
         .total_dropped = mb.total_dropped,
+        .encrypt_mode = mb.encrypt_mode,
     };
 }
 
@@ -356,6 +471,10 @@ pub fn printStatus() void {
     printNum64(stats.total_broadcasts);
     serial.writeString("\n  CAP viols: ");
     printNum64(stats.cap_violations);
+    serial.writeString("\n  Enc sent:  ");
+    printNum64(stats.encrypted_sent);
+    serial.writeString("\n  Enc recv:  ");
+    printNum64(stats.encrypted_recv);
     serial.writeString("\n");
 }
 

@@ -64,6 +64,10 @@ pub fn cmdHelp(_: []const u8) void {
     shell.println("  User/Group (F3):");
     shell.println("    login logout whoami id su sudo sudoend user usertest");
 
+    // Di bagian help text, tambahkan:
+    shell.println("  sysenc              System encryption management");
+    shell.println("  sysenctest          Run F4.2 encryption test suite");
+
     shell.println("  Test:");
     shell.println("    testall, smoke");
     shell.newLine();

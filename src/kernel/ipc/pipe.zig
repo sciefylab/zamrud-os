@@ -1,10 +1,11 @@
 //! Zamrud OS - F1: IPC Pipes
-//! Unidirectional byte streams between processes
+//! F4.2: Optional encrypted pipe channels
 //! Capability-gated: requires CAP_IPC
 
 const serial = @import("../drivers/serial/serial.zig");
 const capability = @import("../security/capability.zig");
 const violation = @import("../security/violation.zig");
+const sys_encrypt = @import("../crypto/sys_encrypt.zig");
 
 // ============================================================================
 // Constants
@@ -30,6 +31,8 @@ pub const Pipe = struct {
     closed_read: bool = false,
     bytes_written: u64 = 0,
     bytes_read: u64 = 0,
+    /// F4.2: if true, data is encrypted in the pipe buffer
+    encrypted: bool = false,
 };
 
 pub const PipeResult = enum(u8) {
@@ -49,6 +52,7 @@ pub const PipeStats = struct {
     total_bytes_written: u64 = 0,
     total_bytes_read: u64 = 0,
     cap_violations: u64 = 0,
+    encrypted_pipes: u64 = 0, // F4.2
 };
 
 // ============================================================================
@@ -83,11 +87,9 @@ pub fn isInitialized() bool {
 // Pipe Creation
 // ============================================================================
 
-/// Create a pipe: writer_pid writes, reader_pid reads
 pub fn create(writer_pid: u16, reader_pid: u16) ?u16 {
     if (!initialized) return null;
 
-    // CAP_IPC check for non-kernel
     if (writer_pid != 0) {
         if (!capability.check(writer_pid, capability.CAP_IPC)) {
             stats.cap_violations += 1;
@@ -96,7 +98,6 @@ pub fn create(writer_pid: u16, reader_pid: u16) ?u16 {
         }
     }
 
-    // Find free slot
     for (&pipes) |*p| {
         if (!p.active) {
             const id = next_pipe_id;
@@ -121,10 +122,30 @@ pub fn create(writer_pid: u16, reader_pid: u16) ?u16 {
             return id;
         }
     }
-    return null; // table full
+    return null;
 }
 
-/// Close a pipe
+/// F4.2: Create an encrypted pipe
+pub fn createEncrypted(writer_pid: u16, reader_pid: u16) ?u16 {
+    const id = create(writer_pid, reader_pid) orelse return null;
+
+    if (findPipe(id)) |p| {
+        p.encrypted = true;
+        stats.encrypted_pipes += 1;
+        serial.writeString("[IPC-PIPE] Pipe ");
+        printNum(id);
+        serial.writeString(" encrypted mode\n");
+    }
+
+    return id;
+}
+
+/// F4.2: Check if pipe is encrypted
+pub fn isEncrypted(pipe_id: u16) bool {
+    const p = findPipe(pipe_id) orelse return false;
+    return p.encrypted;
+}
+
 pub fn close(pipe_id: u16) bool {
     const p = findPipe(pipe_id) orelse return false;
     p.active = false;
@@ -132,7 +153,6 @@ pub fn close(pipe_id: u16) bool {
     return true;
 }
 
-/// Close write end of pipe
 pub fn closeWrite(pipe_id: u16, pid: u16) PipeResult {
     const p = findPipe(pipe_id) orelse return .not_found;
     if (p.writer_pid != pid and pid != 0) return .not_owner;
@@ -140,7 +160,6 @@ pub fn closeWrite(pipe_id: u16, pid: u16) PipeResult {
     return .ok;
 }
 
-/// Close read end of pipe
 pub fn closeRead(pipe_id: u16, pid: u16) PipeResult {
     const p = findPipe(pipe_id) orelse return .not_found;
     if (p.reader_pid != pid and pid != 0) return .not_owner;
@@ -149,12 +168,10 @@ pub fn closeRead(pipe_id: u16, pid: u16) PipeResult {
 }
 
 // ============================================================================
-// Write to Pipe
+// Write to Pipe — F4.2: auto-encrypt if encrypted pipe
 // ============================================================================
 
-/// Write data to pipe (only writer_pid or kernel allowed)
 pub fn write(pipe_id: u16, pid: u16, data: []const u8) struct { result: PipeResult, written: usize } {
-    // CAP_IPC check
     if (pid != 0) {
         if (!capability.check(pid, capability.CAP_IPC)) {
             stats.cap_violations += 1;
@@ -165,16 +182,27 @@ pub fn write(pipe_id: u16, pid: u16, data: []const u8) struct { result: PipeResu
 
     const p = findPipe(pipe_id) orelse return .{ .result = .not_found, .written = 0 };
 
-    // Check ownership
     if (p.writer_pid != pid and pid != 0) return .{ .result = .not_owner, .written = 0 };
-
-    // Check closed
     if (p.closed_write) return .{ .result = .pipe_closed, .written = 0 };
     if (p.closed_read) return .{ .result = .pipe_closed, .written = 0 };
 
-    // Write as much as fits
+    // F4.2: For encrypted pipes, we XOR with IPC domain key as stream cipher
+    // (Full CBC would require block alignment which doesn't fit pipe model)
+    var write_data: [PIPE_BUF_SIZE]u8 = undefined;
+    var actual_data: []const u8 = data;
+
+    if (p.encrypted and sys_encrypt.isInitialized() and sys_encrypt.isMasterKeySet()) {
+        if (sys_encrypt.getDomainKey(.ipc)) |ipc_key| {
+            const wlen = @min(data.len, PIPE_BUF_SIZE);
+            for (0..wlen) |i| {
+                write_data[i] = data[i] ^ ipc_key[i % sys_encrypt.KEY_SIZE];
+            }
+            actual_data = write_data[0..wlen];
+        }
+    }
+
     var written: usize = 0;
-    for (data) |byte| {
+    for (actual_data) |byte| {
         if (p.count >= PIPE_BUF_SIZE) break;
 
         p.buf[p.tail] = byte;
@@ -190,12 +218,10 @@ pub fn write(pipe_id: u16, pid: u16, data: []const u8) struct { result: PipeResu
 }
 
 // ============================================================================
-// Read from Pipe
+// Read from Pipe — F4.2: auto-decrypt if encrypted pipe
 // ============================================================================
 
-/// Read data from pipe (only reader_pid or kernel allowed)
 pub fn read(pipe_id: u16, pid: u16, buf: []u8) struct { result: PipeResult, bytes_read: usize } {
-    // CAP_IPC check
     if (pid != 0) {
         if (!capability.check(pid, capability.CAP_IPC)) {
             stats.cap_violations += 1;
@@ -206,16 +232,13 @@ pub fn read(pipe_id: u16, pid: u16, buf: []u8) struct { result: PipeResult, byte
 
     const p = findPipe(pipe_id) orelse return .{ .result = .not_found, .bytes_read = 0 };
 
-    // Check ownership
     if (p.reader_pid != pid and pid != 0) return .{ .result = .not_owner, .bytes_read = 0 };
 
-    // Empty
     if (p.count == 0) {
         if (p.closed_write) return .{ .result = .pipe_closed, .bytes_read = 0 };
         return .{ .result = .pipe_empty, .bytes_read = 0 };
     }
 
-    // Read as much as available
     var read_count: usize = 0;
     while (read_count < buf.len and p.count > 0) {
         buf[read_count] = p.buf[p.head];
@@ -224,20 +247,28 @@ pub fn read(pipe_id: u16, pid: u16, buf: []u8) struct { result: PipeResult, byte
         read_count += 1;
     }
 
+    // F4.2: Decrypt if encrypted pipe
+    if (p.encrypted and sys_encrypt.isInitialized() and sys_encrypt.isMasterKeySet()) {
+        if (sys_encrypt.getDomainKey(.ipc)) |ipc_key| {
+            for (0..read_count) |i| {
+                buf[i] = buf[i] ^ ipc_key[i % sys_encrypt.KEY_SIZE];
+            }
+        }
+    }
+
     p.bytes_read += read_count;
     stats.total_bytes_read += read_count;
 
     return .{ .result = .ok, .bytes_read = read_count };
 }
 
-/// Get available bytes in pipe
 pub fn available(pipe_id: u16) u16 {
     const p = findPipe(pipe_id) orelse return 0;
     return p.count;
 }
 
 // ============================================================================
-// Close all pipes for a PID (on process exit)
+// Close all pipes for a PID
 // ============================================================================
 
 pub fn closeAllForPid(pid: u16) void {
@@ -285,6 +316,7 @@ pub fn getPipeInfo(pipe_id: u16) ?struct {
     buffered: u16,
     bytes_written: u64,
     bytes_read: u64,
+    encrypted: bool,
 } {
     const p = findPipe(pipe_id) orelse return null;
     return .{
@@ -293,6 +325,7 @@ pub fn getPipeInfo(pipe_id: u16) ?struct {
         .buffered = p.count,
         .bytes_written = p.bytes_written,
         .bytes_read = p.bytes_read,
+        .encrypted = p.encrypted,
     };
 }
 
@@ -332,6 +365,8 @@ pub fn printStatus() void {
     printNum64(stats.total_bytes_read);
     serial.writeString("\n  CAP viols:    ");
     printNum64(stats.cap_violations);
+    serial.writeString("\n  Encrypted:    ");
+    printNum64(stats.encrypted_pipes);
     serial.writeString("\n");
 }
 

@@ -1,4 +1,5 @@
 //! Zamrud OS - F1+F2: IPC Main Module
+//! F4.2: System encryption initialization hook
 //! Unified IPC subsystem entry point
 
 const serial = @import("../drivers/serial/serial.zig");
@@ -42,4 +43,10 @@ pub fn printStatus() void {
     signal.printStatus();
     shared_mem.printStatus();
     serial.writeString("================================\n\n");
+}
+
+/// F4.2: Check if encrypted IPC is available
+pub fn isEncryptedIpcAvailable() bool {
+    const sys_encrypt = @import("../crypto/sys_encrypt.zig");
+    return sys_encrypt.isIpcKeySet();
 }

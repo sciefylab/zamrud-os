@@ -1,31 +1,27 @@
 //! Zamrud OS - Identity Persistence
-//! Save/Load identity keypairs to /disk/IDENTITY.DAT
+//! F4.2: AES-256 encrypted before disk write
+//! Double encryption: private keys are PIN-encrypted + disk-level encrypted
 //!
-//! Format:
-//!   Header: magic(4) + version(4) + identity_count(4) + checksum(4) = 16
-//!   Per identity: active(1) + has_name(1) + name_len(1) + name(32) +
-//!                 address_len(1) + address(50) + pubkey(32) +
-//!                 encrypted_privkey(48) + salt(16) = 182 bytes
-//!
-//! Private keys remain encrypted with user's PIN - we only persist
-//! the encrypted form. User must unlock after boot.
+//! On disk: [SYS_MAGIC(4)][IV(16)][encrypted identity data]
 
 const serial = @import("../drivers/serial/serial.zig");
 const fat32 = @import("../fs/fat32.zig");
 const keyring = @import("../identity/keyring.zig");
+const sys_encrypt = @import("../crypto/sys_encrypt.zig");
 
 // =============================================================================
 // Constants
 // =============================================================================
 
 const IDENTITY_MAGIC = [4]u8{ 'Z', 'I', 'D', 'T' };
-const IDENTITY_VERSION: u32 = 1;
+const IDENTITY_VERSION: u32 = 2; // Bumped for encrypted format
 const IDENTITY_FILENAME = "IDENTITY.DAT";
 
-const ENTRY_SIZE: usize = 182; // per identity
+const ENTRY_SIZE: usize = 182;
 const HEADER_SIZE: usize = 16;
-const MAX_IDENTITIES: usize = keyring.MAX_IDENTITIES; // 8
-const MAX_FILE_SIZE: usize = HEADER_SIZE + (ENTRY_SIZE * MAX_IDENTITIES); // 1472 bytes
+const MAX_IDENTITIES: usize = keyring.MAX_IDENTITIES;
+const MAX_PLAINTEXT_SIZE: usize = HEADER_SIZE + (ENTRY_SIZE * MAX_IDENTITIES);
+const MAX_FILE_SIZE: usize = MAX_PLAINTEXT_SIZE + sys_encrypt.HEADER_SIZE + sys_encrypt.BLOCK_SIZE + 64;
 
 // =============================================================================
 // State
@@ -34,6 +30,7 @@ const MAX_FILE_SIZE: usize = HEADER_SIZE + (ENTRY_SIZE * MAX_IDENTITIES); // 147
 var initialized: bool = false;
 var loaded_from_disk: bool = false;
 var last_save_count: usize = 0;
+var encryption_active: bool = false; // F4.2
 
 // =============================================================================
 // Initialization
@@ -43,11 +40,12 @@ pub fn init() void {
     initialized = true;
     loaded_from_disk = false;
     last_save_count = 0;
+    encryption_active = false;
     serial.writeString("[IDENTITY_STORE] Initialized\n");
 }
 
 // =============================================================================
-// Save to Disk
+// F4.2: Encrypted Save to Disk
 // =============================================================================
 
 pub fn saveToDisk() bool {
@@ -64,27 +62,55 @@ pub fn saveToDisk() bool {
     const count = keyring.getIdentityCount();
     if (count == 0) {
         serial.writeString("[IDENTITY_STORE] No identities to save\n");
-        return true; // Not an error
+        return true;
     }
 
-    var buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
-    const size = serialize(&buf);
+    // Step 1: Serialize to plaintext
+    var plain_buf: [MAX_PLAINTEXT_SIZE]u8 = [_]u8{0} ** MAX_PLAINTEXT_SIZE;
+    const plain_size = serialize(&plain_buf);
 
-    if (size == 0) {
+    if (plain_size == 0) {
         serial.writeString("[IDENTITY_STORE] Serialize failed\n");
         return false;
     }
 
-    // Delete old file
+    // Step 2: Encrypt if available
+    var write_data: []const u8 = undefined;
+
+    if (sys_encrypt.isInitialized() and sys_encrypt.isMasterKeySet()) {
+        if (sys_encrypt.encryptIdentity(plain_buf[0..plain_size])) |encrypted| {
+            write_data = encrypted;
+            encryption_active = true;
+            serial.writeString("[IDENTITY_STORE] Encrypting identity data (double-encrypted privkeys)...\n");
+        } else {
+            serial.writeString("[IDENTITY_STORE] WARNING: encryption failed, saving with PIN protection only!\n");
+            write_data = plain_buf[0..plain_size];
+            encryption_active = false;
+        }
+    } else {
+        write_data = plain_buf[0..plain_size];
+        encryption_active = false;
+    }
+
+    // Step 3: Write to disk
     if (fat32.findInRoot(IDENTITY_FILENAME) != null) {
         _ = fat32.deleteFile(IDENTITY_FILENAME);
     }
 
-    if (fat32.createFile(IDENTITY_FILENAME, buf[0..size])) {
+    var file_buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
+    const write_len = @min(write_data.len, MAX_FILE_SIZE);
+    var wi: usize = 0;
+    while (wi < write_len) : (wi += 1) {
+        file_buf[wi] = write_data[wi];
+    }
+
+    if (fat32.createFile(IDENTITY_FILENAME, file_buf[0..write_len])) {
         last_save_count = count;
         serial.writeString("[IDENTITY_STORE] Saved ");
         printU32(@intCast(count));
-        serial.writeString(" identities to disk\n");
+        serial.writeString(" identities (");
+        if (encryption_active) serial.writeString("ENCRYPTED") else serial.writeString("PIN-only");
+        serial.writeString(")\n");
         return true;
     } else {
         serial.writeString("[IDENTITY_STORE] Save FAILED\n");
@@ -97,18 +123,15 @@ fn serialize(buf: []u8) usize {
 
     var pos: usize = 0;
 
-    // Magic
     buf[pos] = IDENTITY_MAGIC[0];
     buf[pos + 1] = IDENTITY_MAGIC[1];
     buf[pos + 2] = IDENTITY_MAGIC[2];
     buf[pos + 3] = IDENTITY_MAGIC[3];
     pos += 4;
 
-    // Version
     writeU32LE(buf, pos, IDENTITY_VERSION);
     pos += 4;
 
-    // Count active identities
     var active_count: u32 = 0;
     var idx: usize = 0;
     while (idx < MAX_IDENTITIES) : (idx += 1) {
@@ -119,62 +142,51 @@ fn serialize(buf: []u8) usize {
     writeU32LE(buf, pos, active_count);
     pos += 4;
 
-    // Checksum placeholder
     const checksum_offset = pos;
     pos += 4;
 
-    // Serialize each identity
     idx = 0;
     while (idx < MAX_IDENTITIES) : (idx += 1) {
         const id = keyring.getSlotPtr(idx) orelse continue;
         if (!id.active) continue;
         if (pos + ENTRY_SIZE > buf.len) break;
 
-        // active (1)
         buf[pos] = 1;
         pos += 1;
 
-        // has_name (1)
         buf[pos] = if (id.has_name) 1 else 0;
         pos += 1;
 
-        // name_len (1)
         buf[pos] = id.name_len;
         pos += 1;
 
-        // name (32)
         var j: usize = 0;
         while (j < keyring.NAME_MAX_LEN) : (j += 1) {
             buf[pos + j] = id.name[j];
         }
         pos += keyring.NAME_MAX_LEN;
 
-        // address_len (1)
         buf[pos] = id.address_len;
         pos += 1;
 
-        // address (50)
         j = 0;
         while (j < keyring.ADDRESS_LEN) : (j += 1) {
             buf[pos + j] = id.address[j];
         }
         pos += keyring.ADDRESS_LEN;
 
-        // public_key (32)
         j = 0;
         while (j < 32) : (j += 1) {
             buf[pos + j] = id.keypair.public_key[j];
         }
         pos += 32;
 
-        // encrypted_private_key (48)
         j = 0;
         while (j < 48) : (j += 1) {
             buf[pos + j] = id.keypair.private_key_encrypted[j];
         }
         pos += 48;
 
-        // salt (16)
         j = 0;
         while (j < 16) : (j += 1) {
             buf[pos + j] = id.keypair.salt[j];
@@ -182,7 +194,6 @@ fn serialize(buf: []u8) usize {
         pos += 16;
     }
 
-    // Calculate checksum
     var checksum: u32 = 0;
     var ci: usize = HEADER_SIZE;
     while (ci < pos) : (ci += 1) {
@@ -194,7 +205,7 @@ fn serialize(buf: []u8) usize {
 }
 
 // =============================================================================
-// Load from Disk
+// F4.2: Encrypted Load from Disk
 // =============================================================================
 
 pub fn loadFromDisk() bool {
@@ -218,53 +229,67 @@ pub fn loadFromDisk() bool {
         return false;
     }
 
-    var buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
+    var raw_buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
     const read_size = @min(@as(usize, file_info.size), MAX_FILE_SIZE);
-    const bytes = fat32.readFile(file_info.cluster, buf[0..read_size]);
+    const bytes = fat32.readFile(file_info.cluster, raw_buf[0..read_size]);
 
-    if (bytes < HEADER_SIZE) {
+    if (bytes < 4) {
         serial.writeString("[IDENTITY_STORE] Identity file read error\n");
         return false;
     }
 
-    return deserialize(buf[0..bytes]);
+    // Check if encrypted
+    if (sys_encrypt.isEncrypted(raw_buf[0..bytes])) {
+        serial.writeString("[IDENTITY_STORE] Detected encrypted identity data\n");
+
+        if (!sys_encrypt.isInitialized() or !sys_encrypt.isMasterKeySet()) {
+            serial.writeString("[IDENTITY_STORE] Cannot decrypt - no system key\n");
+            return false;
+        }
+
+        if (sys_encrypt.decryptIdentity(raw_buf[0..bytes])) |decrypted| {
+            var parse_buf: [MAX_PLAINTEXT_SIZE]u8 = [_]u8{0} ** MAX_PLAINTEXT_SIZE;
+            const dec_len = @min(decrypted.len, MAX_PLAINTEXT_SIZE);
+            var di: usize = 0;
+            while (di < dec_len) : (di += 1) {
+                parse_buf[di] = decrypted[di];
+            }
+            encryption_active = true;
+            return deserialize(parse_buf[0..dec_len]);
+        } else {
+            serial.writeString("[IDENTITY_STORE] Identity decryption FAILED\n");
+            return false;
+        }
+    } else {
+        serial.writeString("[IDENTITY_STORE] Loading legacy plaintext identities\n");
+        encryption_active = false;
+        return deserialize(raw_buf[0..bytes]);
+    }
 }
 
 fn deserialize(buf: []const u8) bool {
     if (buf.len < HEADER_SIZE) return false;
 
-    var pos: usize = 0;
-
-    // Verify magic
-    if (buf[0] != IDENTITY_MAGIC[0] or
-        buf[1] != IDENTITY_MAGIC[1] or
-        buf[2] != IDENTITY_MAGIC[2] or
-        buf[3] != IDENTITY_MAGIC[3])
+    if (buf[0] != IDENTITY_MAGIC[0] or buf[1] != IDENTITY_MAGIC[1] or
+        buf[2] != IDENTITY_MAGIC[2] or buf[3] != IDENTITY_MAGIC[3])
     {
         serial.writeString("[IDENTITY_STORE] Invalid identity file magic\n");
         return false;
     }
-    pos += 4;
 
-    // Verify version
-    const version = readU32LE(buf, pos);
-    if (version != IDENTITY_VERSION) {
+    const version = readU32LE(buf, 4);
+    if (version != 1 and version != IDENTITY_VERSION) {
         serial.writeString("[IDENTITY_STORE] Unsupported identity version\n");
         return false;
     }
-    pos += 4;
 
-    // Read count
-    const saved_count = readU32LE(buf, pos);
+    const saved_count = readU32LE(buf, 8);
     if (saved_count > MAX_IDENTITIES) {
         serial.writeString("[IDENTITY_STORE] Too many identities\n");
         return false;
     }
-    pos += 4;
 
-    // Verify checksum
-    const saved_checksum = readU32LE(buf, pos);
-    pos += 4;
+    const saved_checksum = readU32LE(buf, 12);
 
     var calc_checksum: u32 = 0;
     var ci: usize = HEADER_SIZE;
@@ -277,91 +302,75 @@ fn deserialize(buf: []const u8) bool {
         return false;
     }
 
-    // Verify we have enough data
     if (buf.len < HEADER_SIZE + (saved_count * ENTRY_SIZE)) {
         serial.writeString("[IDENTITY_STORE] Identity file truncated\n");
         return false;
     }
 
-    // Re-init keyring to clear existing
     keyring.init();
 
-    // Load each identity directly into keyring slots
+    var pos: usize = HEADER_SIZE;
     var loaded: usize = 0;
     var slot: usize = 0;
     while (loaded < saved_count and pos + ENTRY_SIZE <= buf.len) : (loaded += 1) {
-        // Get raw slot pointer (bypasses count check)
         const id = keyring.getSlotPtr(slot) orelse break;
         slot += 1;
 
-        // active (1)
         const is_active = buf[pos] == 1;
         pos += 1;
 
         if (!is_active) {
-            pos += ENTRY_SIZE - 1; // Skip rest
+            pos += ENTRY_SIZE - 1;
             continue;
         }
 
-        // has_name (1)
         id.has_name = buf[pos] == 1;
         pos += 1;
 
-        // name_len (1)
         id.name_len = buf[pos];
         pos += 1;
 
-        // name (32)
         var j: usize = 0;
         while (j < keyring.NAME_MAX_LEN) : (j += 1) {
             id.name[j] = buf[pos + j];
         }
         pos += keyring.NAME_MAX_LEN;
 
-        // address_len (1)
         id.address_len = buf[pos];
         pos += 1;
 
-        // address (50)
         j = 0;
         while (j < keyring.ADDRESS_LEN) : (j += 1) {
             id.address[j] = buf[pos + j];
         }
         pos += keyring.ADDRESS_LEN;
 
-        // public_key (32)
         j = 0;
         while (j < 32) : (j += 1) {
             id.keypair.public_key[j] = buf[pos + j];
         }
         pos += 32;
 
-        // encrypted_private_key (48)
         j = 0;
         while (j < 48) : (j += 1) {
             id.keypair.private_key_encrypted[j] = buf[pos + j];
         }
         pos += 48;
 
-        // salt (16)
         j = 0;
         while (j < 16) : (j += 1) {
             id.keypair.salt[j] = buf[pos + j];
         }
         pos += 16;
 
-        // Mark as active and valid
         id.active = true;
         id.keypair.valid = true;
-        id.unlocked = false; // Must unlock with PIN after load
+        id.unlocked = false;
         id.created_at = 1700000000;
         id.last_used = 1700000000;
     }
 
-    // Update keyring's internal count to match loaded identities
     keyring.setIdentityCount(slot);
-
-    // Set first active identity as current
     keyring.ensureCurrentIdentity();
 
     loaded_from_disk = true;
@@ -388,6 +397,10 @@ pub fn wasLoadedFromDisk() bool {
 
 pub fn getLastSaveCount() usize {
     return last_save_count;
+}
+
+pub fn isEncryptionActive() bool {
+    return encryption_active;
 }
 
 pub fn hasSavedIdentities() bool {
@@ -432,7 +445,7 @@ fn printU32(val: u32) void {
 }
 
 // =============================================================================
-// Test
+// Tests
 // =============================================================================
 
 pub fn test_identity_store() bool {
@@ -452,13 +465,13 @@ pub fn test_identity_store() bool {
         failed += 1;
     }
 
-    // Test 2: Create identity and serialize
+    // Test 2: Serialize
     serial.writeString("  Test 2: Serialize identity\n");
     keyring.init();
     _ = keyring.createIdentity("persist_test", "1234");
 
     if (keyring.getIdentityCount() == 1) {
-        var test_buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
+        var test_buf: [MAX_PLAINTEXT_SIZE]u8 = [_]u8{0} ** MAX_PLAINTEXT_SIZE;
         const size = serialize(&test_buf);
         if (size > HEADER_SIZE) {
             serial.writeString("    OK (");
@@ -505,7 +518,6 @@ pub fn test_identity_store() bool {
         } else {
             serial.writeString("    FAIL (serialize)\n");
             failed += 1;
-            // Skip tests 3 & 4
             serial.writeString("  Test 3: SKIP\n");
             serial.writeString("  Test 4: SKIP\n");
             failed += 2;
@@ -518,19 +530,18 @@ pub fn test_identity_store() bool {
         failed += 2;
     }
 
-    // Test 5: Disk persistence (if available)
+    // Test 5: Disk persistence
     serial.writeString("  Test 5: Disk save/load\n");
     if (fat32.isMounted()) {
         keyring.init();
         _ = keyring.createIdentity("disk_test", "5678");
 
         if (saveToDisk()) {
-            keyring.init(); // Clear
+            keyring.init();
             if (loadFromDisk()) {
                 if (keyring.findIdentity("disk_test") != null) {
                     serial.writeString("    OK\n");
                     passed += 1;
-                    // Cleanup
                     _ = fat32.deleteFile(IDENTITY_FILENAME);
                 } else {
                     serial.writeString("    FAIL (not found after load)\n");
@@ -546,7 +557,7 @@ pub fn test_identity_store() bool {
         }
     } else {
         serial.writeString("    SKIP (no disk)\n");
-        passed += 1; // Not a failure
+        passed += 1;
     }
 
     serial.writeString("  IDENTITY_STORE: ");

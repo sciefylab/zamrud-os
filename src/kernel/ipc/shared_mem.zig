@@ -1,12 +1,14 @@
 //! Zamrud OS - F2: Shared Memory
+//! F4.2: Optional encrypted shared memory regions
 //! Zero-copy data sharing between processes
 //! CAP_MEMORY enforced, owner-based access control
-//! Violations reported to unified pipeline
 
 const serial = @import("../drivers/serial/serial.zig");
 const timer = @import("../drivers/timer/timer.zig");
 const capability = @import("../security/capability.zig");
 const violation = @import("../security/violation.zig");
+const sys_encrypt = @import("../crypto/sys_encrypt.zig");
+const aes = @import("../crypto/aes.zig");
 
 // ============================================================================
 // Constants
@@ -52,6 +54,7 @@ pub const SharedRegion = struct {
     total_reads: u64 = 0,
     total_writes: u64 = 0,
     locked: bool = false,
+    encrypted: bool = false, // F4.2
 
     pub fn getName(self: *const SharedRegion) []const u8 {
         return self.name[0..self.name_len];
@@ -93,6 +96,26 @@ pub const ShmStats = struct {
     bytes_read: u64 = 0,
     bytes_written: u64 = 0,
     cap_violations: u64 = 0,
+    encrypted_regions: u64 = 0, // F4.2
+};
+
+// ============================================================================
+// Return Types (named to avoid Zig anonymous struct mismatch)
+// ============================================================================
+
+pub const CreateResult = struct {
+    result: ShmResult,
+    id: u16,
+};
+
+pub const WriteResult = struct {
+    result: ShmResult,
+    written: usize,
+};
+
+pub const ReadResult = struct {
+    result: ShmResult,
+    bytes_read: usize,
 };
 
 // ============================================================================
@@ -111,7 +134,6 @@ var initialized: bool = false;
 pub fn init() void {
     for (&regions) |*r| {
         r.* = SharedRegion{};
-        // Zero data buffer
         for (&r.data) |*b| {
             b.* = 0;
         }
@@ -132,14 +154,24 @@ pub fn isInitialized() bool {
 }
 
 // ============================================================================
-// Create Region — CAP_MEMORY enforced
+// Create Region
 // ============================================================================
 
-/// Create a named shared memory region
-pub fn create(owner_pid: u16, name: []const u8, size: u32) struct { result: ShmResult, id: u16 } {
+pub fn create(owner_pid: u16, name: []const u8, size: u32) CreateResult {
+    return createInternal(owner_pid, name, size, false);
+}
+
+/// F4.2: Create encrypted shared memory region
+pub fn createEncrypted(owner_pid: u16, name: []const u8, size: u32) CreateResult {
+    if (!sys_encrypt.isInitialized() or !sys_encrypt.isMasterKeySet()) {
+        return createInternal(owner_pid, name, size, false);
+    }
+    return createInternal(owner_pid, name, size, true);
+}
+
+fn createInternal(owner_pid: u16, name: []const u8, size: u32, encrypted: bool) CreateResult {
     if (!initialized) return .{ .result = .not_found, .id = 0 };
 
-    // CAP_MEMORY check (kernel always allowed)
     if (owner_pid != 0) {
         if (!capability.check(owner_pid, capability.CAP_MEMORY)) {
             stats.cap_violations += 1;
@@ -148,22 +180,18 @@ pub fn create(owner_pid: u16, name: []const u8, size: u32) struct { result: ShmR
         }
     }
 
-    // Validate size
     if (size == 0 or size > MAX_REGION_SIZE) {
         return .{ .result = .too_large, .id = 0 };
     }
 
-    // Check name uniqueness
     if (findByName(name) != null) {
         return .{ .result = .already_exists, .id = 0 };
     }
 
-    // Check per-process limit
     if (owner_pid != 0 and countRegionsForPid(owner_pid) >= MAX_REGIONS_PER_PROCESS) {
         return .{ .result = .process_limit, .id = 0 };
     }
 
-    // Find free slot
     for (&regions) |*r| {
         if (!r.active) {
             const id = next_region_id;
@@ -177,13 +205,12 @@ pub fn create(owner_pid: u16, name: []const u8, size: u32) struct { result: ShmR
             r.size = size;
             r.used = 0;
             r.created_tick = timer.getTicks();
+            r.encrypted = encrypted;
 
-            // Zero the data area
             for (0..size) |i| {
                 r.data[i] = 0;
             }
 
-            // Auto-attach owner as read_write
             r.attachments[0] = .{
                 .pid = owner_pid,
                 .perm = .read_write,
@@ -195,6 +222,7 @@ pub fn create(owner_pid: u16, name: []const u8, size: u32) struct { result: ShmR
             r.attachment_count = 1;
 
             stats.total_created += 1;
+            if (encrypted) stats.encrypted_regions += 1;
 
             serial.writeString("[IPC-SHM] Created '");
             serialPrintStr(name);
@@ -202,8 +230,9 @@ pub fn create(owner_pid: u16, name: []const u8, size: u32) struct { result: ShmR
             printNum(id);
             serial.writeString(" size=");
             printNum(size);
-            serial.writeString(" owner=");
-            printNum(owner_pid);
+            if (encrypted) {
+                serial.writeString(" [ENCRYPTED]");
+            }
             serial.writeString("\n");
 
             return .{ .result = .ok, .id = id };
@@ -214,22 +243,26 @@ pub fn create(owner_pid: u16, name: []const u8, size: u32) struct { result: ShmR
 }
 
 // ============================================================================
-// Destroy Region — only owner or kernel
+// Destroy Region
 // ============================================================================
 
 pub fn destroy(pid: u16, region_id: u16) ShmResult {
     const r = findById(region_id) orelse return .not_found;
 
-    // Only owner or kernel can destroy
     if (pid != 0 and r.owner_pid != pid) {
         return .not_owner;
     }
 
+    // F4.2: Secure wipe encrypted regions
+    if (r.encrypted) {
+        for (0..r.size) |i| {
+            r.data[i] = 0;
+        }
+    }
+
     serial.writeString("[IPC-SHM] Destroyed '");
     serialPrintStr(r.getName());
-    serial.writeString("' id=");
-    printNum(region_id);
-    serial.writeString("\n");
+    serial.writeString("'\n");
 
     r.active = false;
     r.attachment_count = 0;
@@ -239,12 +272,10 @@ pub fn destroy(pid: u16, region_id: u16) ShmResult {
 }
 
 // ============================================================================
-// Attach / Detach — CAP_MEMORY enforced
+// Attach / Detach
 // ============================================================================
 
-/// Attach a process to a shared region
 pub fn attach(pid: u16, region_id: u16, perm: ShmPerm) ShmResult {
-    // CAP_MEMORY check
     if (pid != 0) {
         if (!capability.check(pid, capability.CAP_MEMORY)) {
             stats.cap_violations += 1;
@@ -255,24 +286,20 @@ pub fn attach(pid: u16, region_id: u16, perm: ShmPerm) ShmResult {
 
     const r = findById(region_id) orelse return .not_found;
 
-    // Check if already attached
     for (&r.attachments) |*a| {
         if (a.active and a.pid == pid) {
             return .already_attached;
         }
     }
 
-    // Check attachment limit
     if (r.attachment_count >= MAX_ATTACHMENTS_PER_REGION) {
         return .attach_full;
     }
 
-    // Check per-process region limit
     if (pid != 0 and countAttachmentsForPid(pid) >= MAX_REGIONS_PER_PROCESS) {
         return .process_limit;
     }
 
-    // Find free attachment slot
     for (&r.attachments) |*a| {
         if (!a.active) {
             a.* = .{
@@ -285,15 +312,6 @@ pub fn attach(pid: u16, region_id: u16, perm: ShmPerm) ShmResult {
             };
             r.attachment_count += 1;
             stats.total_attached += 1;
-
-            serial.writeString("[IPC-SHM] Attached pid=");
-            printNum(pid);
-            serial.writeString(" to '");
-            serialPrintStr(r.getName());
-            serial.writeString("' perm=");
-            serial.writeString(permName(perm));
-            serial.writeString("\n");
-
             return .ok;
         }
     }
@@ -301,7 +319,6 @@ pub fn attach(pid: u16, region_id: u16, perm: ShmPerm) ShmResult {
     return .attach_full;
 }
 
-/// Detach a process from a shared region
 pub fn detach(pid: u16, region_id: u16) ShmResult {
     const r = findById(region_id) orelse return .not_found;
 
@@ -311,11 +328,13 @@ pub fn detach(pid: u16, region_id: u16) ShmResult {
             if (r.attachment_count > 0) r.attachment_count -= 1;
             stats.total_detached += 1;
 
-            // Auto-destroy if no attachments left and not owned by kernel
             if (r.attachment_count == 0 and r.owner_pid != 0) {
-                serial.writeString("[IPC-SHM] Auto-destroy '");
-                serialPrintStr(r.getName());
-                serial.writeString("' (no attachments)\n");
+                // Secure wipe on auto-destroy
+                if (r.encrypted) {
+                    for (0..r.size) |i| {
+                        r.data[i] = 0;
+                    }
+                }
                 r.active = false;
                 stats.total_destroyed += 1;
             }
@@ -327,7 +346,6 @@ pub fn detach(pid: u16, region_id: u16) ShmResult {
     return .not_attached;
 }
 
-/// Detach all regions for a process (on exit)
 pub fn detachAll(pid: u16) void {
     for (&regions) |*r| {
         if (!r.active) continue;
@@ -340,9 +358,13 @@ pub fn detachAll(pid: u16) void {
             }
         }
 
-        // Auto-destroy if owner exits and no attachments
         if (r.owner_pid == pid) {
             if (r.attachment_count == 0) {
+                if (r.encrypted) {
+                    for (0..r.size) |i| {
+                        r.data[i] = 0;
+                    }
+                }
                 r.active = false;
                 stats.total_destroyed += 1;
             }
@@ -351,14 +373,12 @@ pub fn detachAll(pid: u16) void {
 }
 
 // ============================================================================
-// Read / Write — Permission enforced
+// Read / Write — F4.2: XOR encryption for encrypted regions
 // ============================================================================
 
-/// Write data to shared region at offset
-pub fn writeData(pid: u16, region_id: u16, offset: u32, data: []const u8) struct { result: ShmResult, written: usize } {
+pub fn writeData(pid: u16, region_id: u16, offset: u32, data: []const u8) WriteResult {
     const r = findById(region_id) orelse return .{ .result = .not_found, .written = 0 };
 
-    // Check attachment and permission
     const att = findAttachment(r, pid) orelse {
         reportShmViolation(pid, "write not attached");
         return .{ .result = .not_attached, .written = 0 };
@@ -370,18 +390,28 @@ pub fn writeData(pid: u16, region_id: u16, offset: u32, data: []const u8) struct
     }
 
     if (r.locked) return .{ .result = .region_locked, .written = 0 };
-
-    // Bounds check
     if (offset >= r.size) return .{ .result = .out_of_bounds, .written = 0 };
 
     const max_write = r.size - offset;
     const write_len = @min(data.len, max_write);
 
-    for (0..write_len) |i| {
-        r.data[offset + i] = data[i];
+    // F4.2: XOR encrypt for encrypted regions
+    if (r.encrypted and sys_encrypt.isInitialized() and sys_encrypt.isMasterKeySet()) {
+        if (sys_encrypt.getDomainKey(.ipc)) |ipc_key| {
+            for (0..write_len) |i| {
+                r.data[offset + i] = data[i] ^ ipc_key[(offset + i) % aes.KEY_SIZE];
+            }
+        } else {
+            for (0..write_len) |i| {
+                r.data[offset + i] = data[i];
+            }
+        }
+    } else {
+        for (0..write_len) |i| {
+            r.data[offset + i] = data[i];
+        }
     }
 
-    // Update used watermark
     const end_pos = offset + @as(u32, @intCast(write_len));
     if (end_pos > r.used) r.used = end_pos;
 
@@ -393,11 +423,9 @@ pub fn writeData(pid: u16, region_id: u16, offset: u32, data: []const u8) struct
     return .{ .result = .ok, .written = write_len };
 }
 
-/// Read data from shared region at offset
-pub fn readData(pid: u16, region_id: u16, offset: u32, buf: []u8) struct { result: ShmResult, bytes_read: usize } {
+pub fn readData(pid: u16, region_id: u16, offset: u32, buf: []u8) ReadResult {
     const r = findById(region_id) orelse return .{ .result = .not_found, .bytes_read = 0 };
 
-    // Check attachment
     const att = findAttachment(r, pid) orelse {
         reportShmViolation(pid, "read not attached");
         return .{ .result = .not_attached, .bytes_read = 0 };
@@ -408,14 +436,26 @@ pub fn readData(pid: u16, region_id: u16, offset: u32, buf: []u8) struct { resul
         return .{ .result = .permission_denied, .bytes_read = 0 };
     }
 
-    // Bounds check
     if (offset >= r.size) return .{ .result = .out_of_bounds, .bytes_read = 0 };
 
     const max_read = r.size - offset;
     const read_len = @min(buf.len, max_read);
 
-    for (0..read_len) |i| {
-        buf[i] = r.data[offset + i];
+    // F4.2: XOR decrypt for encrypted regions
+    if (r.encrypted and sys_encrypt.isInitialized() and sys_encrypt.isMasterKeySet()) {
+        if (sys_encrypt.getDomainKey(.ipc)) |ipc_key| {
+            for (0..read_len) |i| {
+                buf[i] = r.data[offset + i] ^ ipc_key[(offset + i) % aes.KEY_SIZE];
+            }
+        } else {
+            for (0..read_len) |i| {
+                buf[i] = r.data[offset + i];
+            }
+        }
+    } else {
+        for (0..read_len) |i| {
+            buf[i] = r.data[offset + i];
+        }
     }
 
     att.bytes_read += read_len;
@@ -427,7 +467,7 @@ pub fn readData(pid: u16, region_id: u16, offset: u32, buf: []u8) struct { resul
 }
 
 // ============================================================================
-// Lock / Unlock (prevent writes during critical section)
+// Lock / Unlock
 // ============================================================================
 
 pub fn lockRegion(pid: u16, region_id: u16) ShmResult {
@@ -445,8 +485,14 @@ pub fn unlockRegion(pid: u16, region_id: u16) ShmResult {
 }
 
 // ============================================================================
-// Lookup Helpers
+// Query
 // ============================================================================
+
+/// F4.2: Check if region is encrypted
+pub fn isRegionEncrypted(region_id: u16) bool {
+    const r = findById(region_id) orelse return false;
+    return r.encrypted;
+}
 
 fn findById(id: u16) ?*SharedRegion {
     for (&regions) |*r| {
@@ -463,9 +509,7 @@ fn findByName(name: []const u8) ?*SharedRegion {
 }
 
 fn findAttachment(r: *SharedRegion, pid: u16) ?*Attachment {
-    // Kernel always has implicit RW access
     if (pid == 0) return &r.attachments[0];
-
     for (&r.attachments) |*a| {
         if (a.active and a.pid == pid) return a;
     }
@@ -491,10 +535,6 @@ fn countAttachmentsForPid(pid: u16) usize {
     return count;
 }
 
-// ============================================================================
-// Query API
-// ============================================================================
-
 pub fn getStats() ShmStats {
     return stats;
 }
@@ -518,6 +558,7 @@ pub fn getRegionById(id: u16) ?struct {
     used: u32,
     attachments: u8,
     locked: bool,
+    encrypted: bool,
 } {
     const r = findById(id) orelse return null;
     return .{
@@ -527,22 +568,20 @@ pub fn getRegionById(id: u16) ?struct {
         .used = r.used,
         .attachments = r.attachment_count,
         .locked = r.locked,
+        .encrypted = r.encrypted,
     };
 }
 
-/// Find region by name and return ID
 pub fn findRegionByName(name: []const u8) ?u16 {
     const r = findByName(name) orelse return null;
     return r.id;
 }
 
-/// Check if pid is attached to region
 pub fn isAttached(pid: u16, region_id: u16) bool {
     const r = findById(region_id) orelse return false;
     return findAttachment(r, pid) != null;
 }
 
-/// Get attachment permission
 pub fn getAttachmentPerm(pid: u16, region_id: u16) ShmPerm {
     const r = findById(region_id) orelse return .none;
     const att = findAttachment(r, pid) orelse return .none;
@@ -555,7 +594,6 @@ pub fn getAttachmentPerm(pid: u16, region_id: u16) ShmPerm {
 
 fn reportShmViolation(pid: u16, reason: []const u8) void {
     if (!violation.isInitialized()) return;
-
     _ = violation.reportViolation(.{
         .violation_type = .memory_violation,
         .severity = .medium,
@@ -579,10 +617,8 @@ pub fn printStatus() void {
     printNum64(stats.total_created);
     serial.writeString("\n  Destroyed:      ");
     printNum64(stats.total_destroyed);
-    serial.writeString("\n  Attached:       ");
-    printNum64(stats.total_attached);
-    serial.writeString("\n  Detached:       ");
-    printNum64(stats.total_detached);
+    serial.writeString("\n  Encrypted:      ");
+    printNum64(stats.encrypted_regions);
     serial.writeString("\n  Reads:          ");
     printNum64(stats.total_reads);
     serial.writeString("\n  Writes:         ");
@@ -595,20 +631,18 @@ pub fn printStatus() void {
     printNum64(stats.cap_violations);
     serial.writeString("\n");
 
-    // List active regions
     var found = false;
     for (&regions) |*r| {
         if (!r.active) continue;
         if (!found) {
-            serial.writeString("\n  ID   NAME                 OWNER  SIZE     USED     ATT  LOCK\n");
-            serial.writeString("  ---  -------------------  -----  -------  -------  ---  ----\n");
+            serial.writeString("\n  ID   NAME                 OWNER  SIZE     USED     ATT  LOCK ENC\n");
+            serial.writeString("  ---  -------------------  -----  -------  -------  ---  ---- ---\n");
             found = true;
         }
         serial.writeString("  ");
         printPadded(r.id, 3);
         serial.writeString("  ");
         serialPrintStr(r.getName());
-        // Pad name
         var pad: usize = 0;
         if (r.name_len < 19) pad = 19 - r.name_len;
         for (0..pad) |_| serial.writeChar(' ');
@@ -622,6 +656,8 @@ pub fn printStatus() void {
         printPadded(r.attachment_count, 3);
         serial.writeString("  ");
         serial.writeString(if (r.locked) "YES" else " NO");
+        serial.writeString("  ");
+        serial.writeString(if (r.encrypted) "YES" else " NO");
         serial.writeString("\n");
     }
 

@@ -1,26 +1,24 @@
 //! Zamrud OS - Runtime Config Store with Disk Persistence
-//! Saves/loads runtime configuration to /disk/CONFIG.DAT
+//! F4.2: AES-256 encrypted before disk write
 //!
-//! Format: Binary key-value store
+//! Format on disk: [SYS_MAGIC(4)][IV(16)][encrypted config data]
+//! Plaintext format (before encryption):
 //!   Header: magic(4) + version(4) + entry_count(4) + checksum(4) = 16 bytes
 //!   Entry:  key_len(1) + key(32) + val_len(1) + value(64) = 98 bytes each
-//!
-//! Config is separate from compile-time config.zig:
-//!   config.zig    = build-time constants (profile, limits)
-//!   config_store  = runtime settings (hostname, user prefs)
 
 const serial = @import("../drivers/serial/serial.zig");
 const fat32 = @import("../fs/fat32.zig");
 const hash = @import("../crypto/hash.zig");
 const chain_mod = @import("../chain/chain.zig");
 const entry_mod = @import("../chain/entry.zig");
+const sys_encrypt = @import("../crypto/sys_encrypt.zig");
 
 // =============================================================================
 // Constants
 // =============================================================================
 
 const CONFIG_MAGIC = [4]u8{ 'Z', 'C', 'F', 'G' };
-const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 2; // Bumped for encrypted format
 const CONFIG_FILENAME = "CONFIG.DAT";
 
 const MAX_KEY_LEN: usize = 32;
@@ -29,7 +27,9 @@ const MAX_ENTRIES: usize = 32;
 
 const ENTRY_SIZE: usize = 1 + MAX_KEY_LEN + 1 + MAX_VAL_LEN; // 98 bytes
 const HEADER_SIZE: usize = 16;
-const MAX_FILE_SIZE: usize = HEADER_SIZE + (ENTRY_SIZE * MAX_ENTRIES); // 3152 bytes
+const MAX_PLAINTEXT_SIZE: usize = HEADER_SIZE + (ENTRY_SIZE * MAX_ENTRIES); // 3152 bytes
+// Encrypted output can be larger (IV + padding)
+const MAX_FILE_SIZE: usize = MAX_PLAINTEXT_SIZE + sys_encrypt.HEADER_SIZE + sys_encrypt.BLOCK_SIZE + 64;
 
 // =============================================================================
 // Config Entry
@@ -93,9 +93,10 @@ const ConfigEntry = struct {
 var entries: [MAX_ENTRIES]ConfigEntry = undefined;
 var entry_count: usize = 0;
 var initialized: bool = false;
-var dirty: bool = false; // Has unsaved changes
+var dirty: bool = false;
 var loaded_from_disk: bool = false;
 var auto_save: bool = true;
+var encryption_active: bool = false; // F4.2: tracks if saves are encrypted
 
 // =============================================================================
 // Initialization
@@ -111,8 +112,8 @@ pub fn init() void {
     entry_count = 0;
     dirty = false;
     loaded_from_disk = false;
+    encryption_active = false;
 
-    // Set defaults
     setDefaults();
 
     initialized = true;
@@ -120,35 +121,26 @@ pub fn init() void {
 }
 
 fn setDefaults() void {
-    // System defaults
     setInternal("system.hostname", "zamrud-node");
     setInternal("system.version", "0.1.0");
     setInternal("system.profile", "development");
-
-    // Network defaults
     setInternal("network.p2p_port", "9333");
     setInternal("network.max_peers", "256");
     setInternal("network.discovery", "on");
-
-    // Security defaults
     setInternal("security.firewall", "enforcing");
     setInternal("security.stealth", "off");
     setInternal("security.auto_blacklist", "off");
-
-    // Identity defaults
     setInternal("identity.auto_lock", "300");
     setInternal("identity.privacy", "pseudonymous");
-
-    // Chain defaults
     setInternal("chain.auto_save", "on");
     setInternal("chain.max_blocks", "10000");
+    // F4.2: encryption mode
+    setInternal("security.disk_encrypt", "on");
 
-    dirty = false; // Defaults don't count as dirty
+    dirty = false;
 }
 
-/// Internal set that doesn't mark dirty or trigger blockchain
 fn setInternal(key: []const u8, value: []const u8) void {
-    // Find existing
     var i: usize = 0;
     while (i < MAX_ENTRIES) : (i += 1) {
         if (entries[i].active and entries[i].keyEquals(key)) {
@@ -156,8 +148,6 @@ fn setInternal(key: []const u8, value: []const u8) void {
             return;
         }
     }
-
-    // Find free slot
     i = 0;
     while (i < MAX_ENTRIES) : (i += 1) {
         if (!entries[i].active) {
@@ -174,10 +164,8 @@ fn setInternal(key: []const u8, value: []const u8) void {
 // Public API
 // =============================================================================
 
-/// Get config value by key
 pub fn get(key: []const u8) ?[]const u8 {
     if (!initialized) return null;
-
     var i: usize = 0;
     while (i < MAX_ENTRIES) : (i += 1) {
         if (entries[i].active and entries[i].keyEquals(key)) {
@@ -187,19 +175,16 @@ pub fn get(key: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Set config value (marks dirty, optional blockchain record)
 pub fn set(key: []const u8, value: []const u8) bool {
     if (!initialized) return false;
     if (key.len == 0 or key.len > MAX_KEY_LEN) return false;
     if (value.len > MAX_VAL_LEN) return false;
 
-    // Check if value actually changed
     const old_value = get(key);
     if (old_value) |old| {
-        if (strEqual(old, value)) return true; // No change
+        if (strEqual(old, value)) return true;
     }
 
-    // Find existing or free slot
     var target: ?usize = null;
     var free_slot: ?usize = null;
 
@@ -216,7 +201,7 @@ pub fn set(key: []const u8, value: []const u8) bool {
 
     if (target == null) {
         target = free_slot;
-        if (target == null) return false; // No space
+        if (target == null) return false;
         entry_count += 1;
     }
 
@@ -226,10 +211,8 @@ pub fn set(key: []const u8, value: []const u8) bool {
     entries[idx].active = true;
     dirty = true;
 
-    // Record config change in blockchain
     recordConfigChange(key, value);
 
-    // Auto-save
     if (auto_save) {
         _ = saveToDisk();
     }
@@ -237,17 +220,14 @@ pub fn set(key: []const u8, value: []const u8) bool {
     return true;
 }
 
-/// Delete a config entry
 pub fn delete(key: []const u8) bool {
     if (!initialized) return false;
-
     var i: usize = 0;
     while (i < MAX_ENTRIES) : (i += 1) {
         if (entries[i].active and entries[i].keyEquals(key)) {
             entries[i].clear();
             if (entry_count > 0) entry_count -= 1;
             dirty = true;
-
             if (auto_save) {
                 _ = saveToDisk();
             }
@@ -257,30 +237,28 @@ pub fn delete(key: []const u8) bool {
     return false;
 }
 
-/// Get entry count
 pub fn getEntryCount() usize {
     return entry_count;
 }
 
-/// Check if initialized
 pub fn isInitialized() bool {
     return initialized;
 }
 
-/// Check if has unsaved changes
 pub fn isDirty() bool {
     return dirty;
 }
 
-/// Check if was loaded from disk
 pub fn wasLoadedFromDisk() bool {
     return loaded_from_disk;
 }
 
-/// Iterate over entries (for display)
+pub fn isEncryptionActive() bool {
+    return encryption_active;
+}
+
 pub fn getEntryByIndex(index: usize) ?struct { key: []const u8, value: []const u8 } {
     if (index >= MAX_ENTRIES) return null;
-
     var count: usize = 0;
     var i: usize = 0;
     while (i < MAX_ENTRIES) : (i += 1) {
@@ -304,7 +282,6 @@ pub fn getEntryByIndex(index: usize) ?struct { key: []const u8, value: []const u
 fn recordConfigChange(key: []const u8, value: []const u8) void {
     if (!chain_mod.isInitialized()) return;
 
-    // Hash the key+value as the entry target
     var combined: [MAX_KEY_LEN + MAX_VAL_LEN]u8 = [_]u8{0} ** (MAX_KEY_LEN + MAX_VAL_LEN);
     var pos: usize = 0;
 
@@ -313,7 +290,6 @@ fn recordConfigChange(key: []const u8, value: []const u8) void {
         combined[pos] = key[i];
         pos += 1;
     }
-    // Separator
     if (pos < combined.len) {
         combined[pos] = '=';
         pos += 1;
@@ -327,7 +303,6 @@ fn recordConfigChange(key: []const u8, value: []const u8) void {
     var config_hash: [32]u8 = [_]u8{0} ** 32;
     hash.sha256Into(combined[0..pos], &config_hash);
 
-    // Create config_change entry
     var entry: entry_mod.Entry = undefined;
     entry_mod.Entry.initInto(&entry);
     entry.entry_type = .config_change;
@@ -336,18 +311,16 @@ fn recordConfigChange(key: []const u8, value: []const u8) void {
         entry.target_hash[i] = config_hash[i];
     }
 
-    // Store key prefix in data field for identification
     i = 0;
     while (i < key.len and i < 32) : (i += 1) {
         entry.data[i] = key[i];
     }
 
-    // Add to blockchain
     _ = chain_mod.addConfigEntry(&entry);
 }
 
 // =============================================================================
-// Persistence: Save to Disk
+// F4.2: Encrypted Persistence — Save to Disk
 // =============================================================================
 
 pub fn saveToDisk() bool {
@@ -361,25 +334,55 @@ pub fn saveToDisk() bool {
         return false;
     }
 
-    var buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
-    const size = serialize(&buf);
+    // Step 1: Serialize to plaintext
+    var plain_buf: [MAX_PLAINTEXT_SIZE]u8 = [_]u8{0} ** MAX_PLAINTEXT_SIZE;
+    const plain_size = serialize(&plain_buf);
 
-    if (size == 0) {
+    if (plain_size == 0) {
         serial.writeString("[CONFIG_STORE] Serialize failed\n");
         return false;
     }
 
-    // Delete old file
+    // Step 2: Encrypt if system encryption is available
+    var write_data: []const u8 = undefined;
+
+    if (sys_encrypt.isInitialized() and sys_encrypt.isMasterKeySet()) {
+        if (sys_encrypt.encryptConfig(plain_buf[0..plain_size])) |encrypted| {
+            write_data = encrypted;
+            encryption_active = true;
+            serial.writeString("[CONFIG_STORE] Encrypting config data...\n");
+        } else {
+            // Encryption failed — fall back to plaintext with warning
+            serial.writeString("[CONFIG_STORE] WARNING: encryption failed, saving plaintext!\n");
+            write_data = plain_buf[0..plain_size];
+            encryption_active = false;
+        }
+    } else {
+        // No encryption available — save plaintext
+        write_data = plain_buf[0..plain_size];
+        encryption_active = false;
+    }
+
+    // Step 3: Write to disk
     if (fat32.findInRoot(CONFIG_FILENAME) != null) {
         _ = fat32.deleteFile(CONFIG_FILENAME);
     }
 
-    // Write new file
-    if (fat32.createFile(CONFIG_FILENAME, buf[0..size])) {
+    // Copy to a writable buffer for FAT32
+    var file_buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
+    const write_len = @min(write_data.len, MAX_FILE_SIZE);
+    var wi: usize = 0;
+    while (wi < write_len) : (wi += 1) {
+        file_buf[wi] = write_data[wi];
+    }
+
+    if (fat32.createFile(CONFIG_FILENAME, file_buf[0..write_len])) {
         dirty = false;
         serial.writeString("[CONFIG_STORE] Saved to disk (");
         printU32(@intCast(entry_count));
-        serial.writeString(" entries)\n");
+        serial.writeString(" entries, ");
+        if (encryption_active) serial.writeString("ENCRYPTED") else serial.writeString("plaintext");
+        serial.writeString(")\n");
         return true;
     } else {
         serial.writeString("[CONFIG_STORE] Save FAILED\n");
@@ -412,7 +415,7 @@ fn serialize(buf: []u8) usize {
     writeU32LE(buf, pos, active_count);
     pos += 4;
 
-    // Checksum placeholder (will fill later)
+    // Checksum placeholder
     const checksum_offset = pos;
     pos += 4;
 
@@ -422,22 +425,18 @@ fn serialize(buf: []u8) usize {
         if (!entries[i].active) continue;
         if (pos + ENTRY_SIZE > buf.len) break;
 
-        // key_len
         buf[pos] = entries[i].key_len;
         pos += 1;
 
-        // key
         var j: usize = 0;
         while (j < MAX_KEY_LEN) : (j += 1) {
             buf[pos + j] = entries[i].key[j];
         }
         pos += MAX_KEY_LEN;
 
-        // val_len
         buf[pos] = entries[i].value_len;
         pos += 1;
 
-        // value
         j = 0;
         while (j < MAX_VAL_LEN) : (j += 1) {
             buf[pos + j] = entries[i].value[j];
@@ -445,7 +444,7 @@ fn serialize(buf: []u8) usize {
         pos += MAX_VAL_LEN;
     }
 
-    // Calculate checksum over data (after header)
+    // Calculate checksum
     var checksum: u32 = 0;
     i = HEADER_SIZE;
     while (i < pos) : (i += 1) {
@@ -457,7 +456,7 @@ fn serialize(buf: []u8) usize {
 }
 
 // =============================================================================
-// Persistence: Load from Disk
+// F4.2: Encrypted Persistence — Load from Disk
 // =============================================================================
 
 pub fn loadFromDisk() bool {
@@ -476,16 +475,44 @@ pub fn loadFromDisk() bool {
         return false;
     }
 
-    var buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
+    var raw_buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
     const read_size = @min(@as(usize, file_info.size), MAX_FILE_SIZE);
-    const bytes = fat32.readFile(file_info.cluster, buf[0..read_size]);
+    const bytes = fat32.readFile(file_info.cluster, raw_buf[0..read_size]);
 
-    if (bytes < HEADER_SIZE) {
+    if (bytes < 4) {
         serial.writeString("[CONFIG_STORE] Config file read error\n");
         return false;
     }
 
-    return deserialize(buf[0..bytes]);
+    // Check if data is encrypted (has SYS_MAGIC)
+    if (sys_encrypt.isEncrypted(raw_buf[0..bytes])) {
+        serial.writeString("[CONFIG_STORE] Detected encrypted config\n");
+
+        if (!sys_encrypt.isInitialized() or !sys_encrypt.isMasterKeySet()) {
+            serial.writeString("[CONFIG_STORE] Cannot decrypt - no system key\n");
+            return false;
+        }
+
+        if (sys_encrypt.decryptConfig(raw_buf[0..bytes])) |decrypted| {
+            // Copy decrypted data to parse buffer
+            var parse_buf: [MAX_PLAINTEXT_SIZE]u8 = [_]u8{0} ** MAX_PLAINTEXT_SIZE;
+            const dec_len = @min(decrypted.len, MAX_PLAINTEXT_SIZE);
+            var di: usize = 0;
+            while (di < dec_len) : (di += 1) {
+                parse_buf[di] = decrypted[di];
+            }
+            encryption_active = true;
+            return deserialize(parse_buf[0..dec_len]);
+        } else {
+            serial.writeString("[CONFIG_STORE] Config decryption FAILED\n");
+            return false;
+        }
+    } else {
+        // Legacy plaintext config
+        serial.writeString("[CONFIG_STORE] Loading plaintext config (legacy)\n");
+        encryption_active = false;
+        return deserialize(raw_buf[0..bytes]);
+    }
 }
 
 fn deserialize(buf: []const u8) bool {
@@ -493,26 +520,22 @@ fn deserialize(buf: []const u8) bool {
 
     var pos: usize = 0;
 
-    // Verify magic
-    if (buf[0] != CONFIG_MAGIC[0] or
-        buf[1] != CONFIG_MAGIC[1] or
-        buf[2] != CONFIG_MAGIC[2] or
-        buf[3] != CONFIG_MAGIC[3])
+    if (buf[0] != CONFIG_MAGIC[0] or buf[1] != CONFIG_MAGIC[1] or
+        buf[2] != CONFIG_MAGIC[2] or buf[3] != CONFIG_MAGIC[3])
     {
         serial.writeString("[CONFIG_STORE] Invalid config magic\n");
         return false;
     }
     pos += 4;
 
-    // Verify version
     const version = readU32LE(buf, pos);
-    if (version != CONFIG_VERSION) {
+    // Accept version 1 (legacy) and 2 (encrypted)
+    if (version != 1 and version != CONFIG_VERSION) {
         serial.writeString("[CONFIG_STORE] Unsupported config version\n");
         return false;
     }
     pos += 4;
 
-    // Read entry count
     const saved_count = readU32LE(buf, pos);
     if (saved_count > MAX_ENTRIES) {
         serial.writeString("[CONFIG_STORE] Too many entries\n");
@@ -520,7 +543,6 @@ fn deserialize(buf: []const u8) bool {
     }
     pos += 4;
 
-    // Read checksum
     const saved_checksum = readU32LE(buf, pos);
     pos += 4;
 
@@ -536,7 +558,7 @@ fn deserialize(buf: []const u8) bool {
         return false;
     }
 
-    // Clear current entries
+    // Clear current
     var i: usize = 0;
     while (i < MAX_ENTRIES) : (i += 1) {
         entries[i].clear();
@@ -548,16 +570,10 @@ fn deserialize(buf: []const u8) bool {
     while (loaded < saved_count and pos + ENTRY_SIZE <= buf.len) : (loaded += 1) {
         if (loaded >= MAX_ENTRIES) break;
 
-        // key_len
         const key_len = buf[pos];
         pos += 1;
+        if (key_len > MAX_KEY_LEN) break;
 
-        if (key_len > MAX_KEY_LEN) {
-            serial.writeString("[CONFIG_STORE] Invalid key length\n");
-            break;
-        }
-
-        // key
         var j: usize = 0;
         while (j < MAX_KEY_LEN) : (j += 1) {
             entries[loaded].key[j] = buf[pos + j];
@@ -565,16 +581,10 @@ fn deserialize(buf: []const u8) bool {
         entries[loaded].key_len = key_len;
         pos += MAX_KEY_LEN;
 
-        // val_len
         const val_len = buf[pos];
         pos += 1;
+        if (val_len > MAX_VAL_LEN) break;
 
-        if (val_len > MAX_VAL_LEN) {
-            serial.writeString("[CONFIG_STORE] Invalid value length\n");
-            break;
-        }
-
-        // value
         j = 0;
         while (j < MAX_VAL_LEN) : (j += 1) {
             entries[loaded].value[j] = buf[pos + j];
@@ -597,7 +607,7 @@ fn deserialize(buf: []const u8) bool {
 }
 
 // =============================================================================
-// Config Queries (convenience)
+// Convenience Getters
 // =============================================================================
 
 pub fn getHostname() []const u8 {
@@ -628,6 +638,11 @@ pub fn isStealthMode() bool {
 
 pub fn isDiscoveryEnabled() bool {
     const val = get("network.discovery") orelse "on";
+    return strEqual(val, "on");
+}
+
+pub fn isDiskEncryptEnabled() bool {
+    const val = get("security.disk_encrypt") orelse "on";
     return strEqual(val, "on");
 }
 
@@ -682,7 +697,7 @@ fn printU32(val: u32) void {
 }
 
 // =============================================================================
-// Test
+// Tests
 // =============================================================================
 
 pub fn test_config_store() bool {
@@ -719,7 +734,6 @@ pub fn test_config_store() bool {
 
     // Test 3: Set new value
     serial.writeString("  Test 3: Set value\n");
-    // Disable auto-save during test
     const prev_auto = auto_save;
     auto_save = false;
 
@@ -733,11 +747,11 @@ pub fn test_config_store() bool {
                 failed += 1;
             }
         } else {
-            serial.writeString("    FAIL (get returned null)\n");
+            serial.writeString("    FAIL (get null)\n");
             failed += 1;
         }
     } else {
-        serial.writeString("    FAIL (set returned false)\n");
+        serial.writeString("    FAIL (set false)\n");
         failed += 1;
     }
 
@@ -789,13 +803,11 @@ pub fn test_config_store() bool {
     // Test 7: Serialize/Deserialize round-trip
     serial.writeString("  Test 7: Serialize round-trip\n");
     _ = set("round.trip", "hello123");
-    var test_buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
+    var test_buf: [MAX_PLAINTEXT_SIZE]u8 = [_]u8{0} ** MAX_PLAINTEXT_SIZE;
     const ser_size = serialize(&test_buf);
 
-    // Save current state
     const saved_count = entry_count;
 
-    // Clear and deserialize
     var k: usize = 0;
     while (k < MAX_ENTRIES) : (k += 1) entries[k].clear();
     entry_count = 0;
@@ -807,19 +819,19 @@ pub fn test_config_store() bool {
                     serial.writeString("    OK\n");
                     passed += 1;
                 } else {
-                    serial.writeString("    FAIL (value mismatch)\n");
+                    serial.writeString("    FAIL (value)\n");
                     failed += 1;
                 }
             } else {
-                serial.writeString("    FAIL (key lost)\n");
+                serial.writeString("    FAIL (key)\n");
                 failed += 1;
             }
         } else {
-            serial.writeString("    FAIL (count mismatch)\n");
+            serial.writeString("    FAIL (count)\n");
             failed += 1;
         }
     } else {
-        serial.writeString("    FAIL (deser failed)\n");
+        serial.writeString("    FAIL (deser)\n");
         failed += 1;
     }
 
@@ -834,10 +846,7 @@ pub fn test_config_store() bool {
         failed += 1;
     }
 
-    // Restore auto-save
     auto_save = prev_auto;
-
-    // Re-init to clean state
     init();
 
     serial.writeString("  CONFIG_STORE: ");

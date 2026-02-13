@@ -1,5 +1,5 @@
 //! Zamrud OS - Main Kernel with Security Integration
-//! Phases A-F4.1 Complete
+//! Phases A-F4.2 Complete
 
 const cpu = @import("core/cpu.zig");
 const limine = @import("core/limine.zig");
@@ -77,6 +77,9 @@ const encryptfs = @import("fs/encryptfs.zig");
 
 // F4.1: Encryption Integration
 const enc_integration = @import("fs/enc_integration.zig");
+
+// F4.2: System Data Encryption
+const sys_encrypt = @import("crypto/sys_encrypt.zig");
 
 // ============================================================================
 // Limine Requests
@@ -184,6 +187,10 @@ export fn kernel_main() noreturn {
     crypto.init();
     serial.writeString("[OK]   Crypto ready\n");
 
+    // F4.2: System data encryption — AFTER crypto, BEFORE persistence
+    sys_encrypt.init();
+    serial.writeString("[OK]   System encryption ready (F4.2)\n");
+
     integrity.init();
     serial.writeString("[OK]   Integrity ready\n");
 
@@ -289,6 +296,14 @@ export fn kernel_main() noreturn {
         }
     } else {
         serial.writeString("[OK]   Identity store ready (no saved identities)\n");
+    }
+
+    // F4.2: Auto-set master key from first identity if available
+    if (identity.getIdentityCount() > 0) {
+        if (identity.getCurrentIdentity()) |id| {
+            sys_encrypt.setMasterKeyFromIdentity(&id.keypair.public_key);
+            serial.writeString("[OK]   System encryption key derived from identity\n");
+        }
     }
 
     // === F3: User/Group System ===
@@ -507,6 +522,19 @@ fn printSystemSummary() void {
         serial.writeString("Not initialized\n");
     }
 
+    serial.writeString("  SysEnc(F4.2):");
+    if (sys_encrypt.isInitialized()) {
+        serial.writeString("OK (");
+        serial.writeString(if (sys_encrypt.isMasterKeySet()) "key SET" else "no key");
+        serial.writeString(", enc=");
+        printDecSerial(sys_encrypt.getStats().encrypts);
+        serial.writeString(", dec=");
+        printDecSerial(sys_encrypt.getStats().decrypts);
+        serial.writeString(")\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+
     serial.writeString("  Storage:    ");
     serial.writeString(if (storage.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  FAT32:      ");
@@ -529,6 +557,9 @@ fn printSystemSummary() void {
         if (config_store.wasLoadedFromDisk()) {
             serial.writeString(", from disk");
         }
+        if (config_store.isEncryptionActive()) {
+            serial.writeString(", ENCRYPTED");
+        }
         serial.writeString(")\n");
     } else {
         serial.writeString("Not initialized\n");
@@ -538,6 +569,9 @@ fn printSystemSummary() void {
         printDecSerial(identity.getIdentityCount());
         if (identity_store.wasLoadedFromDisk()) {
             serial.writeString(" (from disk, locked)");
+        }
+        if (identity_store.isEncryptionActive()) {
+            serial.writeString(" [ENCRYPTED]");
         }
         serial.writeString("\n");
     } else {
