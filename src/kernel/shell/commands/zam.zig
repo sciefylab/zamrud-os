@@ -50,6 +50,8 @@ pub fn execute(args: []const u8) void {
         cmdExecTest();
     } else if (helpers.strEql(sub, "disktest")) {
         cmdDiskTest();
+    } else if (helpers.strEql(sub, "builtin")) {
+        cmdBuiltin(parsed.rest);
     } else if (helpers.strEql(sub, "exec")) {
         cmdExec(parsed.rest);
     } else if (helpers.strEql(sub, "run")) {
@@ -99,6 +101,11 @@ fn cmdHelp() void {
     shell.println("    zam procs        List active ELF processes");
     shell.println("    zam kill <pid>   Kill an ELF process");
     shell.println("    zam help         This help");
+    shell.println("  Built-in (F5.4):");
+    shell.println("    zam builtin list   List built-in test programs");
+    shell.println("    zam builtin test   Run F5.4 built-in tests (20 tests)");
+    shell.println("    zam builtin run <n> Run a built-in program");
+    shell.println("    zam builtin info <n> Show program info");
     shell.println("");
 }
 
@@ -720,6 +727,192 @@ fn cmdDemo() void {
     }
 
     shell.println("");
+}
+
+fn cmdBuiltin(args: []const u8) void {
+    const parsed = helpers.parseArgs(args);
+
+    if (parsed.cmd.len == 0 or helpers.strEql(parsed.cmd, "list")) {
+        cmdBuiltinList();
+    } else if (helpers.strEql(parsed.cmd, "test")) {
+        cmdBuiltinTest();
+    } else if (helpers.strEql(parsed.cmd, "run")) {
+        cmdBuiltinRun(parsed.rest);
+    } else if (helpers.strEql(parsed.cmd, "info")) {
+        cmdBuiltinInfo(parsed.rest);
+    } else {
+        // Try as program name directly
+        cmdBuiltinRun(parsed.cmd);
+    }
+}
+
+fn cmdBuiltinTest() void {
+    shell.println("");
+    shell.printInfoLine("=== Running F5.4 Built-in Programs Tests ===");
+    shell.println("");
+    const test_bi = @import("../../tests/test_builtins.zig");
+    test_bi.runTests();
+    shell.println("");
+}
+
+fn cmdBuiltinList() void {
+    shell.println("");
+    shell.printInfoLine("=== Built-in Programs ===");
+    shell.println("");
+
+    const builtins_mod = @import("../../loader/builtins.zig");
+    const count = builtins_mod.getCount();
+
+    if (count == 0) {
+        shell.println("  No built-in programs");
+        shell.println("");
+        return;
+    }
+
+    shell.println("  Name       Caps       Trust    Description");
+    shell.println("  ──────────────────────────────────────────────");
+
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (builtins_mod.getBuiltin(i)) |prog| {
+            shell.print("  ");
+            shell.print(prog.getName());
+            padTo(12, prog.getName().len);
+            shell.print("0x");
+            helpers.printHex32(prog.caps);
+            shell.print(" ");
+            printTrustLevel(prog.trust);
+            shell.print(" ");
+            shell.print(prog.getDesc());
+            shell.newLine();
+        }
+    }
+    shell.println("");
+}
+
+fn cmdBuiltinRun(name: []const u8) void {
+    shell.println("");
+
+    if (name.len == 0) {
+        shell.printError("Usage: zam builtin run <name>");
+        shell.newLine();
+        shell.println("  Use 'zam builtin list' to see available programs");
+        shell.println("");
+        return;
+    }
+
+    const builtins_mod = @import("../../loader/builtins.zig");
+
+    if (builtins_mod.findByName(name) == null) {
+        shell.printError("Unknown built-in: ");
+        shell.print(name);
+        shell.newLine();
+        shell.println("");
+        return;
+    }
+
+    // Build ELF
+    var buf: [512]u8 = [_]u8{0} ** 512;
+    const size = builtins_mod.buildElf(name, &buf);
+    if (size == 0) {
+        shell.printError("Failed to build ELF");
+        shell.newLine();
+        shell.println("");
+        return;
+    }
+
+    shell.printInfoLine("=== Running built-in program ===");
+    shell.print("  Program: ");
+    shell.print(name);
+    shell.newLine();
+    shell.print("  Size:    ");
+    helpers.printDec(size);
+    shell.println(" bytes");
+
+    const result = elf_exec.execRawElf(buf[0..size], name, capability.CAP_USER_DEFAULT);
+
+    if (result.err != .None) {
+        shell.printError("  Failed: ");
+        shell.print(elf_exec.execErrorName(result.err));
+        shell.newLine();
+    } else {
+        shell.print("  PID:     ");
+        helpers.printDec(result.pid);
+        shell.newLine();
+        shell.print("  Entry:   0x");
+        helpers.printHex64(result.entry_point);
+        shell.newLine();
+        shell.print("  Pages:   ");
+        helpers.printDec(result.pages_used);
+        shell.newLine();
+        shell.printInfoLine("  Process created (not scheduled)");
+    }
+    shell.println("");
+}
+
+fn cmdBuiltinInfo(name: []const u8) void {
+    shell.println("");
+
+    if (name.len == 0) {
+        shell.printError("Usage: zam builtin info <name>");
+        shell.newLine();
+        shell.println("");
+        return;
+    }
+
+    const builtins_mod = @import("../../loader/builtins.zig");
+
+    const idx = builtins_mod.findByName(name) orelse {
+        shell.printError("Unknown built-in: ");
+        shell.print(name);
+        shell.newLine();
+        shell.println("");
+        return;
+    };
+
+    const prog = builtins_mod.getBuiltin(idx) orelse return;
+
+    shell.printInfoLine("=== Built-in Program Info ===");
+    shell.println("");
+    shell.print("  Name:  ");
+    shell.print(prog.getName());
+    shell.newLine();
+    shell.print("  Desc:  ");
+    shell.print(prog.getDesc());
+    shell.newLine();
+    shell.print("  Caps:  0x");
+    helpers.printHex32(prog.caps);
+    shell.newLine();
+    shell.print("  Trust: ");
+    printTrustLevel(prog.trust);
+    shell.newLine();
+
+    // Build and show ELF info
+    var buf: [512]u8 = [_]u8{0} ** 512;
+    const size = builtins_mod.buildElf(name, &buf);
+    if (size > 0) {
+        shell.print("  ELF:   ");
+        helpers.printDec(size);
+        shell.println(" bytes");
+
+        if (elf_parser.parseElf(buf[0..size])) |parsed| {
+            shell.print("  Entry: 0x");
+            helpers.printHex64(parsed.entryPoint());
+            shell.newLine();
+            shell.print("  Segs:  ");
+            helpers.printDec(parsed.load_count);
+            shell.println(" LOAD");
+        }
+    }
+    shell.println("");
+}
+
+fn padTo(target: usize, current: usize) void {
+    if (current >= target) return;
+    var i: usize = current;
+    while (i < target) : (i += 1) {
+        shell.printChar(' ');
+    }
 }
 
 // ============================================================================

@@ -5,6 +5,7 @@ pub const zam_header = @import("zam_header.zig");
 pub const elf_parser = @import("elf_parser.zig");
 pub const segment_loader = @import("segment_loader.zig");
 pub const elf_exec = @import("elf_exec.zig");
+pub const builtins = @import("builtins.zig");
 
 const serial = @import("../drivers/serial/serial.zig");
 
@@ -43,8 +44,9 @@ var initialized: bool = false;
 pub fn init() void {
     serial.writeString("[LOADER] Initializing ZAM binary loader...\n");
     elf_exec.init();
+    builtins.init();
     initialized = true;
-    serial.writeString("[LOADER] ZAM binary loader ready (F5.0 + F5.1 + F5.2)\n");
+    serial.writeString("[LOADER] ZAM binary loader ready (F5.0-F5.4)\n");
 }
 
 pub fn isInitialized() bool {
