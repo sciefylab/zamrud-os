@@ -1,5 +1,5 @@
 //! Zamrud OS - Shell Commands Main Dispatcher
-//! Phases A-F4.1 Complete
+//! Phases A-F5.0 Complete
 
 const shell = @import("shell.zig");
 
@@ -30,6 +30,7 @@ const user_cmd = @import("commands/user.zig");
 const encfs_cmd = @import("commands/encfs.zig");
 const enc_int_cmd = @import("commands/enc_int.zig"); // F4.1
 const sys_encrypt_cmd = @import("commands/sys_encrypt.zig"); // F4.2
+const zam_cmd = @import("commands/zam.zig"); // F5.0
 
 // =============================================================================
 // Command Execution
@@ -236,6 +237,18 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "sysenctest")) {
         sys_encrypt_cmd.cmdSysEncTest(args);
     }
+    // F5.0: ZAM Binary Loader
+    else if (helpers.strEql(command, "zam")) {
+        zam_cmd.execute(args);
+    } else if (helpers.strEql(command, "zamtest")) {
+        zam_cmd.cmdZamTest();
+    } else if (helpers.strEql(command, "zaminfo")) {
+        zam_cmd.execute("info");
+    } else if (helpers.strEql(command, "elfinfo")) {
+        zam_cmd.execute("elfinfo");
+    } else if (helpers.strEql(command, "zamverify")) {
+        zam_cmd.execute("verify");
+    }
     // Crypto
     else if (helpers.strEql(command, "crypto")) {
         crypto_cmd.execute(args);
@@ -419,6 +432,10 @@ fn runAllTests() void {
 
     shell.printInfoLine("=== SYSTEM ENCRYPTION TESTS (F4.2) ===");
     sys_encrypt_cmd.cmdSysEncTest("");
+    shell.newLine();
+
+    shell.printInfoLine("=== ZAM BINARY LOADER TESTS (F5.0) ===");
+    zam_cmd.cmdZamTest();
     shell.newLine();
 
     shell.printInfoLine("########################################");

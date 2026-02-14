@@ -596,7 +596,7 @@ pub fn printHexU32(val: u32) void {
 
 pub fn printHexU64(val: u64) void {
     const hex_chars = "0123456789abcdef";
-    var i: u7 = 60;
+    var i: u6 = 60;
     while (true) {
         shell.printChar(hex_chars[@intCast((val >> i) & 0xF)]);
         if (i == 0) break;
@@ -613,6 +613,16 @@ pub fn printHex32(val: u32) void {
         if (i == 0) break;
         i -= 4;
     }
+}
+
+/// Alias for printHexU64 — used by zam.zig
+pub fn printHex64(val: u64) void {
+    printHexU64(val);
+}
+
+/// Alias for printHexByte — used by zam.zig
+pub fn printHex8(val: u8) void {
+    printHexByte(val);
 }
 
 pub fn printHexTerminal(data: []const u8) void {

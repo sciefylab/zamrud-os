@@ -81,6 +81,9 @@ const enc_integration = @import("fs/enc_integration.zig");
 // F4.2: System Data Encryption
 const sys_encrypt = @import("crypto/sys_encrypt.zig");
 
+// F5.0: ZAM Binary Loader
+const loader = @import("loader/loader.zig");
+
 // ============================================================================
 // Limine Requests
 // ============================================================================
@@ -382,6 +385,13 @@ export fn kernel_main() noreturn {
         );
         serial.writeString("[OK]   Terminal ready\n");
     }
+
+    // === F5.0: ZAM Binary Loader ===
+    printLine();
+    serial.writeString("[LOADER]\n");
+
+    loader.init();
+    serial.writeString("[OK]   ZAM binary loader ready (F5.0)\n");
 
     printLine();
     printSystemSummary();
