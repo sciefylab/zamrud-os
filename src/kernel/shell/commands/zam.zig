@@ -32,6 +32,8 @@ pub fn execute(args: []const u8) void {
         cmdStatus();
     } else if (helpers.strEql(sub, "demo")) {
         cmdDemo();
+    } else if (helpers.strEql(sub, "segtest")) {
+        cmdSegTest();
     } else {
         shell.printError("Unknown zam subcommand: ");
         shell.print(sub);
@@ -54,10 +56,12 @@ fn cmdHelp() void {
     shell.println("  zam info         Show test ZAM header info");
     shell.println("  zam elfinfo      Show test ELF64 header info");
     shell.println("  zam verify       Verify test ZAM hash + signature");
+    shell.println("  zam segtest      Run F5.1 segment loader tests (20 tests)");
     shell.println("  zam help         This help");
     shell.println("");
     shell.println("  Header: 160 bytes (ZAMR magic + SHA-256 + sig + caps)");
     shell.println("  Payload: ELF64 x86_64 executable");
+
     shell.println("");
 }
 
@@ -175,6 +179,17 @@ fn cmdDemo() void {
         shell.printError("  Parse: FAILED");
         shell.newLine();
     }
+
+    shell.println("");
+}
+
+fn cmdSegTest() void {
+    shell.println("");
+    shell.printInfoLine("=== Running F5.1 Segment Loader Tests ===");
+    shell.println("");
+
+    const test_seg = @import("../../tests/test_segment_loader.zig");
+    test_seg.runTests();
 
     shell.println("");
 }

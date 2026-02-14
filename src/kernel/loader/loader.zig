@@ -3,14 +3,7 @@
 
 pub const zam_header = @import("zam_header.zig");
 pub const elf_parser = @import("elf_parser.zig");
-
-// Future modules (F5.1+):
-// pub const elf_loader = @import("elf_loader.zig");
-// pub const zam_security = @import("zam_security.zig");
-// pub const zam_exec = @import("zam_exec.zig");
-// pub const zam_builtins = @import("zam_builtins.zig");
-// pub const zam_disk = @import("zam_disk.zig");
-// pub const zam_tool = @import("zam_tool.zig");
+pub const segment_loader = @import("segment_loader.zig");
 
 const serial = @import("../drivers/serial/serial.zig");
 
@@ -25,6 +18,10 @@ pub const Elf64Header = elf_parser.Elf64Header;
 pub const ProgramHeader = elf_parser.ProgramHeader;
 pub const ParsedElf = elf_parser.ParsedElf;
 pub const ElfError = elf_parser.ElfError;
+
+pub const LoadResult = segment_loader.LoadResult;
+pub const LoadError = segment_loader.LoadError;
+pub const LoadedSegment = segment_loader.LoadedSegment;
 
 // ============================================================================
 // Constants
@@ -42,7 +39,7 @@ var initialized: bool = false;
 pub fn init() void {
     serial.writeString("[LOADER] Initializing ZAM binary loader...\n");
     initialized = true;
-    serial.writeString("[LOADER] ZAM binary loader ready\n");
+    serial.writeString("[LOADER] ZAM binary loader ready (F5.0 parser + F5.1 segment loader)\n");
 }
 
 pub fn isInitialized() bool {
@@ -62,13 +59,11 @@ pub const ParsedZam = struct {
 
 /// Parse a complete .zam file (ZAM header + ELF payload)
 pub fn parseZamFile(data: []const u8) ?ParsedZam {
-    // Parse ZAM header
     const zam = zam_header.parseAndValidate(data) orelse {
         serial.writeString("[LOADER] ZAM header parse failed\n");
         return null;
     };
 
-    // Get ELF payload
     const elf_start = zam.elf_offset;
     const elf_end = elf_start + zam.elf_size;
 
@@ -79,7 +74,6 @@ pub fn parseZamFile(data: []const u8) ?ParsedZam {
 
     const elf_data = data[elf_start..elf_end];
 
-    // Parse ELF
     const elf = elf_parser.parseElf(elf_data) orelse {
         serial.writeString("[LOADER] ELF parse failed\n");
         return null;
@@ -103,4 +97,38 @@ pub fn verifyZamIntegrity(data: []const u8) bool {
 
     const elf_data = data[elf_start..elf_end];
     return zam.verifyHash(elf_data);
+}
+
+// ============================================================================
+// F5.1: Load .zam file into memory
+// ============================================================================
+
+/// Load a .zam file: parse → verify → load segments → return result
+pub fn loadZamFile(data: []const u8, user_mode: bool) ?LoadResult {
+    const parsed = parseZamFile(data) orelse return null;
+
+    if (!verifyZamIntegrity(data)) {
+        serial.writeString("[LOADER] Integrity check failed\n");
+        return null;
+    }
+
+    const elf_data = data[parsed.elf_data_offset .. parsed.elf_data_offset + parsed.elf_data_size];
+
+    const result = segment_loader.loadSegments(&parsed.elf, elf_data, user_mode);
+
+    if (result.err != .None) {
+        serial.writeString("[LOADER] Segment loading failed: ");
+        serial.writeString(segment_loader.loadErrorName(result.err));
+        serial.writeString("\n");
+        return null;
+    }
+
+    serial.writeString("[LOADER] .zam loaded successfully\n");
+    return result;
+}
+
+/// Unload a previously loaded binary
+pub fn unloadBinary(result: *LoadResult) void {
+    segment_loader.cleanupAllSegments(result);
+    serial.writeString("[LOADER] Binary unloaded\n");
 }
