@@ -4,6 +4,7 @@
 pub const zam_header = @import("zam_header.zig");
 pub const elf_parser = @import("elf_parser.zig");
 pub const segment_loader = @import("segment_loader.zig");
+pub const elf_exec = @import("elf_exec.zig");
 
 const serial = @import("../drivers/serial/serial.zig");
 
@@ -23,6 +24,9 @@ pub const LoadResult = segment_loader.LoadResult;
 pub const LoadError = segment_loader.LoadError;
 pub const LoadedSegment = segment_loader.LoadedSegment;
 
+pub const ExecResult = elf_exec.ExecResult;
+pub const ExecError = elf_exec.ExecError;
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -38,8 +42,9 @@ var initialized: bool = false;
 
 pub fn init() void {
     serial.writeString("[LOADER] Initializing ZAM binary loader...\n");
+    elf_exec.init();
     initialized = true;
-    serial.writeString("[LOADER] ZAM binary loader ready (F5.0 parser + F5.1 segment loader)\n");
+    serial.writeString("[LOADER] ZAM binary loader ready (F5.0 + F5.1 + F5.2)\n");
 }
 
 pub fn isInitialized() bool {
@@ -131,4 +136,23 @@ pub fn loadZamFile(data: []const u8, user_mode: bool) ?LoadResult {
 pub fn unloadBinary(result: *LoadResult) void {
     segment_loader.cleanupAllSegments(result);
     serial.writeString("[LOADER] Binary unloaded\n");
+}
+
+// ============================================================================
+// F5.2: Execute .zam or raw ELF
+// ============================================================================
+
+/// Execute a .zam binary (full pipeline)
+pub fn execZam(data: []const u8, name: []const u8) ExecResult {
+    return elf_exec.execZam(data, name);
+}
+
+/// Execute raw ELF data
+pub fn execRawElf(data: []const u8, name: []const u8, caps: u32) ExecResult {
+    return elf_exec.execRawElf(data, name, caps);
+}
+
+/// Cleanup an ELF process
+pub fn cleanupElfProcess(pid: u32) bool {
+    return elf_exec.cleanupProcess(pid);
 }

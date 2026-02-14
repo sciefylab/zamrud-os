@@ -34,6 +34,8 @@ pub fn execute(args: []const u8) void {
         cmdDemo();
     } else if (helpers.strEql(sub, "segtest")) {
         cmdSegTest();
+    } else if (helpers.strEql(sub, "exectest")) {
+        cmdExecTest();
     } else {
         shell.printError("Unknown zam subcommand: ");
         shell.print(sub);
@@ -57,6 +59,7 @@ fn cmdHelp() void {
     shell.println("  zam elfinfo      Show test ELF64 header info");
     shell.println("  zam verify       Verify test ZAM hash + signature");
     shell.println("  zam segtest      Run F5.1 segment loader tests (20 tests)");
+    shell.println("  zam exectest     Run F5.2 process execution tests (20 tests)");
     shell.println("  zam help         This help");
     shell.println("");
     shell.println("  Header: 160 bytes (ZAMR magic + SHA-256 + sig + caps)");
@@ -190,6 +193,17 @@ fn cmdSegTest() void {
 
     const test_seg = @import("../../tests/test_segment_loader.zig");
     test_seg.runTests();
+
+    shell.println("");
+}
+
+fn cmdExecTest() void {
+    shell.println("");
+    shell.printInfoLine("=== Running F5.2 Process Execution Tests ===");
+    shell.println("");
+
+    const test_exec = @import("../../tests/test_elf_exec.zig");
+    test_exec.runTests();
 
     shell.println("");
 }
