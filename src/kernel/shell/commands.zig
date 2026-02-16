@@ -1,5 +1,5 @@
 //! Zamrud OS - Shell Commands Main Dispatcher
-//! Phases A-F5.0 Complete
+//! Phases A-F5.0 + T4.2 (Environment Variables)
 
 const shell = @import("shell.zig");
 
@@ -43,8 +43,20 @@ pub fn execute(input: []const u8) void {
 
     if (command.len == 0) return;
 
+    // T4.2: Environment variable commands
+    if (helpers.strEql(command, "set")) {
+        system.cmdSet(args);
+    } else if (helpers.strEql(command, "unset")) {
+        system.cmdUnset(args);
+    } else if (helpers.strEql(command, "env")) {
+        system.cmdEnv(args);
+    } else if (helpers.strEql(command, "export")) {
+        system.cmdExport(args);
+    } else if (helpers.strEql(command, "printenv")) {
+        system.cmdPrintenv(args);
+    }
     // System commands
-    if (helpers.strEql(command, "help")) {
+    else if (helpers.strEql(command, "help")) {
         system.cmdHelp(args);
     } else if (helpers.strEql(command, "clear")) {
         system.cmdClear(args);
@@ -340,6 +352,7 @@ pub fn execute(input: []const u8) void {
         shell.print(command);
         shell.newLine();
         shell.println("  Type 'help' for available commands");
+        shell.setLastExitSuccess(false);
     }
 }
 
@@ -436,6 +449,11 @@ fn runAllTests() void {
 
     shell.printInfoLine("=== ZAM BINARY LOADER TESTS (F5.0) ===");
     zam_cmd.cmdZamTest();
+    shell.newLine();
+
+    // T4.2: Environment variable tests
+    shell.printInfoLine("=== ENVIRONMENT VARIABLE TESTS (T4.2) ===");
+    system.cmdEnvTest("");
     shell.newLine();
 
     shell.printInfoLine("########################################");

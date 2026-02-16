@@ -1,19 +1,25 @@
 //! Zamrud OS - Filesystem Commands
 //! ls, cd, pwd, mkdir, touch, rm, rmdir, cat, write
-//! + FAT32 disk commands via /disk path
+//! T4.1: Colored ls output
 
 const shell = @import("../shell.zig");
 const helpers = @import("helpers.zig");
 const terminal = @import("../../drivers/display/terminal.zig");
+const ui = @import("../ui.zig");
 const vfs = @import("../../fs/vfs.zig");
 const fat32 = @import("../../fs/fat32.zig");
 
 var read_buf: [64]u8 = [_]u8{0} ** 64;
 
+// =============================================================================
+// T4.1: Colored ls
+// =============================================================================
+
 pub fn cmdLs(args: []const u8) void {
     const dir_path = if (args.len > 0) helpers.trim(args) else vfs.getcwd();
+    const theme = ui.getTheme();
 
-    // Special case: "ls /disk" or "ls disk" - list FAT32 directly
+    // Special case: "ls /disk"
     if (isDiskPath(dir_path)) {
         listDiskFiles();
         return;
@@ -35,52 +41,146 @@ pub fn cmdLs(args: []const u8) void {
 
     var index: usize = 0;
     var count: usize = 0;
+    var dir_count: usize = 0;
+    var file_count: usize = 0;
 
     while (true) {
         const entry = vfs.readdir(dir_path, index);
         if (entry == null) break;
 
+        shell.print("  ");
+
         if (terminal.isInitialized()) {
             if (entry.?.file_type == .Directory) {
-                terminal.setFgColor(terminal.Colors.DIR_COLOR);
-                shell.print("  [DIR]  ");
-            } else if (entry.?.file_type == .CharDevice) {
-                terminal.setFgColor(terminal.Colors.WARNING);
-                shell.print("  [DEV]  ");
+                terminal.setFgColor(theme.text_info);
+                shell.print("[DIR]  ");
+                terminal.setFgColor(theme.prompt_path);
+                terminal.setBold(true);
+                shell.print(entry.?.getName());
+                terminal.setBold(false);
+                shell.printChar('/');
+                dir_count += 1;
+            } else if (entry.?.file_type == .CharDevice or entry.?.file_type == .BlockDevice) {
+                terminal.setFgColor(theme.text_warning);
+                shell.print("[DEV]  ");
+                terminal.setFgColor(theme.text_warning);
+                shell.print(entry.?.getName());
             } else {
-                terminal.setFgColor(terminal.Colors.FILE_COLOR);
-                shell.print("  [FILE] ");
+                terminal.setFgColor(theme.text_dim);
+                shell.print("[FILE] ");
+                terminal.setFgColor(theme.text_normal);
+                shell.print(entry.?.getName());
+                file_count += 1;
             }
-            terminal.setFgColor(terminal.Colors.FG_DEFAULT);
+            terminal.setFgColor(theme.text_normal);
         } else {
             if (entry.?.file_type == .Directory) {
-                shell.print("  [DIR]  ");
+                shell.print("[DIR]  ");
+                dir_count += 1;
             } else if (entry.?.file_type == .CharDevice) {
-                shell.print("  [DEV]  ");
+                shell.print("[DEV]  ");
             } else {
-                shell.print("  [FILE] ");
+                shell.print("[FILE] ");
+                file_count += 1;
             }
+            shell.print(entry.?.getName());
         }
 
-        shell.println(entry.?.getName());
+        shell.newLine();
         index += 1;
         count += 1;
     }
 
     if (count == 0) {
+        if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
         shell.println("  (empty)");
+        if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
+    } else {
+        // Summary line
+        if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
+        shell.print("  ");
+        helpers.printUsize(count);
+        shell.print(" total (");
+        helpers.printUsize(dir_count);
+        shell.print(" dirs, ");
+        helpers.printUsize(file_count);
+        shell.println(" files)");
+        if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
     }
 }
 
-pub fn cmdCd(args: []const u8) void {
-    const target = if (args.len > 0) helpers.trim(args) else "/";
+// =============================================================================
+// T5.1: cd with ~ support
+// =============================================================================
 
+pub fn cmdCd(args: []const u8) void {
+    // cd tanpa args = go home
+    if (args.len == 0) {
+        const shell_mod = @import("../shell.zig");
+        const home = shell_mod.getHomeDir();
+        if (home.len > 0) {
+            if (!vfs.chdir(home)) {
+                shell.printErrorLine("cd: cannot change to home");
+            }
+        }
+        return;
+    }
+
+    // cd ~ atau cd ~/path
+    if (args[0] == '~') {
+        const shell_mod = @import("../shell.zig");
+        const home = shell_mod.getHomeDir();
+        if (home.len == 0) {
+            shell.printErrorLine("cd: HOME not set");
+            return;
+        }
+
+        if (args.len == 1) {
+            if (!vfs.chdir(home)) {
+                shell.printErrorLine("cd: cannot change to home");
+            }
+            return;
+        }
+
+        if (args.len > 1 and args[1] == '/') {
+            var full_path: [256]u8 = [_]u8{0} ** 256;
+            var pos: usize = 0;
+
+            for (home) |c| {
+                if (pos < 255) {
+                    full_path[pos] = c;
+                    pos += 1;
+                }
+            }
+
+            for (args[1..]) |c| {
+                if (pos < 255) {
+                    full_path[pos] = c;
+                    pos += 1;
+                }
+            }
+
+            if (!vfs.chdir(full_path[0..pos])) {
+                shell.printError("cd: cannot change to '");
+                shell.print(full_path[0..pos]);
+                shell.printErrorLine("': No such directory");
+            }
+            return;
+        }
+    }
+
+    // Normal cd
+    const target = args;
     if (!vfs.chdir(target)) {
         shell.printError("cd: cannot change to '");
         shell.print(target);
         shell.printErrorLine("': No such directory");
     }
 }
+
+// =============================================================================
+// Other filesystem commands
+// =============================================================================
 
 pub fn cmdPwd(_: []const u8) void {
     shell.print("  ");
@@ -134,7 +234,6 @@ pub fn cmdRm(args: []const u8) void {
         return;
     }
 
-    // Handle /disk/ paths - delete from FAT32
     if (isDiskFilePath(name)) {
         const fname = extractDiskFilename(name);
         if (fname.len > 0 and fat32.deleteFile(fname)) {
@@ -182,7 +281,6 @@ pub fn cmdCat(args: []const u8) void {
         return;
     }
 
-    // Handle /disk/ paths - read from FAT32 directly
     if (isDiskFilePath(name)) {
         const fname = extractDiskFilename(name);
         catDiskFile(fname);
@@ -255,7 +353,6 @@ pub fn cmdWrite(args: []const u8) void {
     }
     const content = trimmed[content_start..];
 
-    // Handle /disk/ paths - write to FAT32 directly
     if (isDiskFilePath(filename)) {
         const fname = extractDiskFilename(filename);
         if (fname.len > 0) {
@@ -300,25 +397,23 @@ pub fn cmdWrite(args: []const u8) void {
 // FAT32 Direct Access Helpers
 // =============================================================================
 
-fn isDiskPath(path: []const u8) bool {
-    if (path.len == 5 and eql5(path, "/disk")) return true;
-    if (path.len == 6 and eql5(path, "/disk") and path[5] == '/') return true;
-    if (path.len == 4 and eql4(path, "disk")) return true;
+fn isDiskPath(p: []const u8) bool {
+    if (p.len == 5 and eql5(p, "/disk")) return true;
+    if (p.len == 6 and eql5(p, "/disk") and p[5] == '/') return true;
+    if (p.len == 4 and eql4(p, "disk")) return true;
     return false;
 }
 
-fn isDiskFilePath(path: []const u8) bool {
-    // /disk/filename
-    if (path.len > 6 and eql5(path, "/disk") and path[5] == '/') return true;
+fn isDiskFilePath(p: []const u8) bool {
+    if (p.len > 6 and eql5(p, "/disk") and p[5] == '/') return true;
     return false;
 }
 
-fn extractDiskFilename(path: []const u8) []const u8 {
-    // /disk/filename -> filename
-    if (path.len > 6 and eql5(path, "/disk") and path[5] == '/') {
-        return path[6..];
+fn extractDiskFilename(p: []const u8) []const u8 {
+    if (p.len > 6 and eql5(p, "/disk") and p[5] == '/') {
+        return p[6..];
     }
-    return path;
+    return p;
 }
 
 fn eql4(s: []const u8, target: *const [4]u8) bool {
@@ -332,6 +427,8 @@ fn eql5(s: []const u8, target: *const [5]u8) bool {
 }
 
 fn listDiskFiles() void {
+    const theme = ui.getTheme();
+
     if (!fat32.isMounted()) {
         shell.printErrorLine("  Disk not mounted");
         return;
@@ -341,51 +438,62 @@ fn listDiskFiles() void {
     const count = fat32.listRoot(&entries);
 
     if (count == 0) {
+        if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
         shell.println("  (empty disk)");
+        if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
         return;
     }
 
-    shell.println("");
-    shell.println("  Name          Size       Type");
-    shell.println("  ─────────────────────────────────");
+    shell.newLine();
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
+    shell.println("  Name            Size       Type");
+    shell.println("  ────────────────────────────────────");
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
 
     for (entries[0..count]) |entry| {
         shell.print("  ");
 
         const name = entry.getName();
-        shell.print(name);
-
-        // Pad name to 14 chars
-        var pad: usize = if (14 > name.len) 14 - name.len else 1;
-        while (pad > 0) : (pad -= 1) {
-            shell.printChar(' ');
-        }
 
         if (entry.is_dir) {
+            if (terminal.isInitialized()) terminal.setFgColor(theme.prompt_path);
+            shell.print(name);
+            shell.printChar('/');
+            if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
+
+            var pad_name: usize = if (15 > name.len + 1) 15 - name.len - 1 else 1;
+            while (pad_name > 0) : (pad_name -= 1) shell.printChar(' ');
+
+            if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
             shell.print("-          ");
-            if (terminal.isInitialized()) {
-                terminal.setFgColor(terminal.Colors.DIR_COLOR);
-            }
+            terminal.setFgColor(theme.text_info);
             shell.print("[DIR]");
-            if (terminal.isInitialized()) {
-                terminal.setFgColor(terminal.Colors.FG_DEFAULT);
-            }
         } else {
+            if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
+            shell.print(name);
+
+            var pad_name: usize = if (16 > name.len) 16 - name.len else 1;
+            while (pad_name > 0) : (pad_name -= 1) shell.printChar(' ');
+
             helpers.printU32(entry.size);
             shell.print(" B");
-            pad = if (entry.size < 10) 8 else if (entry.size < 100) 7 else if (entry.size < 1000) 6 else if (entry.size < 10000) 5 else 4;
-            while (pad > 0) : (pad -= 1) {
-                shell.printChar(' ');
-            }
+            const pad_size: usize = if (entry.size < 10) 8 else if (entry.size < 100) 7 else if (entry.size < 1000) 6 else if (entry.size < 10000) 5 else 4;
+            var ps = pad_size;
+            while (ps > 0) : (ps -= 1) shell.printChar(' ');
+
+            if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
             shell.print("[FILE]");
         }
+        if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
         shell.newLine();
     }
 
-    shell.println("");
+    shell.newLine();
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
     shell.print("  ");
     helpers.printUsize(count);
     shell.println(" file(s)");
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
 }
 
 fn catDiskFile(name: []const u8) void {
@@ -432,7 +540,6 @@ fn writeDiskFile(name: []const u8, content: []const u8) void {
         return;
     }
 
-    // Delete existing file first (overwrite)
     if (fat32.findInRoot(name) != null) {
         _ = fat32.deleteFile(name);
     }

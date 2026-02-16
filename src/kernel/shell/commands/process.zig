@@ -11,15 +11,32 @@ const capability = @import("../../security/capability.zig");
 const unveil = @import("../../security/unveil.zig");
 const binaryverify = @import("../../security/binaryverify.zig");
 const hash_mod = @import("../../crypto/hash.zig");
+const terminal = @import("../../drivers/display/terminal.zig");
+const ui = @import("../ui.zig");
 
 // =============================================================================
 // Process Commands
 // =============================================================================
 
 pub fn cmdPs(_: []const u8) void {
-    shell.printInfoLine("Process List:");
-    shell.println("  PID   STATE       PRI  CAPABILITIES         UNVEIL");
-    shell.println("  ----  ----------  ---  -------------------  ------");
+    const theme = ui.getTheme();
+
+    shell.newLine();
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.status_accent);
+        terminal.setBold(true);
+    }
+    shell.println("  Process List");
+    if (terminal.isInitialized()) {
+        terminal.setBold(false);
+        terminal.setFgColor(theme.border);
+    }
+    shell.println("  ─────────────────────────────────────────────────────");
+
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
+    shell.println("  PID  STATE       PRI  CAPABILITIES          UNVEIL");
+    shell.println("  ───  ──────────  ───  ────────────────────  ──────");
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
 
     var count: u32 = 0;
     var i: usize = 0;
@@ -29,9 +46,23 @@ pub fn cmdPs(_: []const u8) void {
             const info = process.getProcessInfo(i) orelse continue;
 
             shell.print("  ");
-            helpers.printU32(info.pid);
-            shell.print("     ");
 
+            // PID
+            if (terminal.isInitialized()) terminal.setFgColor(theme.text_bright);
+            helpers.printU32Padded(info.pid, 3);
+
+            shell.print("  ");
+
+            // STATE with color
+            if (terminal.isInitialized()) {
+                switch (@intFromEnum(info.state)) {
+                    2 => terminal.setFgColor(theme.text_success), // Running
+                    1 => terminal.setFgColor(theme.text_info), // Ready
+                    3 => terminal.setFgColor(theme.text_warning), // Blocked
+                    4 => terminal.setFgColor(theme.text_error), // Terminated
+                    else => terminal.setFgColor(theme.text_dim), // Created
+                }
+            }
             switch (@intFromEnum(info.state)) {
                 0 => shell.print("Created   "),
                 1 => shell.print("Ready     "),
@@ -42,25 +73,41 @@ pub fn cmdPs(_: []const u8) void {
             }
 
             shell.print("  ");
-            helpers.printU8(info.priority);
-            shell.print("  ");
 
+            // Priority
+            if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
+            helpers.printU8(info.priority);
+            shell.print("    ");
+
+            // Capabilities
             var cap_buf: [64]u8 = undefined;
             const cap_len = capability.formatCaps(info.caps, &cap_buf);
+            if (terminal.isInitialized()) {
+                if (info.caps == capability.CAP_ALL) {
+                    terminal.setFgColor(theme.text_warning);
+                } else if (info.caps == capability.CAP_NONE or info.caps == capability.CAP_MINIMAL) {
+                    terminal.setFgColor(theme.text_dim);
+                } else {
+                    terminal.setFgColor(theme.text_info);
+                }
+            }
             if (cap_len > 0) {
-                shell.print(cap_buf[0..cap_len]);
+                const show_len = @min(cap_len, 20);
+                shell.print(cap_buf[0..show_len]);
+                var pad: usize = if (20 > show_len) 20 - show_len else 0;
+                while (pad > 0) : (pad -= 1) shell.printChar(' ');
             } else {
-                shell.print("NONE");
+                shell.print("NONE                ");
             }
 
-            // Pad to unveil column
-            var pad: usize = if (cap_len < 20) 20 - cap_len else 1;
-            while (pad > 0) : (pad -= 1) shell.print(" ");
+            shell.print("  ");
 
             // Unveil status
+            if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
             if (unveil.hasTable(info.pid)) {
                 helpers.printU8(unveil.getEntryCount(info.pid));
                 if (unveil.isLocked(info.pid)) {
+                    if (terminal.isInitialized()) terminal.setFgColor(theme.text_warning);
                     shell.print("L");
                 } else {
                     shell.print(" ");
@@ -69,15 +116,20 @@ pub fn cmdPs(_: []const u8) void {
                 shell.print("--");
             }
 
+            if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
             shell.newLine();
             count += 1;
         }
     }
 
-    shell.println("  ----  ----------  ---  -------------------  ------");
-    shell.print("  Total: ");
+    if (terminal.isInitialized()) terminal.setFgColor(theme.border);
+    shell.println("  ───  ──────────  ───  ────────────────────  ──────");
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
+    shell.print("  ");
     helpers.printU32(count);
     shell.println(" processes");
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
+    shell.newLine();
 }
 
 pub fn cmdSpawn(_: []const u8) void {
@@ -144,25 +196,48 @@ pub fn cmdKill(args: []const u8) void {
 }
 
 pub fn cmdSched(_: []const u8) void {
-    shell.printInfoLine("Scheduler Status:");
+    const theme = ui.getTheme();
 
-    shell.print("  Enabled: ");
-    if (scheduler.isEnabled()) {
-        shell.printSuccessLine("YES");
-    } else {
-        shell.printErrorLine("NO");
+    shell.newLine();
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.status_accent);
+        terminal.setBold(true);
     }
+    shell.println("  Scheduler Status");
+    if (terminal.isInitialized()) {
+        terminal.setBold(false);
+        terminal.setFgColor(theme.border);
+    }
+    shell.println("  ─────────────────────────────────────");
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
 
-    shell.print("  Ticks: ");
+    shell.print("  Enabled:     ");
+    if (scheduler.isEnabled()) {
+        if (terminal.isInitialized()) terminal.setFgColor(theme.text_success);
+        shell.println("YES");
+    } else {
+        if (terminal.isInitialized()) terminal.setFgColor(theme.text_error);
+        shell.println("NO");
+    }
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
+
+    shell.print("  Ticks:       ");
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_info);
     helpers.printU64(scheduler.getTicks());
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
     shell.newLine();
 
-    shell.print("  Switches: ");
+    shell.print("  Switches:    ");
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_info);
     helpers.printU64(scheduler.getSwitchCount());
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
     shell.newLine();
 
-    shell.print("  Processes: ");
+    shell.print("  Processes:   ");
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_bright);
     helpers.printU32(process.getCount());
+    if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
+    shell.newLine();
     shell.newLine();
 }
 

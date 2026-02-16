@@ -236,6 +236,14 @@ export fn kernel_main() noreturn {
         serial.writeString("[WARN] RAMFS failed\n");
     }
 
+    // T5.1: Create default directories
+    if (vfs.ensureDir("/home")) {
+        serial.writeString("[OK]   /home created\n");
+    }
+    if (vfs.ensureDir("/tmp")) {
+        serial.writeString("[OK]   /tmp created\n");
+    }
+
     if (devfs.init()) {
         if (vfs.mount("/dev", devfs.getFilesystem())) {
             serial.writeString("[OK]   DevFS mounted\n");

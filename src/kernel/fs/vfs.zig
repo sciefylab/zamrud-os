@@ -943,6 +943,19 @@ pub fn printStatus() void {
     serial.writeString("\n");
 }
 
+pub fn setCwd(new_path: []const u8) void {
+    const len = @min(new_path.len, MAX_PATH);
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        current_dir[i] = new_path[i];
+    }
+    current_dir_len = len;
+}
+
+pub fn ensureDir(dir_path: []const u8) bool {
+    if (resolvePath(dir_path) != null) return true;
+    return createDir(dir_path) != null;
+}
 // =============================================================================
 // Module Tests
 // =============================================================================
