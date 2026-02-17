@@ -654,8 +654,7 @@ pub fn refreshScreen() void {
 // =============================================================================
 
 fn scrollUpInternal() void {
-    addLine();
-
+    // Shift lines up within visible area
     var y: u32 = scroll_top;
     while (y < scroll_bottom) : (y += 1) {
         const src_line = getBufferLine(y + 1);
@@ -666,6 +665,7 @@ fn scrollUpInternal() void {
         }
     }
 
+    // Clear bottom line
     const bottom_line = getBufferLine(scroll_bottom);
     var x: u32 = 0;
     while (x < cols) : (x += 1) {
@@ -681,7 +681,6 @@ fn scrollUpInternal() void {
 
     refreshScreen();
 }
-
 /// T2.2: Scroll down (reverse scroll) within scroll region
 fn scrollDownInternal() void {
     var y: u32 = scroll_bottom;

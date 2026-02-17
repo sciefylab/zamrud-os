@@ -5,7 +5,7 @@
 const shell = @import("../shell.zig");
 const ui = @import("../ui.zig");
 const helpers = @import("helpers.zig");
-const env = @import("../env.zig"); // T4.2
+const env = @import("../env.zig");
 
 const terminal = @import("../../drivers/display/terminal.zig");
 const timer = @import("../../drivers/timer/timer.zig");
@@ -21,13 +21,12 @@ const syscall_mod = @import("../../syscall/syscall.zig");
 const storage = @import("../../drivers/storage/storage.zig");
 
 // =============================================================================
-// T4.1: Colored Help with Categories (T4.2: added env section)
+// T4.1: Colored Help with Categories
 // =============================================================================
 
 pub fn cmdHelp(_: []const u8) void {
     const theme = ui.getTheme();
 
-    shell.newLine();
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.status_accent);
         terminal.setBold(true);
@@ -37,8 +36,7 @@ pub fn cmdHelp(_: []const u8) void {
         terminal.setBold(false);
         terminal.setFgColor(theme.border);
     }
-    shell.println("  ─────────────────────────────────────");
-    shell.newLine();
+    shell.println("  =====================================");
 
     // System
     printCategory("System");
@@ -50,16 +48,14 @@ pub fn cmdHelp(_: []const u8) void {
     printCmd("history", "Command history");
     printCmd("echo <text>", "Print text ($VAR expanded)");
     printCmd("theme <name>", "Change color theme");
-    shell.newLine();
 
-    // T4.2: Environment
+    // Environment
     printCategory("Environment");
     printCmd("set VAR=value", "Set environment variable");
     printCmd("unset VAR", "Remove environment variable");
     printCmd("env", "List all variables");
     printCmd("export VAR=val", "Set and mark for export");
     printCmd("printenv [VAR]", "Print variable value");
-    shell.newLine();
 
     // Filesystem
     printCategory("Filesystem");
@@ -72,7 +68,6 @@ pub fn cmdHelp(_: []const u8) void {
     printCmd("rmdir <dir>", "Remove empty directory");
     printCmd("cat <file>", "Display file contents");
     printCmd("write <f> <t>", "Write text to file");
-    shell.newLine();
 
     // Device & Storage
     printCategory("Device & Storage");
@@ -81,7 +76,6 @@ pub fn cmdHelp(_: []const u8) void {
     printCmd("disk list", "List detected drives");
     printCmd("disk read <lba>", "Read sector at LBA");
     printCmd("disk test", "Test disk driver");
-    shell.newLine();
 
     // Process
     printCategory("Process");
@@ -89,7 +83,6 @@ pub fn cmdHelp(_: []const u8) void {
     printCmd("spawn <name>", "Create new process");
     printCmd("kill <pid>", "Terminate process");
     printCmd("sched", "Scheduler status");
-    shell.newLine();
 
     // Network
     printCategory("Network");
@@ -101,7 +94,6 @@ pub fn cmdHelp(_: []const u8) void {
     printCmd("firewall", "Firewall status");
     printCmd("p2p", "P2P network status");
     printCmd("gateway", "Gateway status");
-    shell.newLine();
 
     // Security
     printCategory("Security & Crypto");
@@ -111,7 +103,6 @@ pub fn cmdHelp(_: []const u8) void {
     printCmd("identity", "Identity management");
     printCmd("boot", "Boot verification");
     printCmd("sysenc", "System encryption");
-    shell.newLine();
 
     // User
     printCategory("User & Session");
@@ -122,33 +113,36 @@ pub fn cmdHelp(_: []const u8) void {
     printCmd("su <user>", "Switch user");
     printCmd("sudo <cmd>", "Run as admin");
     printCmd("user", "User management");
-    shell.newLine();
+
+    // I/O Redirection
+    printCategory("I/O Redirection");
+    printCmd("> file", "Redirect output to file");
+    printCmd(">> file", "Append output to file");
+    printCmd("< file", "Read input from file");
+    printCmd("cmd1 | cmd2", "Pipe output to command");
 
     // Test
     printCategory("Testing");
     printCmd("testall", "Run all tests");
     printCmd("smoke", "Quick smoke test");
-    printCmd("usertest", "User system test");
-    printCmd("sysenctest", "Encryption test");
-    shell.newLine();
 
     // Power
     printCategory("Power");
     printCmd("reboot", "Restart system");
     printCmd("shutdown", "Power off");
     printCmd("exit", "Exit shell");
-    shell.newLine();
 
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.border);
+    }
+    shell.println("  =====================================");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_dim);
     }
-    shell.println("  Tip: Use Tab for completion, arrows for history");
-    shell.println("  Tip: Ctrl+L clear, Ctrl+C cancel, Ctrl+D logout");
-    shell.println("  Tip: Use $VAR in commands, ${VAR} for clarity");
+    shell.println("  Tab=complete  Arrows=history  Ctrl+L=clear  $VAR=expand");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
-    shell.newLine();
 }
 
 fn printCategory(name: []const u8) void {
@@ -173,7 +167,6 @@ fn printCmd(cmd: []const u8, desc: []const u8) void {
     shell.print("    ");
     shell.print(cmd);
 
-    // Pad to 18 chars
     const pad: usize = 18;
     if (cmd.len < pad) {
         var p: usize = 0;
@@ -197,17 +190,14 @@ fn printCmd(cmd: []const u8, desc: []const u8) void {
 // T4.2: Environment Variable Commands
 // =============================================================================
 
-/// set VAR=value  OR  set (list all)
 pub fn cmdSet(args: []const u8) void {
     const trimmed = helpers.trim(args);
 
-    // No args: list all variables
     if (trimmed.len == 0) {
         cmdEnv("");
         return;
     }
 
-    // Parse VAR=value
     if (env.parseAssignment(trimmed)) |assignment| {
         env.setVar(assignment.key, assignment.value) catch |err| {
             switch (err) {
@@ -221,7 +211,6 @@ pub fn cmdSet(args: []const u8) void {
         };
         shell.setLastExitSuccess(true);
     } else {
-        // No '=' — just show the value if it exists
         if (env.getVar(trimmed)) |val| {
             shell.print(trimmed);
             shell.print("=");
@@ -235,7 +224,6 @@ pub fn cmdSet(args: []const u8) void {
     }
 }
 
-/// unset VAR
 pub fn cmdUnset(args: []const u8) void {
     const trimmed = helpers.trim(args);
 
@@ -245,7 +233,6 @@ pub fn cmdUnset(args: []const u8) void {
         return;
     }
 
-    // Check if it exists before unsetting
     if (env.getVar(trimmed) != null) {
         env.unsetVar(trimmed);
         shell.setLastExitSuccess(true);
@@ -257,7 +244,6 @@ pub fn cmdUnset(args: []const u8) void {
     }
 }
 
-/// env — list all environment variables (sorted)
 pub fn cmdEnv(_: []const u8) void {
     const theme = ui.getTheme();
 
@@ -280,7 +266,6 @@ pub fn cmdEnv(_: []const u8) void {
     while (i < count) : (i += 1) {
         const entry = entries[i];
 
-        // Key
         if (terminal.isInitialized()) {
             if (entry.exported) {
                 terminal.setFgColor(theme.status_accent);
@@ -290,18 +275,13 @@ pub fn cmdEnv(_: []const u8) void {
         }
         shell.print(entry.key);
 
-        // =
         if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
         shell.print("=");
 
-        // Value
         if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
         shell.println(entry.value);
     }
 
-    if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
-
-    shell.newLine();
     if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
     shell.print("  ");
     helpers.printUsize(count);
@@ -309,12 +289,10 @@ pub fn cmdEnv(_: []const u8) void {
     if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
 }
 
-/// export VAR=value  OR  export VAR (mark existing as exported)
 pub fn cmdExport(args: []const u8) void {
     const trimmed = helpers.trim(args);
 
     if (trimmed.len == 0) {
-        // List exported variables only
         const theme = ui.getTheme();
         var entries: [64]env.EnvEntry = undefined;
         const count = env.getSortedEntries(&entries);
@@ -345,9 +323,7 @@ pub fn cmdExport(args: []const u8) void {
         return;
     }
 
-    // Check for VAR=value
     if (env.parseAssignment(trimmed)) |assignment| {
-        // Set and export
         env.setVar(assignment.key, assignment.value) catch |err| {
             switch (err) {
                 env.EnvError.TooManyVars => shell.printErrorLine("export: too many variables"),
@@ -361,12 +337,10 @@ pub fn cmdExport(args: []const u8) void {
         env.markExported(assignment.key);
         shell.setLastExitSuccess(true);
     } else {
-        // Just mark as exported (if exists)
         if (env.getVar(trimmed) != null) {
             env.markExported(trimmed);
             shell.setLastExitSuccess(true);
         } else {
-            // Create empty and export
             env.setVar(trimmed, "") catch {
                 shell.printErrorLine("export: cannot create variable");
                 shell.setLastExitSuccess(false);
@@ -378,22 +352,18 @@ pub fn cmdExport(args: []const u8) void {
     }
 }
 
-/// printenv [VAR] — print specific or all variables
 pub fn cmdPrintenv(args: []const u8) void {
     const trimmed = helpers.trim(args);
 
     if (trimmed.len == 0) {
-        // Print all (like env)
         cmdEnv("");
         return;
     }
 
-    // Print specific variable
     if (env.getVar(trimmed)) |val| {
         shell.println(val);
         shell.setLastExitSuccess(true);
     } else {
-        // printenv returns silently with exit code 1 if not found (like Linux)
         shell.setLastExitSuccess(false);
     }
 }
@@ -408,33 +378,25 @@ pub fn cmdEnvTest(_: []const u8) void {
 
     helpers.printTestHeader("ENVIRONMENT VARIABLES - T4.2");
 
-    // Test 1: Built-in variables exist
     helpers.printSubsection("Built-in Variables");
-
     passed += helpers.doTest("$SHELL exists", env.getVar("SHELL") != null, &failed);
     passed += helpers.doTest("$TERM exists", env.getVar("TERM") != null, &failed);
     passed += helpers.doTest("$OS exists", env.getVar("OS") != null, &failed);
     passed += helpers.doTest("$VERSION exists", env.getVar("VERSION") != null, &failed);
 
-    // Test 2: Set and get
     helpers.printSubsection("Set/Get Operations");
-
     env.setVar("TEST_VAR", "hello_world") catch {};
     const got = env.getVar("TEST_VAR");
     passed += helpers.doTest("set/get basic", got != null and helpers.strEql(got.?, "hello_world"), &failed);
 
-    // Test 3: Update existing
     env.setVar("TEST_VAR", "updated_value") catch {};
     const got2 = env.getVar("TEST_VAR");
     passed += helpers.doTest("update existing", got2 != null and helpers.strEql(got2.?, "updated_value"), &failed);
 
-    // Test 4: Unset
     env.unsetVar("TEST_VAR");
     passed += helpers.doTest("unset removes var", env.getVar("TEST_VAR") == null, &failed);
 
-    // Test 5: Invalid key names
     helpers.printSubsection("Key Validation");
-
     const r1 = env.setVar("123BAD", "value");
     passed += helpers.doTest("reject numeric start", r1 == env.EnvError.InvalidKey, &failed);
 
@@ -445,9 +407,7 @@ pub fn cmdEnvTest(_: []const u8) void {
     const r3 = env.setVar("has space", "value");
     passed += helpers.doTest("reject spaces", r3 == env.EnvError.InvalidKey, &failed);
 
-    // Test 6: Variable expansion
     helpers.printSubsection("Variable Expansion");
-
     env.setVar("FOO", "bar") catch {};
     env.setVar("GREETING", "hello") catch {};
 
@@ -469,11 +429,9 @@ pub fn cmdEnvTest(_: []const u8) void {
     const exp6 = env.expandVars("${GREETING}_${FOO}");
     passed += helpers.doTest("multiple ${} expand", helpers.strEql(exp6, "hello_bar"), &failed);
 
-    // Test 7: Single quotes prevent expansion
     const exp7 = env.expandVars("'$FOO'");
     passed += helpers.doTest("single quotes literal", helpers.strEql(exp7, "$FOO"), &failed);
 
-    // Test 8: $? expansion
     shell.setLastExitSuccess(true);
     const exp8 = env.expandVars("$?");
     passed += helpers.doTest("$? returns 0", helpers.strEql(exp8, "0"), &failed);
@@ -483,9 +441,7 @@ pub fn cmdEnvTest(_: []const u8) void {
     passed += helpers.doTest("$? returns 1", helpers.strEql(exp9, "1"), &failed);
     shell.setLastExitSuccess(true);
 
-    // Test 9: Parse assignment
     helpers.printSubsection("Assignment Parsing");
-
     const a1 = env.parseAssignment("KEY=value");
     passed += helpers.doTest("parse KEY=value", a1 != null and helpers.strEql(a1.?.key, "KEY") and helpers.strEql(a1.?.value, "value"), &failed);
 
@@ -498,14 +454,11 @@ pub fn cmdEnvTest(_: []const u8) void {
     const a4 = env.parseAssignment("noequals");
     passed += helpers.doTest("reject no equals", a4 == null, &failed);
 
-    // Test 10: Dynamic $PWD
     helpers.printSubsection("Dynamic Variables");
-
     const pwd_val = env.getVar("PWD");
     const actual_cwd = vfs.getcwd();
     passed += helpers.doTest("$PWD matches cwd", pwd_val != null and helpers.strEql(pwd_val.?, actual_cwd), &failed);
 
-    // Cleanup test vars
     env.unsetVar("FOO");
     env.unsetVar("GREETING");
 
@@ -513,7 +466,7 @@ pub fn cmdEnvTest(_: []const u8) void {
 }
 
 // =============================================================================
-// Other Commands (unchanged logic)
+// Other Commands
 // =============================================================================
 
 pub fn cmdClear(_: []const u8) void {
@@ -523,7 +476,6 @@ pub fn cmdClear(_: []const u8) void {
 pub fn cmdInfo(_: []const u8) void {
     const theme = ui.getTheme();
 
-    shell.newLine();
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.status_accent);
         terminal.setBold(true);
@@ -533,7 +485,7 @@ pub fn cmdInfo(_: []const u8) void {
         terminal.setBold(false);
         terminal.setFgColor(theme.border);
     }
-    shell.println("  ─────────────────────────────────");
+    shell.println("  -----------------------------------");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
@@ -599,12 +551,9 @@ pub fn cmdInfo(_: []const u8) void {
     helpers.printU32(@intCast(syscall_mod.getSyscallCount() & 0xFFFFFFFF));
     shell.println(" executed");
 
-    // T4.2: Show env var count
     shell.print("  Env vars:      ");
     helpers.printUsize(env.getVarCount());
     shell.println(" set");
-
-    shell.newLine();
 }
 
 fn printInfoRow(label: []const u8, value: []const u8) void {
@@ -688,7 +637,7 @@ pub fn cmdMemory(_: []const u8) void {
         terminal.setBold(false);
         terminal.setFgColor(theme.border);
     }
-    shell.println("  ─────────────────────────────────");
+    shell.println("  -----------------------------------");
     if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
 
     shell.print("  Heap size:     ");
@@ -727,7 +676,6 @@ pub fn cmdMemory(_: []const u8) void {
     shell.print("  Free blocks:   ");
     helpers.printUsize(stats.free_blocks);
     shell.newLine();
-    shell.newLine();
 }
 
 pub fn cmdHistory(_: []const u8) void {
@@ -758,7 +706,6 @@ pub fn cmdHistory(_: []const u8) void {
     }
 }
 
-/// T4.2: echo now expands $VARs (expansion happens in shell before dispatch)
 pub fn cmdEcho(args: []const u8) void {
     var i: usize = 0;
     var redirect_pos: ?usize = null;
@@ -821,7 +768,7 @@ pub fn cmdEcho(args: []const u8) void {
 }
 
 // =============================================================================
-// T4.1: Theme Command with all themes
+// Theme Command
 // =============================================================================
 
 pub fn cmdTheme(args: []const u8) void {
@@ -834,7 +781,6 @@ pub fn cmdTheme(args: []const u8) void {
 
     if (ui.getThemeByName(trimmed)) |theme| {
         ui.setTheme(theme);
-        // Re-apply background
         if (terminal.isInitialized()) {
             terminal.setBgColor(ui.BG_FOREST);
         }
