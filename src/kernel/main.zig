@@ -9,6 +9,7 @@ const serial = @import("drivers/serial/serial.zig");
 const framebuffer = @import("drivers/display/framebuffer.zig");
 const terminal = @import("drivers/display/terminal.zig");
 const keyboard = @import("drivers/input/keyboard.zig");
+const mouse = @import("drivers/input/mouse.zig");
 const timer = @import("drivers/timer/timer.zig");
 
 const gdt = @import("arch/x86_64/gdt.zig");
@@ -142,13 +143,28 @@ export fn kernel_main() noreturn {
     idt.init();
     serial.writeString("[OK]   IDT loaded\n");
 
+    // =====================================================================
+    // INPUT DRIVERS: Keyboard FIRST, then Mouse LAST
+    // Keyboard init does controller self-test (0xAA) which resets config.
+    // Mouse init AFTER keyboard ensures aux bits survive.
+    // =====================================================================
+
     serial.writeString("[INIT] Keyboard...\n");
     keyboard.init();
     serial.writeString("[OK]   Keyboard ready\n");
 
+    serial.writeString("[INIT] Mouse...\n");
+    mouse.init();
+    serial.writeString("[OK]   Mouse ready\n");
+
     serial.writeString("[INIT] Timer...\n");
     timer.init();
     serial.writeString("[OK]   Timer ready\n");
+
+    // Final PS/2 controller config fixup AFTER all PS/2 drivers are done
+    // This guarantees bits 0,1 set and bits 4,5 clear regardless of
+    // what keyboard/mouse reset sequences may have done
+    fixupPS2Config();
 
     serial.writeString("[INIT] Interrupts...\n");
     idt.enableInterrupts();
@@ -394,6 +410,9 @@ export fn kernel_main() noreturn {
             framebuffer.getPitch(),
         );
         serial.writeString("[OK]   Terminal ready\n");
+
+        mouse.setScreenSize(framebuffer.getWidth(), framebuffer.getHeight());
+        serial.writeString("[OK]   Mouse screen size set\n");
     }
 
     // === F5.0: ZAM Binary Loader ===
@@ -420,6 +439,79 @@ export fn kernel_main() noreturn {
 
     serial.writeString("\n[HALT] System halted.\n");
     cpu.halt();
+}
+
+// ============================================================================
+// PS/2 Controller Config Fixup
+// Called AFTER all PS/2 drivers (keyboard + mouse) are initialized
+// Ensures controller config byte has correct bits regardless of
+// what reset sequences may have done during individual driver init
+// ============================================================================
+
+fn fixupPS2Config() void {
+    // Read current config
+    ps2WaitWrite();
+    cpu.outb(0x64, 0x20); // Read config byte
+    ps2WaitRead();
+    var cfg = cpu.inb(0x60);
+
+    const old_cfg = cfg;
+
+    // Set required bits
+    cfg |= 0x01; // Bit 0: Keyboard interrupt enable (IRQ1)
+    cfg |= 0x02; // Bit 1: Aux/mouse interrupt enable (IRQ12)
+    cfg &= ~@as(u8, 0x10); // Bit 4: Clear = keyboard clock enabled
+    cfg &= ~@as(u8, 0x20); // Bit 5: Clear = aux clock enabled
+
+    // Only write if changed
+    if (cfg != old_cfg) {
+        ps2WaitWrite();
+        cpu.outb(0x64, 0x60); // Write config byte
+        ps2WaitWrite();
+        cpu.outb(0x60, cfg);
+
+        serial.writeString("[OK]   PS/2 config fixed: 0x");
+        printHexByte(old_cfg);
+        serial.writeString(" -> 0x");
+        printHexByte(cfg);
+        serial.writeString("\n");
+    } else {
+        serial.writeString("[OK]   PS/2 config OK: 0x");
+        printHexByte(cfg);
+        serial.writeString("\n");
+    }
+
+    // Verify
+    ps2WaitWrite();
+    cpu.outb(0x64, 0x20);
+    ps2WaitRead();
+    const verify = cpu.inb(0x60);
+
+    if ((verify & 0x02) == 0 or (verify & 0x20) != 0) {
+        serial.writeString("[WARN] PS/2 config verify FAILED: 0x");
+        printHexByte(verify);
+        serial.writeString("\n");
+    }
+}
+
+fn ps2WaitWrite() void {
+    var timeout: u32 = 100000;
+    while (timeout > 0) : (timeout -= 1) {
+        if ((cpu.inb(0x64) & 0x02) == 0) return;
+    }
+}
+
+fn ps2WaitRead() void {
+    var timeout: u32 = 100000;
+    while (timeout > 0) : (timeout -= 1) {
+        if ((cpu.inb(0x64) & 0x01) != 0) return;
+    }
+}
+
+fn printHexByte(value: u8) void {
+    const hex = "0123456789ABCDEF";
+    serial.writeChar(hex[(value >> 4) & 0x0F]);
+    serial.writeChar(hex[value & 0x0F]);
 }
 
 // ============================================================================

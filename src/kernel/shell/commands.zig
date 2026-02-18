@@ -31,6 +31,7 @@ const encfs_cmd = @import("commands/encfs.zig");
 const enc_int_cmd = @import("commands/enc_int.zig"); // F4.1
 const sys_encrypt_cmd = @import("commands/sys_encrypt.zig"); // F4.2
 const zam_cmd = @import("commands/zam.zig"); // F5.0
+const mouse_cmd = @import("commands/mouse.zig");
 
 // =============================================================================
 // Command Execution
@@ -341,6 +342,11 @@ pub fn execute(input: []const u8) void {
         power_cmd.exit();
     } else if (helpers.strEql(command, "power")) {
         power_cmd.execute(args);
+    }
+
+    // In the dispatch function, add:
+    else if (helpers.strEql(command, "mouse")) {
+        mouse_cmd.execute(args);
     }
     // Test all
     else if (helpers.strEql(command, "testall")) {

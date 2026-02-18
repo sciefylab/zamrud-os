@@ -49,30 +49,30 @@ pub fn remap(offset1: u8, offset2: u8) void {
     cpu.outb(PIC2_DATA, ICW4_8086);
     cpu.ioWait();
 
-    // === FIX: Enable IRQ0 (Timer) AND IRQ1 (Keyboard) ===
-    // 0xFC = 11111100 binary
+    // === Enable IRQ0 (Timer), IRQ1 (Keyboard), IRQ2 (Cascade to slave) ===
+    // 0xF8 = 11111000 binary
     // Bit 0 = 0 → IRQ0 (Timer) ENABLED ✅
     // Bit 1 = 0 → IRQ1 (Keyboard) ENABLED ✅
-    cpu.outb(PIC1_DATA, 0xFC);
-    cpu.outb(PIC2_DATA, 0xFF);
+    // Bit 2 = 0 → IRQ2 (Cascade) ENABLED ✅
+    cpu.outb(PIC1_DATA, 0xF8);
+
+    // === Enable IRQ12 (Mouse) on slave PIC ===
+    // 0xEF = 11101111 binary
+    // Bit 4 = 0 → IRQ12 (Mouse) ENABLED ✅
+    cpu.outb(PIC2_DATA, 0xEF);
 
     // Verify masks
     const new_mask1 = cpu.inb(PIC1_DATA);
     const new_mask2 = cpu.inb(PIC2_DATA);
     serial.writeString("  PIC: New masks - PIC1: 0x");
-    printHex(new_mask1);
-    serial.writeString(" PIC2: 0x");
-    printHex(new_mask2);
-    serial.writeString("\n");
-
-    // Confirm what's enabled
-    serial.writeString("  PIC: IRQ0 (Timer) = ");
-    if ((new_mask1 & 0x01) == 0) {
-        serial.writeString("ENABLED\n");
-    } else {
-        serial.writeString("MASKED\n");
-    }
-    serial.writeString("  PIC: IRQ1 (Keyboard) = ");
+    serial.writeString("   PIC: IRQ0 (Timer) = ");
+    if ((new_mask1 & 0x01) == 0) serial.writeString("ENABLED\n") else serial.writeString("MASKED\n");
+    serial.writeString("   PIC: IRQ1 (Keyboard) = ");
+    if ((new_mask1 & 0x02) == 0) serial.writeString("ENABLED\n") else serial.writeString("MASKED\n");
+    serial.writeString("   PIC: IRQ2 (Cascade) = ");
+    if ((new_mask1 & 0x04) == 0) serial.writeString("ENABLED\n") else serial.writeString("MASKED\n");
+    serial.writeString("   PIC: IRQ12 (Mouse) = ");
+    if ((new_mask2 & 0x10) == 0) serial.writeString("ENABLED\n") else serial.writeString("MASKED\n");
     if ((new_mask1 & 0x02) == 0) {
         serial.writeString("ENABLED\n");
     } else {

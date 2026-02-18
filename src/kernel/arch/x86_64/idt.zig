@@ -6,6 +6,7 @@ const gdt = @import("gdt.zig");
 const serial = @import("../../drivers/serial/serial.zig");
 const pic = @import("pic.zig");
 const keyboard = @import("../../drivers/input/keyboard.zig");
+const mouse = @import("../../drivers/input/mouse.zig");
 const timer = @import("../../drivers/timer/timer.zig");
 const scheduler = @import("../../proc/scheduler.zig");
 const syscall_handler = @import("../../syscall/table.zig");
@@ -162,8 +163,21 @@ fn printHex64(value: u64) void {
 // =============================================================================
 
 export fn handleKeyboard() void {
+    // Guard: check that data is NOT from aux device (mouse)
+    const status = cpu.inb(0x64);
+    if ((status & 0x20) != 0) {
+        // This is aux (mouse) data arriving on IRQ1 — discard it
+        _ = cpu.inb(0x60);
+        pic.sendEoi(1);
+        return;
+    }
     keyboard.handleInterrupt();
     pic.sendEoi(1);
+}
+
+export fn handleMouse() void {
+    mouse.handleInterrupt();
+    pic.sendEoi(12);
 }
 
 export fn handleTimer() void {
@@ -199,10 +213,6 @@ const SyscallFrame = extern struct {
 };
 
 export fn handleSyscall(frame: *SyscallFrame) void {
-    // rax = syscall number
-    // rdi = arg1, rsi = arg2, rdx = arg3
-    // r10 = arg4, r8 = arg5, r9 = arg6
-
     const result = syscall_handler.dispatch(
         frame.rax,
         frame.rdi,
@@ -353,6 +363,43 @@ fn isr_keyboard() callconv(.naked) void {
             "push %%r15\n" ++
             "sub $8, %%rsp\n" ++
             "call handleKeyboard\n" ++
+            "add $8, %%rsp\n" ++
+            "pop %%r15\n" ++
+            "pop %%r14\n" ++
+            "pop %%r13\n" ++
+            "pop %%r12\n" ++
+            "pop %%r11\n" ++
+            "pop %%r10\n" ++
+            "pop %%r9\n" ++
+            "pop %%r8\n" ++
+            "pop %%rbp\n" ++
+            "pop %%rdi\n" ++
+            "pop %%rsi\n" ++
+            "pop %%rbx\n" ++
+            "pop %%rdx\n" ++
+            "pop %%rcx\n" ++
+            "pop %%rax\n" ++
+            "iretq");
+}
+
+fn isr_mouse() callconv(.naked) void {
+    asm volatile ("push %%rax\n" ++
+            "push %%rcx\n" ++
+            "push %%rdx\n" ++
+            "push %%rbx\n" ++
+            "push %%rsi\n" ++
+            "push %%rdi\n" ++
+            "push %%rbp\n" ++
+            "push %%r8\n" ++
+            "push %%r9\n" ++
+            "push %%r10\n" ++
+            "push %%r11\n" ++
+            "push %%r12\n" ++
+            "push %%r13\n" ++
+            "push %%r14\n" ++
+            "push %%r15\n" ++
+            "sub $8, %%rsp\n" ++
+            "call handleMouse\n" ++
             "add $8, %%rsp\n" ++
             "pop %%r15\n" ++
             "pop %%r14\n" ++
@@ -530,6 +577,7 @@ fn setDescriptorUser(vector: u8, handler: *const fn () callconv(.naked) void) vo
 pub fn init() void {
     serial.writeString("  IDT: Setting up...\n");
 
+    // 1. Clear all entries
     for (0..256) |i| {
         idt[i] = .{
             .isr_low = 0,
@@ -540,6 +588,7 @@ pub fn init() void {
         };
     }
 
+    // 2. CPU Exceptions (0-19)
     setDescriptor(0, &isr_divide_error);
     setDescriptor(1, &isr_debug);
     setDescriptor(2, &isr_nmi);
@@ -559,22 +608,41 @@ pub fn init() void {
     setDescriptor(18, &isr_machine_check);
     setDescriptor(19, &isr_simd_fp);
 
+    // 3. Reserved exceptions (20-31)
     for (20..32) |i| {
         setDescriptor(@intCast(i), &isr_generic);
     }
 
+    // 4. Remap PIC (IRQ0-15 → vectors 32-47)
     pic.remap(32, 40);
 
-    setDescriptor(32, &isr_timer);
-    setDescriptor(33, &isr_keyboard);
+    // 5. IRQ handlers — set defaults first, then override specific ones
+    //    IRQ0  = vector 32 (Timer)
+    //    IRQ1  = vector 33 (Keyboard)
+    //    IRQ2  = vector 34 (Cascade)
+    //    IRQ3-11 = vectors 35-43
+    //    IRQ12 = vector 44 (Mouse)
+    //    IRQ13-15 = vectors 45-47
 
-    for (34..48) |i| {
+    // Set ALL hardware IRQs to default first
+    for (32..48) |i| {
         setDescriptor(@intCast(i), &isr_default);
     }
 
+    // Override specific IRQ handlers AFTER the default loop
+    setDescriptor(32, &isr_timer); // IRQ0  - Timer
+    setDescriptor(33, &isr_keyboard); // IRQ1  - Keyboard
+    setDescriptor(44, &isr_mouse); // IRQ12 - Mouse
+
+    serial.writeString("   IDT: Timer    at vector 32 (IRQ0)\n");
+    serial.writeString("   IDT: Keyboard at vector 33 (IRQ1)\n");
+    serial.writeString("   IDT: Mouse    at vector 44 (IRQ12)\n");
+
+    // 6. Syscall handler (INT 0x80) - ring 3 accessible
     setDescriptorUser(0x80, &isr_syscall);
     serial.writeString("  IDT: Syscall handler at INT 0x80\n");
 
+    // 7. Load IDT
     idtr = .{
         .limit = @sizeOf(@TypeOf(idt)) - 1,
         .base = @intFromPtr(&idt[0]),

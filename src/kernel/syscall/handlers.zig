@@ -612,6 +612,7 @@ pub fn sysInputPoll(event_ptr: u64) i64 {
 
     const event: *input_api.InputEvent = @ptrFromInt(event_ptr);
 
+    // Check keyboard first
     if (keyboard.getKey()) |scancode| {
         event.timestamp = timer.getTicks();
         const released = (scancode & 0x80) != 0;
@@ -623,6 +624,42 @@ pub fn sysInputPoll(event_ptr: u64) i64 {
             .keycode = scancodeToKeycode(actual_scancode),
             .modifiers = .{},
             .unicode = scancodeToUnicode(actual_scancode, false),
+        };
+        return 1;
+    }
+
+    // Check mouse
+    const mouse = @import("../drivers/input/mouse.zig");
+    if (mouse.pollEvent()) |me| {
+        event.timestamp = me.timestamp;
+        event.device_id = 1; // mouse = device 1
+
+        // Determine event type
+        const prev_buttons = event.data.mouse.buttons;
+        _ = prev_buttons;
+
+        if (me.dx != 0 or me.dy != 0) {
+            event.event_type = .MouseMove;
+        } else if (me.scroll != 0) {
+            event.event_type = .MouseScroll;
+        } else {
+            // Button change
+            event.event_type = .MouseButtonDown;
+        }
+
+        event.data.mouse = .{
+            .x = me.x,
+            .y = me.y,
+            .delta_x = me.dx,
+            .delta_y = me.dy,
+            .button = if ((me.buttons & 0x01) != 0) .Left else if ((me.buttons & 0x02) != 0) .Right else if ((me.buttons & 0x04) != 0) .Middle else .None,
+            .buttons = .{
+                .left = (me.buttons & 0x01) != 0,
+                .right = (me.buttons & 0x02) != 0,
+                .middle = (me.buttons & 0x04) != 0,
+            },
+            .scroll_y = @intCast(me.scroll),
+            .scroll_x = 0,
         };
         return 1;
     }

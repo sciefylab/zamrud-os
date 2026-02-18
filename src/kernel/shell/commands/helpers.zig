@@ -634,6 +634,24 @@ pub fn printHexTerminal(data: []const u8) void {
 }
 
 // =============================================================================
+// Additional Integer Print Helpers (B2.1)
+// =============================================================================
+
+pub fn printI16(val: i16) void {
+    printI32(@intCast(val));
+}
+
+pub fn printI8(val: i8) void {
+    printI32(@intCast(val));
+}
+
+pub fn printHexU8(val: u8) void {
+    const hex_chars = "0123456789ABCDEF";
+    shell.printChar(hex_chars[(val >> 4) & 0x0F]);
+    shell.printChar(hex_chars[val & 0x0F]);
+}
+
+// =============================================================================
 // IP Address Utilities
 // =============================================================================
 
