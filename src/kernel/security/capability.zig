@@ -2,9 +2,11 @@
 //! Bitwise capability enforcement per-process
 //! Design: ZERO-overhead when all caps granted (bitwise AND check)
 //! E3.6: Wired to violation.zig unified pipeline
+//! SC1: syscallRequiredCap updated to match numbers.zig
 
 const serial = @import("../drivers/serial/serial.zig");
 const violation = @import("violation.zig");
+const numbers = @import("../syscall/numbers.zig");
 
 // =============================================================================
 // Capability Bits - Each bit = one permission
@@ -209,7 +211,7 @@ pub fn shouldKill(pid: u32) bool {
 // =============================================================================
 
 fn recordViolation(pid: u32, attempted_cap: u32, syscall_num: u64, timestamp: u64) void {
-    // Store in local circular buffer (backward compat)
+    // Store in local circular buffer
     violations[violation_head] = .{
         .pid = pid,
         .attempted_cap = attempted_cap,
@@ -222,14 +224,14 @@ fn recordViolation(pid: u32, attempted_cap: u32, syscall_num: u64, timestamp: u6
     if (violation_head >= MAX_VIOLATIONS) violation_head = 0;
     violation_count += 1;
 
-    // Increment per-process counter by cap_table slot
+    // Increment per-process counter
     if (findSlotByPid(pid)) |slot| {
         if (pid_violation_count[slot] < 65535) {
             pid_violation_count[slot] += 1;
         }
     }
 
-    // Log to serial (local)
+    // Log to serial
     serial.writeString("[CAP] VIOLATION: PID=");
     printDec32(pid);
     serial.writeString(" cap=0x");
@@ -242,11 +244,9 @@ fn recordViolation(pid: u32, attempted_cap: u32, syscall_num: u64, timestamp: u6
 
     // === E3.6: Report to unified violation handler ===
     if (violation.isInitialized()) {
-        // Build detail string
         var detail_buf: [48]u8 = [_]u8{0} ** 48;
         const detail_str = buildCapDetail(&detail_buf, attempted_cap, syscall_num);
 
-        // Determine severity based on violation count
         const vcount = getViolationCount(pid);
         const severity: violation.ViolationSeverity = if (vcount >= KILL_THRESHOLD)
             .high
@@ -265,9 +265,7 @@ fn recordViolation(pid: u32, attempted_cap: u32, syscall_num: u64, timestamp: u6
     }
 }
 
-/// Build detail string for violation report
 fn buildCapDetail(buf: []u8, cap: u32, syscall_num: u64) []const u8 {
-    // Format: "cap=0xXXXX sys=NNN"
     var pos: usize = 0;
     const prefix = "cap=0x";
     for (prefix) |c| {
@@ -275,7 +273,6 @@ fn buildCapDetail(buf: []u8, cap: u32, syscall_num: u64) []const u8 {
         buf[pos] = c;
         pos += 1;
     }
-    // Write hex cap (4 hex digits)
     const hex = "0123456789ABCDEF";
     if (pos + 4 <= buf.len) {
         buf[pos] = hex[@intCast((cap >> 12) & 0xF)];
@@ -290,7 +287,6 @@ fn buildCapDetail(buf: []u8, cap: u32, syscall_num: u64) []const u8 {
         buf[pos] = c;
         pos += 1;
     }
-    // Write syscall number as decimal
     if (syscall_num == 0) {
         if (pos < buf.len) {
             buf[pos] = '0';
@@ -390,7 +386,6 @@ pub fn formatCaps(caps: u32, buf: []u8) usize {
         .{ .bit = CAP_MEMORY, .name = "MEM" },
     };
 
-    // Check if ALL caps
     if (caps == CAP_ALL) {
         const all_str = "ALL";
         for (all_str) |c| {
@@ -430,57 +425,121 @@ pub fn formatCaps(caps: u32, buf: []u8) usize {
 }
 
 // =============================================================================
-// Syscall-to-Capability Mapping
+// Syscall-to-Capability Mapping — SC1: Updated to match numbers.zig
 // =============================================================================
 
 pub fn syscallRequiredCap(syscall_num: u64) u32 {
     return switch (syscall_num) {
-        // File read
-        0 => CAP_FS_READ, // SYS_READ
-        79 => CAP_FS_READ, // SYS_GETCWD
+        // --- Core FS read ---
+        numbers.SYS_READ => CAP_FS_READ,
+        numbers.SYS_OPEN => CAP_FS_READ, // open itself needs read; write checked separately
+        numbers.SYS_STAT => CAP_FS_READ,
+        numbers.SYS_FSTAT => CAP_FS_READ,
+        numbers.SYS_LSEEK => CAP_FS_READ,
+        numbers.SYS_GETCWD => CAP_FS_READ,
 
-        // File write
-        1 => CAP_FS_WRITE, // SYS_WRITE (special handled in table.zig)
-        83 => CAP_FS_WRITE, // SYS_MKDIR
-        84 => CAP_FS_WRITE, // SYS_RMDIR
-        87 => CAP_FS_WRITE, // SYS_UNLINK
+        // --- Core FS write ---
+        numbers.SYS_WRITE => CAP_FS_WRITE, // special-cased in table.zig for stdout/stderr
+        numbers.SYS_MKDIR => CAP_FS_WRITE,
+        numbers.SYS_RMDIR => CAP_FS_WRITE,
+        numbers.SYS_UNLINK => CAP_FS_WRITE,
 
-        // File open
-        2 => CAP_FS_READ, // SYS_OPEN
+        // --- FS Extended ---
+        numbers.SYS_FSTAT_PATH => CAP_FS_READ,
+        numbers.SYS_READDIR => CAP_FS_READ,
+        numbers.SYS_RENAME => CAP_FS_WRITE,
+        numbers.SYS_TRUNCATE => CAP_FS_WRITE,
+        numbers.SYS_SEEK => CAP_FS_READ,
 
-        // Network
-        41 => CAP_NET, // SYS_SOCKET
-        42 => CAP_NET, // SYS_CONNECT
-        43 => CAP_NET, // SYS_ACCEPT
-        44 => CAP_NET, // SYS_SENDTO
-        45 => CAP_NET, // SYS_RECVFROM
-        49 => CAP_NET, // SYS_BIND
-        50 => CAP_NET, // SYS_LISTEN
+        // --- Process exec ---
+        numbers.SYS_FORK => CAP_EXEC,
+        numbers.SYS_EXEC => CAP_EXEC,
+        numbers.SYS_SPAWN => CAP_EXEC,
+        numbers.SYS_EXEC_ELF => CAP_EXEC,
+        numbers.SYS_EXEC_ZAM => CAP_EXEC,
 
-        // Process
-        57 => CAP_EXEC, // SYS_FORK
-        59 => CAP_EXEC, // SYS_EXECVE
+        // --- Network ---
+        numbers.SYS_SOCKET => CAP_NET,
+        numbers.SYS_BIND => CAP_NET,
+        numbers.SYS_LISTEN => CAP_NET,
+        numbers.SYS_ACCEPT => CAP_NET,
+        numbers.SYS_CONNECT => CAP_NET,
+        numbers.SYS_SENDTO => CAP_NET,
+        numbers.SYS_RECVFROM => CAP_NET,
 
-        // Graphics
-        0x100 => CAP_GRAPHICS,
-        0x101 => CAP_GRAPHICS,
-        0x102 => CAP_GRAPHICS,
-        0x103 => CAP_GRAPHICS,
-        0x110 => CAP_GRAPHICS,
-        0x111 => CAP_GRAPHICS,
-        0x112 => CAP_GRAPHICS,
+        // --- Graphics ---
+        numbers.SYS_FB_GET_INFO => CAP_GRAPHICS,
+        numbers.SYS_FB_MAP => CAP_GRAPHICS,
+        numbers.SYS_FB_UNMAP => CAP_GRAPHICS,
+        numbers.SYS_FB_FLUSH => CAP_GRAPHICS,
+        numbers.SYS_CURSOR_SET_POS => CAP_GRAPHICS,
+        numbers.SYS_CURSOR_SET_VISIBLE => CAP_GRAPHICS,
+        numbers.SYS_CURSOR_SET_TYPE => CAP_GRAPHICS,
+        numbers.SYS_SCREEN_GET_ORIENTATION => CAP_GRAPHICS,
 
-        // Crypto
-        0x300 => CAP_CRYPTO,
-        0x301 => CAP_CRYPTO,
-        0x302 => CAP_CRYPTO,
+        // --- Crypto ---
+        numbers.SYS_CRYPTO_HASH => CAP_CRYPTO,
+        numbers.SYS_CRYPTO_HMAC => CAP_CRYPTO,
+        numbers.SYS_CRYPTO_RANDOM => CAP_CRYPTO,
+        numbers.SYS_CRYPTO_SIGN => CAP_CRYPTO,
+        numbers.SYS_CRYPTO_VERIFY => CAP_CRYPTO,
+        numbers.SYS_CRYPTO_DERIVE_KEY => CAP_CRYPTO,
 
-        // Chain
-        0x400 => CAP_CHAIN,
-        0x401 => CAP_CHAIN,
+        // --- Chain ---
+        numbers.SYS_CHAIN_STATUS => CAP_CHAIN,
+        numbers.SYS_CHAIN_GET_HEIGHT => CAP_CHAIN,
+        numbers.SYS_CHAIN_GET_BLOCK => CAP_CHAIN,
+        numbers.SYS_CHAIN_SUBMIT_ENTRY => CAP_CHAIN,
+        numbers.SYS_CHAIN_VERIFY_ENTRY => CAP_CHAIN,
 
-        // Always allowed: EXIT, GETPID, GETPPID, GETUID, GETGID,
-        // SCHED_YIELD, NANOSLEEP, CLOSE, CHDIR, INPUT_*, DEBUG_*
+        // --- IPC ---
+        numbers.SYS_MSG_SEND => CAP_IPC,
+        numbers.SYS_MSG_RECV => CAP_IPC,
+        numbers.SYS_PIPE_CREATE => CAP_IPC,
+        numbers.SYS_PIPE_WRITE => CAP_IPC,
+        numbers.SYS_PIPE_READ => CAP_IPC,
+        numbers.SYS_SIG_SEND => CAP_IPC,
+        numbers.SYS_SIG_MASK => CAP_IPC,
+
+        // --- Shared Memory ---
+        numbers.SYS_SHM_CREATE => CAP_MEMORY,
+        numbers.SYS_SHM_ATTACH => CAP_MEMORY,
+        numbers.SYS_SHM_DETACH => CAP_MEMORY,
+        numbers.SYS_SHM_DESTROY => CAP_MEMORY,
+        numbers.SYS_SHM_WRITE => CAP_MEMORY,
+        numbers.SYS_SHM_READ => CAP_MEMORY,
+
+        // --- Encrypted FS ---
+        numbers.SYS_ENC_WRITE => CAP_FS_WRITE | CAP_CRYPTO,
+        numbers.SYS_ENC_READ => CAP_FS_READ | CAP_CRYPTO,
+        numbers.SYS_ENC_SETKEY => CAP_CRYPTO | CAP_ADMIN,
+        numbers.SYS_ENC_STATUS => CAP_CRYPTO,
+
+        // --- User/Auth ---
+        numbers.SYS_SETUID => CAP_ADMIN,
+        numbers.SYS_SETGID => CAP_ADMIN,
+        numbers.SYS_LOGIN => CAP_ADMIN,
+        numbers.SYS_LOGOUT => CAP_ADMIN,
+
+        // --- Capability management ---
+        numbers.SYS_CAP_GET => CAP_NONE, // reading own caps is always allowed
+        numbers.SYS_CAP_CHECK => CAP_NONE,
+        numbers.SYS_CAP_DROP => CAP_NONE, // dropping own caps is always allowed
+
+        // --- Boot (admin only) ---
+        numbers.SYS_BOOT_SET_POLICY => CAP_ADMIN,
+
+        // --- Raw IO ---
+        numbers.SYS_MMAP => CAP_MEMORY,
+        numbers.SYS_MUNMAP => CAP_MEMORY,
+        numbers.SYS_IOCTL => CAP_RAW_IO,
+
+        // --- Always allowed: EXIT, GETPID, GETPPID, GETUID, GETGID,
+        //     GETEUID, GETEGID, SCHED_YIELD, NANOSLEEP, CLOSE,
+        //     CHDIR, INPUT_*, DEBUG_*, GET_TICKS, GET_UPTIME,
+        //     BOOT_STATUS, BOOT_VERIFY, BOOT_GET_HASH, BOOT_GET_POLICY,
+        //     IDENTITY_*, INTEGRITY_*, QUARANTINE_*, MONITOR_*,
+        //     GET_USERNAME, AUTHORITY_* ---
         else => CAP_NONE,
     };
 }
@@ -491,7 +550,7 @@ pub fn checkWrite(pid: u32, fd: u64) bool {
 }
 
 // =============================================================================
-// Print helpers (subtraction only - no division)
+// Print helpers
 // =============================================================================
 
 fn printDec16(val: u16) void {

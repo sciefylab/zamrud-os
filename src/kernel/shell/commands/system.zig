@@ -17,7 +17,7 @@ const user = @import("../../proc/user.zig");
 const crypto = @import("../../crypto/crypto.zig");
 const chain = @import("../../chain/chain.zig");
 const net = @import("../../net/net.zig");
-const syscall_mod = @import("../../syscall/syscall.zig");
+const syscall_mod = @import("../../syscall/table.zig");
 const storage = @import("../../drivers/storage/storage.zig");
 
 // =============================================================================

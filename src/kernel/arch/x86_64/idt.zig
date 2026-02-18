@@ -8,7 +8,7 @@ const pic = @import("pic.zig");
 const keyboard = @import("../../drivers/input/keyboard.zig");
 const timer = @import("../../drivers/timer/timer.zig");
 const scheduler = @import("../../proc/scheduler.zig");
-const syscall_handler = @import("../../syscall/syscall.zig");
+const syscall_handler = @import("../../syscall/table.zig");
 
 const IDTEntry = packed struct {
     isr_low: u16,
@@ -101,12 +101,10 @@ export fn handleStackSegment() void {
 export fn handleGPF() void {
     serial.writeString("\n[#GP:GENERAL_PROTECTION]\n");
 
-    // Read CS to check if we were in Ring 3
     const cs = asm volatile ("mov %%cs, %[result]"
         : [result] "=r" (-> u16),
     );
     serial.writeString("  CS=0x");
-    // print cs value
     const hex = "0123456789ABCDEF";
     serial.writeChar(hex[(cs >> 12) & 0xF]);
     serial.writeChar(hex[(cs >> 8) & 0xF]);
@@ -182,7 +180,6 @@ export fn handleDefault() void {
 // Syscall Handler
 // =============================================================================
 
-/// Syscall frame structure - matches what we push in isr_syscall
 const SyscallFrame = extern struct {
     r15: u64,
     r14: u64,
@@ -201,14 +198,10 @@ const SyscallFrame = extern struct {
     rax: u64,
 };
 
-/// Syscall dispatcher - called from isr_syscall
-/// Returns result in rax
 export fn handleSyscall(frame: *SyscallFrame) void {
-    // Syscall convention (Linux-like):
     // rax = syscall number
     // rdi = arg1, rsi = arg2, rdx = arg3
     // r10 = arg4, r8 = arg5, r9 = arg6
-    // Return value in rax
 
     const result = syscall_handler.dispatch(
         frame.rax,
@@ -217,9 +210,9 @@ export fn handleSyscall(frame: *SyscallFrame) void {
         frame.rdx,
         frame.r10,
         frame.r8,
+        frame.r9,
     );
 
-    // Return value in rax
     frame.rax = @bitCast(result);
 }
 
@@ -308,7 +301,7 @@ fn makeIsrWithError(comptime handler_name: []const u8) fn () callconv(.naked) vo
                     "pop %%rdx\n" ++
                     "pop %%rcx\n" ++
                     "pop %%rax\n" ++
-                    "add $8, %%rsp\n" ++ // Pop error code
+                    "add $8, %%rsp\n" ++
                     "iretq\n");
         }
     }.isr;
@@ -458,9 +451,7 @@ fn isr_default() callconv(.naked) void {
 // =============================================================================
 
 fn isr_syscall() callconv(.naked) void {
-    // Syscall stub - save all registers, call handler with frame pointer
     asm volatile (
-    // Save all registers (order matters for SyscallFrame struct)
         \\push %%rax
         \\push %%rbx
         \\push %%rcx
@@ -477,11 +468,9 @@ fn isr_syscall() callconv(.naked) void {
         \\push %%r14
         \\push %%r15
         //
-        // Call handler with frame pointer (rsp points to SyscallFrame)
         \\mov %%rsp, %%rdi
         \\call handleSyscall
         //
-        // Restore all registers
         \\pop %%r15
         \\pop %%r14
         \\pop %%r13
@@ -498,7 +487,6 @@ fn isr_syscall() callconv(.naked) void {
         \\pop %%rbx
         \\pop %%rax
         //
-        // Return from interrupt
         \\iretq
     );
 }
@@ -521,7 +509,6 @@ fn setDescriptor(vector: u8, handler: *const fn () callconv(.naked) void) void {
     };
 }
 
-/// Set descriptor with DPL=3 (user callable)
 fn setDescriptorUser(vector: u8, handler: *const fn () callconv(.naked) void) void {
     const addr = @intFromPtr(handler);
     idt[vector] = .{
@@ -530,7 +517,7 @@ fn setDescriptorUser(vector: u8, handler: *const fn () callconv(.naked) void) vo
         .isr_high = @truncate(addr >> 32),
         .kernel_cs = gdt.kernel_cs,
         .flags = .{
-            .ring = 3, // DPL=3 allows user mode to call this interrupt
+            .ring = 3,
             .kind = .interrupt,
         },
     };
@@ -543,7 +530,6 @@ fn setDescriptorUser(vector: u8, handler: *const fn () callconv(.naked) void) vo
 pub fn init() void {
     serial.writeString("  IDT: Setting up...\n");
 
-    // Clear IDT
     for (0..256) |i| {
         idt[i] = .{
             .isr_low = 0,
@@ -554,7 +540,6 @@ pub fn init() void {
         };
     }
 
-    // CPU Exceptions (0-31)
     setDescriptor(0, &isr_divide_error);
     setDescriptor(1, &isr_debug);
     setDescriptor(2, &isr_nmi);
@@ -574,27 +559,22 @@ pub fn init() void {
     setDescriptor(18, &isr_machine_check);
     setDescriptor(19, &isr_simd_fp);
 
-    // Fill remaining exceptions with generic handler
     for (20..32) |i| {
         setDescriptor(@intCast(i), &isr_generic);
     }
 
-    // PIC remap
     pic.remap(32, 40);
 
-    // IRQs (32-47)
-    setDescriptor(32, &isr_timer); // IRQ0 - Timer
-    setDescriptor(33, &isr_keyboard); // IRQ1 - Keyboard
+    setDescriptor(32, &isr_timer);
+    setDescriptor(33, &isr_keyboard);
 
     for (34..48) |i| {
         setDescriptor(@intCast(i), &isr_default);
     }
 
-    // Syscall interrupt (INT 0x80) - DPL=3 so user mode can call
     setDescriptorUser(0x80, &isr_syscall);
     serial.writeString("  IDT: Syscall handler at INT 0x80\n");
 
-    // Load IDT
     idtr = .{
         .limit = @sizeOf(@TypeOf(idt)) - 1,
         .base = @intFromPtr(&idt[0]),

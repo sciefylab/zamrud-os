@@ -1,5 +1,5 @@
-//! Zamrud OS - Boot Syscalls
-//! System call handlers for boot verification
+//! Zamrud OS - Boot Syscall Dispatcher
+//! SC1: Fixed types (i64/u64), added dispatch(), matches numbers.zig
 
 const serial = @import("../drivers/serial/serial.zig");
 const boot_verify = @import("../boot/verify.zig");
@@ -7,46 +7,51 @@ const policy = @import("../boot/policy.zig");
 const numbers = @import("numbers.zig");
 
 // =============================================================================
+// Dispatcher — called from table.zig
+// =============================================================================
+
+pub fn dispatch(num: u64, a1: u64) i64 {
+    return switch (num) {
+        numbers.SYS_BOOT_STATUS => sysBootStatus(),
+        numbers.SYS_BOOT_VERIFY => sysBootVerify(),
+        numbers.SYS_BOOT_GET_HASH => sysBootGetHash(a1),
+        numbers.SYS_BOOT_GET_POLICY => sysBootGetPolicy(),
+        numbers.SYS_BOOT_SET_POLICY => sysBootSetPolicy(a1),
+        else => numbers.ENOSYS,
+    };
+}
+
+// =============================================================================
 // Boot Verification
 // =============================================================================
 
-/// SYS_BOOT_STATUS: Get boot verification status
-/// Returns: 1 if verified, 0 if not
-pub fn sysBootStatus() isize {
+fn sysBootStatus() i64 {
     return if (boot_verify.isVerified()) 1 else 0;
 }
 
-/// SYS_BOOT_VERIFY: Re-run boot verification
-/// Returns: Number of checks passed, negative on error
-pub fn sysBootVerify() isize {
+fn sysBootVerify() i64 {
     const result = boot_verify.verify();
     if (result.success) {
         return @intCast(result.checks_passed);
-    } else {
-        return numbers.EBOOT_TAMPERED;
     }
+    return numbers.EBOOT_TAMPERED;
 }
 
-/// SYS_BOOT_GET_HASH: Get kernel hash
-/// Args: rdi = out_buf (32 bytes)
-/// Returns: 32 on success
-pub fn sysBootGetHash(out_buf: usize) isize {
+fn sysBootGetHash(out_buf: u64) i64 {
     if (out_buf == 0) return numbers.EFAULT;
 
-    const hash = boot_verify.getKernelHash();
+    const h = boot_verify.getKernelHash();
     const buf: [*]u8 = @ptrFromInt(out_buf);
 
     var i: usize = 0;
     while (i < 32) : (i += 1) {
-        buf[i] = hash[i];
+        buf[i] = h[i];
     }
 
     return 32;
 }
 
-/// SYS_BOOT_GET_POLICY: Get current security policy level
-/// Returns: 0=permissive, 1=standard, 2=strict, 3=paranoid
-pub fn sysBootGetPolicy() isize {
+fn sysBootGetPolicy() i64 {
     return switch (policy.getLevel()) {
         .permissive => 0,
         .standard => 1,
@@ -55,11 +60,7 @@ pub fn sysBootGetPolicy() isize {
     };
 }
 
-/// SYS_BOOT_SET_POLICY: Set security policy level (requires privilege)
-/// Args: rdi = level (0-3)
-/// Returns: 0 on success
-pub fn sysBootSetPolicy(level: usize) isize {
-    // In production, check caller privileges here
+fn sysBootSetPolicy(level: u64) i64 {
     switch (level) {
         0 => policy.setLevel(.permissive),
         1 => policy.setLevel(.standard),
@@ -67,5 +68,5 @@ pub fn sysBootSetPolicy(level: usize) isize {
         3 => policy.setLevel(.paranoid),
         else => return numbers.EINVAL,
     }
-    return numbers.ESUCCESS;
+    return numbers.SUCCESS;
 }

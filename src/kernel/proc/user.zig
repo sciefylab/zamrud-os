@@ -1,5 +1,6 @@
-//! Zamrud OS - User Mode Support
-//! Provides Ring 3 execution capability with SYSCALL/SYSRET interface
+//! Zamrud OS - User Mode Support (SC1 Final)
+//! Ring 3 execution with SYSCALL/SYSRET interface
+//! Production fix: conditional debug logging
 
 const serial = @import("../drivers/serial/serial.zig");
 const gdt = @import("../arch/x86_64/gdt.zig");
@@ -7,7 +8,14 @@ const heap = @import("../mm/heap.zig");
 const vmm = @import("../mm/vmm.zig");
 const pmm = @import("../mm/pmm.zig");
 const user_mem = @import("../mm/user_mem.zig");
-const syscall_handler = @import("../syscall/syscall.zig");
+const syscall_handler = @import("../syscall/table.zig");
+
+// =============================================================================
+// Debug Configuration
+// =============================================================================
+
+/// Set to true for verbose syscall logging (kills performance at 115200 baud)
+const SYSCALL_DEBUG = false;
 
 // =============================================================================
 // MSR Constants
@@ -53,7 +61,6 @@ var syscall_kernel_stack: [KERNEL_STACK_SIZE]u8 align(16) = undefined;
 pub var syscall_kernel_stack_top: u64 = 0;
 var initialized: bool = false;
 
-// For syscall entry/exit
 export var temp_user_rsp: u64 = 0;
 export var temp_kernel_rsp: u64 = 0;
 
@@ -84,7 +91,7 @@ fn wrmsr(msr: u32, value: u64) void {
 }
 
 // =============================================================================
-// Print Helpers (using subtraction instead of division)
+// Print Helpers
 // =============================================================================
 
 fn printHex64(val: u64) void {
@@ -97,60 +104,42 @@ fn printHex64(val: u64) void {
     }
 }
 
-fn printHex8(val: u8) void {
-    const hex = "0123456789ABCDEF";
-    serial.writeChar(hex[(val >> 4) & 0xF]);
-    serial.writeChar(hex[val & 0xF]);
-}
-
-// Print usize using subtraction (no division needed)
 fn printNum(val: usize) void {
     if (val == 0) {
         serial.writeChar('0');
         return;
     }
-
     var v = val;
     var started = false;
 
-    // Thousands
     if (v >= 1000) {
         var d: u8 = 0;
         while (v >= 1000) : (d += 1) v -= 1000;
         serial.writeChar('0' + d);
         started = true;
     }
-
-    // Hundreds
     if (v >= 100 or started) {
         var d: u8 = 0;
         while (v >= 100) : (d += 1) v -= 100;
         serial.writeChar('0' + d);
         started = true;
     }
-
-    // Tens
     if (v >= 10 or started) {
         var d: u8 = 0;
         while (v >= 10) : (d += 1) v -= 10;
         serial.writeChar('0' + d);
     }
-
-    // Ones
     serial.writeChar('0' + @as(u8, @intCast(v)));
 }
 
-// Print u64 using subtraction
 fn printNumU64(val: u64) void {
     if (val == 0) {
         serial.writeChar('0');
         return;
     }
-
     var v = val;
     var started = false;
 
-    // Handle up to billions for u64
     const divisors = [_]u64{
         10000000000000000000,
         1000000000000000000,
@@ -202,7 +191,7 @@ fn printSyscallName(num: u64) void {
         serial.writeString("SYS_READ");
     } else if (num == 1) {
         serial.writeString("SYS_WRITE");
-    } else if (num == 39) {
+    } else if (num == 20) {
         serial.writeString("SYS_GETPID");
     } else if (num == 60) {
         serial.writeString("SYS_EXIT");
@@ -224,28 +213,32 @@ export fn syscallHandler(
     arg4: u64,
     arg5: u64,
 ) i64 {
-    serial.writeString("[SYSCALL] ");
-    printSyscallName(num);
-    serial.writeString("(");
-    printNumU64(num);
-    serial.writeString(")");
+    if (SYSCALL_DEBUG) {
+        serial.writeString("[SYSCALL] ");
+        printSyscallName(num);
+        serial.writeString("(");
+        printNumU64(num);
+        serial.writeString(")");
 
-    if (num == 1) {
-        serial.writeString(" fd=");
-        printNumU64(arg1);
-        serial.writeString(" len=");
-        printNumU64(arg3);
-    } else if (num == 60) {
-        serial.writeString(" code=");
-        printNumU64(arg1);
+        if (num == 1) {
+            serial.writeString(" fd=");
+            printNumU64(arg1);
+            serial.writeString(" len=");
+            printNumU64(arg3);
+        } else if (num == 60) {
+            serial.writeString(" code=");
+            printNumU64(arg1);
+        }
+        serial.writeString("\n");
     }
-    serial.writeString("\n");
 
-    const result = syscall_handler.dispatch(num, arg1, arg2, arg3, arg4, arg5);
+    const result = syscall_handler.dispatch(num, arg1, arg2, arg3, arg4, arg5, 0);
 
-    serial.writeString("[SYSCALL] -> ");
-    printI64(result);
-    serial.writeString("\n");
+    if (SYSCALL_DEBUG) {
+        serial.writeString("[SYSCALL] -> ");
+        printI64(result);
+        serial.writeString("\n");
+    }
 
     return result;
 }
@@ -439,7 +432,7 @@ fn jumpToUserModeIOPL3(entry_point: u64) noreturn {
 }
 
 // =============================================================================
-// Test: Complete Syscall Test (GETPID → WRITE → EXIT)
+// Test: Complete Syscall Test
 // =============================================================================
 
 pub fn testSyscallFromUser() bool {
@@ -472,7 +465,6 @@ pub fn testSyscallFromUser() bool {
     const code_base = ctx.user_code_base;
     const code_ptr: [*]volatile u8 = @ptrFromInt(code_base);
 
-    // Store messages at fixed offsets
     const msg1 = ">>> Hello from Ring 3! <<<\n";
     const msg2 = ">>> Syscall complete! <<<\n";
     const msg1_offset: usize = 256;
@@ -492,14 +484,14 @@ pub fn testSyscallFromUser() bool {
 
     var i: usize = 0;
 
-    // Syscall 1: SYS_GETPID (39)
+    // SYS_GETPID (20 in numbers.zig)
     code_ptr[i] = 0x48;
     i += 1;
     code_ptr[i] = 0xC7;
     i += 1;
     code_ptr[i] = 0xC0;
     i += 1;
-    code_ptr[i] = 39;
+    code_ptr[i] = 20;
     i += 1;
     code_ptr[i] = 0x00;
     i += 1;
@@ -512,7 +504,7 @@ pub fn testSyscallFromUser() bool {
     code_ptr[i] = 0x05;
     i += 1;
 
-    // Syscall 2: SYS_WRITE msg1
+    // SYS_WRITE msg1
     code_ptr[i] = 0x48;
     i += 1;
     code_ptr[i] = 0xC7;
@@ -584,7 +576,7 @@ pub fn testSyscallFromUser() bool {
     code_ptr[i] = 0x05;
     i += 1;
 
-    // Syscall 3: SYS_WRITE msg2
+    // SYS_WRITE msg2
     code_ptr[i] = 0x48;
     i += 1;
     code_ptr[i] = 0xC7;
@@ -656,7 +648,7 @@ pub fn testSyscallFromUser() bool {
     code_ptr[i] = 0x05;
     i += 1;
 
-    // Syscall 4: SYS_EXIT (60)
+    // SYS_EXIT (60)
     code_ptr[i] = 0x48;
     i += 1;
     code_ptr[i] = 0xC7;

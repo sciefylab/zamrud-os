@@ -1,5 +1,5 @@
 //! Zamrud OS - Main Kernel with Security Integration
-//! Phases A-F4.2 Complete
+//! Phases A-F4.2 + SC1 Complete
 
 const cpu = @import("core/cpu.zig");
 const limine = @import("core/limine.zig");
@@ -28,7 +28,8 @@ const ramfs = @import("fs/ramfs.zig");
 const devfs = @import("fs/devfs.zig");
 const fat32 = @import("fs/fat32.zig");
 
-const syscall_mod = @import("syscall/syscall.zig");
+// SC1: syscall.zig deprecated → table.zig is the unified entry point
+const syscall_mod = @import("syscall/table.zig");
 const shell = @import("shell/shell.zig");
 
 const crypto = @import("crypto/crypto.zig");
@@ -375,8 +376,9 @@ export fn kernel_main() noreturn {
     printLine();
     serial.writeString("[USERSPACE]\n");
 
+    // SC1: table.zig is the unified syscall entry point
     syscall_mod.init();
-    serial.writeString("[OK]   Syscall ready\n");
+    serial.writeString("[OK]   Syscall ready (SC1 unified)\n");
 
     user.init();
     serial.writeString("[OK]   User mode ready\n");
@@ -549,6 +551,15 @@ fn printSystemSummary() void {
         serial.writeString(", dec=");
         printDecSerial(sys_encrypt.getStats().decrypts);
         serial.writeString(")\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+
+    serial.writeString("  Syscall(SC1):");
+    if (syscall_mod.isInitialized()) {
+        serial.writeString("OK (");
+        printDecSerial(syscall_mod.getSyscallCount());
+        serial.writeString(" calls)\n");
     } else {
         serial.writeString("Not initialized\n");
     }

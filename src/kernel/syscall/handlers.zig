@@ -1,35 +1,196 @@
-//! Zamrud OS - System Call Handlers
-//! NOTE: Capability checks are now done in table.zig BEFORE handlers are called.
-//! Handlers remain unchanged - they just execute. Security is enforced at dispatch level.
+//! Zamrud OS - System Call Handlers (SC1 Final)
+//! All handlers use numbers.zig error codes.
+//! Capability checks done in table.zig BEFORE handlers.
+//! Production fixes: fd overflow, user address validation, safe casts.
 
 const serial = @import("../drivers/serial/serial.zig");
 const vfs = @import("../fs/vfs.zig");
+const file_mod = @import("../fs/file.zig");
 const process = @import("../proc/process.zig");
 const timer = @import("../drivers/timer/timer.zig");
 const keyboard = @import("../drivers/input/keyboard.zig");
 const framebuffer = @import("../drivers/display/framebuffer.zig");
-const config = @import("../config.zig");
-
+const numbers = @import("numbers.zig");
 const graphics_api = @import("../api/graphics.zig");
 const input_api = @import("../api/input.zig");
 
 // =============================================================================
-// Error Codes
+// Re-export error codes from numbers.zig
 // =============================================================================
 
-pub const ENOSYS: i64 = -38;
-pub const EBADF: i64 = -9;
-pub const EINVAL: i64 = -22;
-pub const EFAULT: i64 = -14;
-pub const ENOMEM: i64 = -12;
-pub const ENOENT: i64 = -2;
-pub const EACCES: i64 = -13;
-pub const EPERM: i64 = -1;
-pub const ENODEV: i64 = -19;
-pub const EAGAIN: i64 = -11;
+pub const SUCCESS = numbers.SUCCESS;
+pub const EPERM = numbers.EPERM;
+pub const ENOENT = numbers.ENOENT;
+pub const ESRCH = numbers.ESRCH;
+pub const EINTR = numbers.EINTR;
+pub const EIO = numbers.EIO;
+pub const EBADF = numbers.EBADF;
+pub const EAGAIN = numbers.EAGAIN;
+pub const ENOMEM = numbers.ENOMEM;
+pub const EACCES = numbers.EACCES;
+pub const EFAULT = numbers.EFAULT;
+pub const EBUSY = numbers.EBUSY;
+pub const EEXIST = numbers.EEXIST;
+pub const ENODEV = numbers.ENODEV;
+pub const EINVAL = numbers.EINVAL;
+pub const EMFILE = numbers.EMFILE;
+pub const ERANGE = numbers.ERANGE;
+pub const ENOSYS = numbers.ENOSYS;
 
 // =============================================================================
-// Cursor State
+// Per-process File Descriptor Table
+// =============================================================================
+
+const MAX_FDS: usize = 64;
+const MAX_FD_PROCS: usize = 32;
+
+const FdEntry = struct {
+    file: ?*vfs.File = null,
+    in_use: bool = false,
+};
+
+const ProcessFdTable = struct {
+    pid: u32 = 0,
+    active: bool = false,
+    fds: [MAX_FDS]FdEntry = [_]FdEntry{.{}} ** MAX_FDS,
+
+    fn allocFd(self: *ProcessFdTable, file: *vfs.File) ?i32 {
+        var i: usize = 3;
+        while (i < MAX_FDS) : (i += 1) {
+            if (!self.fds[i].in_use) {
+                self.fds[i] = .{ .file = file, .in_use = true };
+                return @intCast(i);
+            }
+        }
+        return null;
+    }
+
+    fn getFile(self: *ProcessFdTable, fd: i32) ?*vfs.File {
+        if (fd < 3 or fd >= MAX_FDS) return null;
+        const idx: usize = @intCast(fd);
+        if (!self.fds[idx].in_use) return null;
+        return self.fds[idx].file;
+    }
+
+    fn closeFd(self: *ProcessFdTable, fd: i32) ?*vfs.File {
+        if (fd < 3 or fd >= MAX_FDS) return null;
+        const idx: usize = @intCast(fd);
+        if (!self.fds[idx].in_use) return null;
+        const file = self.fds[idx].file;
+        self.fds[idx] = .{};
+        return file;
+    }
+};
+
+var fd_tables: [MAX_FD_PROCS]ProcessFdTable = [_]ProcessFdTable{.{}} ** MAX_FD_PROCS;
+
+/// Get fd table for current process. Returns null if no slots available.
+fn getFdTable() ?*ProcessFdTable {
+    const pid = process.getCurrentPid();
+
+    // Find existing table for this PID
+    for (&fd_tables) |*t| {
+        if (t.active and t.pid == pid) return t;
+    }
+
+    // Allocate new table
+    for (&fd_tables) |*t| {
+        if (!t.active) {
+            t.* = .{};
+            t.pid = pid;
+            t.active = true;
+            return t;
+        }
+    }
+
+    // No slots available — do NOT corrupt existing tables
+    return null;
+}
+
+/// Called when process terminates — close all fds
+pub fn cleanupProcessFds(pid: u32) void {
+    for (&fd_tables) |*t| {
+        if (t.active and t.pid == pid) {
+            var i: usize = 3;
+            while (i < MAX_FDS) : (i += 1) {
+                if (t.fds[i].in_use) {
+                    if (t.fds[i].file) |f| {
+                        vfs.close(f);
+                    }
+                    t.fds[i] = .{};
+                }
+            }
+            t.active = false;
+            return;
+        }
+    }
+}
+
+/// Get count of active fd tables (for diagnostics)
+pub fn getActiveFdTableCount() usize {
+    var count: usize = 0;
+    for (&fd_tables) |*t| {
+        if (t.active) count += 1;
+    }
+    return count;
+}
+
+// =============================================================================
+// Pointer & Address Validation
+// =============================================================================
+
+/// Kernel address space starts at 0xFFFF800000000000 (higher half)
+const KERNEL_BASE: u64 = 0xFFFF800000000000;
+
+/// Minimum valid user address
+const USER_MIN: u64 = 0x1000;
+
+/// Maximum valid user address (below kernel)
+const USER_MAX: u64 = 0x00007FFFFFFFFFFF;
+
+/// Check if address is in user space (not kernel memory)
+fn isUserAddress(addr: u64) bool {
+    return addr >= USER_MIN and addr <= USER_MAX;
+}
+
+/// Check if entire range is in user space
+fn isUserRange(addr: u64, len: u64) bool {
+    if (addr == 0) return false;
+    if (len == 0) return true;
+    if (!isUserAddress(addr)) return false;
+    const result = @addWithOverflow(addr, len);
+    if (result[1] != 0) return false; // overflow
+    return isUserAddress(result[0] - 1);
+}
+
+/// Validate pointer and length (kernel-space pointers also accepted for now)
+/// TODO: Strict user-only validation when full MMU separation is active
+fn validatePtr(ptr: u64, len: u64) bool {
+    if (ptr == 0) return false;
+    if (len == 0) return true;
+    const result = @addWithOverflow(ptr, len);
+    return result[1] == 0;
+}
+
+fn ptrToSlice(ptr: u64, len: u64) ?[]const u8 {
+    if (ptr == 0) return null;
+    if (len == 0) return &[_]u8{};
+    const p: [*]const u8 = @ptrFromInt(ptr);
+    return p[0..@intCast(len)];
+}
+
+fn readCString(ptr: u64, max_len: usize) ?[]const u8 {
+    if (ptr == 0) return null;
+    const p: [*]const u8 = @ptrFromInt(ptr);
+    var len: usize = 0;
+    while (len < max_len) : (len += 1) {
+        if (p[len] == 0) return p[0..len];
+    }
+    return null;
+}
+
+// =============================================================================
+// Cursor State (for graphics syscalls)
 // =============================================================================
 
 var cursor_x: i32 = 0;
@@ -38,18 +199,17 @@ var cursor_visible: bool = true;
 var cursor_type: u8 = 0;
 
 // =============================================================================
-// Process Syscalls
+// Core: Process Info
 // =============================================================================
 
 pub fn sysExit(status: u64) noreturn {
-    serial.writeString("[SYSCALL] exit(");
-    printDec(status);
-    serial.writeString(")\n");
-
     const pid = process.getCurrentPid();
+    cleanupProcessFds(pid);
+
     if (pid != 0) {
         _ = process.terminate(pid);
     }
+    _ = status;
 
     while (true) {
         asm volatile ("hlt");
@@ -61,74 +221,150 @@ pub fn sysGetpid() i64 {
 }
 
 pub fn sysGetppid() i64 {
-    return 0;
+    return 0; // TODO SC2: parent tracking
 }
 
 pub fn sysGetuid() i64 {
-    return 0;
+    return @intCast(process.getProcessUid(process.getCurrentPid()));
 }
 
 pub fn sysGetgid() i64 {
-    return 0;
+    return @intCast(process.getProcessGid(process.getCurrentPid()));
+}
+
+pub fn sysGeteuid() i64 {
+    return sysGetuid();
+}
+
+pub fn sysGetegid() i64 {
+    return sysGetgid();
 }
 
 pub fn sysSchedYield() i64 {
-    return 0;
+    const sched = @import("../proc/scheduler.zig");
+    sched.yield();
+    return SUCCESS;
 }
 
 // =============================================================================
-// File Syscalls
+// Core: File I/O — SC1 with fd table + VFS
 // =============================================================================
 
-pub fn sysWrite(fd: u64, buf_ptr: u64, count: u64) i64 {
-    if (buf_ptr == 0) return EFAULT;
+/// SYS_OPEN: open file, return fd
+pub fn sysOpen(path_ptr: u64, flags_raw: u64, mode: u64) i64 {
+    _ = mode;
+
+    const file_path = readCString(path_ptr, 256) orelse return EFAULT;
+    if (file_path.len == 0) return EINVAL;
+
+    var flags = vfs.OpenFlags{};
+
+    const access = flags_raw & 0x3;
+    if (access == 0) {
+        flags.read = true;
+    } else if (access == 1) {
+        flags.write = true;
+    } else {
+        flags.read = true;
+        flags.write = true;
+    }
+
+    if (flags_raw & 0x40 != 0) flags.create = true;
+    if (flags_raw & 0x200 != 0) flags.truncate = true;
+    if (flags_raw & 0x400 != 0) flags.append = true;
+
+    const file = vfs.open(file_path, flags) orelse {
+        return ENOENT;
+    };
+
+    const table = getFdTable() orelse {
+        vfs.close(file);
+        return ENOMEM;
+    };
+
+    const fd = table.allocFd(file) orelse {
+        vfs.close(file);
+        return EMFILE;
+    };
+
+    return fd;
+}
+
+/// SYS_CLOSE: close fd
+pub fn sysClose(fd_raw: u64) i64 {
+    const fd: i32 = @intCast(@min(fd_raw, 0x7FFFFFFF));
+
+    if (fd < 3) return SUCCESS;
+
+    const table = getFdTable() orelse return EBADF;
+    const file = table.closeFd(fd) orelse return EBADF;
+    vfs.close(file);
+    return SUCCESS;
+}
+
+/// SYS_READ: read from fd (stdin or file)
+pub fn sysRead(fd_raw: u64, buf_ptr: u64, count: u64) i64 {
+    if (!validatePtr(buf_ptr, count)) return EFAULT;
     if (count == 0) return 0;
 
+    const fd: i32 = @intCast(@min(fd_raw, 0x7FFFFFFF));
+
+    // fd 0 = stdin
+    if (fd == 0) return 0; // EOF — keyboard via SYS_INPUT_POLL
+
+    // fd 1,2 = stdout/stderr — cannot read
+    if (fd == 1 or fd == 2) return EBADF;
+
+    const table = getFdTable() orelse return EBADF;
+    const file = table.getFile(fd) orelse return EBADF;
+
+    const buf: [*]u8 = @ptrFromInt(buf_ptr);
+    const len = @min(count, 0x100000); // Max 1MB per read
+    const result = vfs.read(file, buf[0..len]);
+
+    return result;
+}
+
+/// SYS_WRITE: write to fd (stdout/stderr or file)
+pub fn sysWrite(fd_raw: u64, buf_ptr: u64, count: u64) i64 {
+    if (!validatePtr(buf_ptr, count)) return EFAULT;
+    if (count == 0) return 0;
+
+    const fd: i32 = @intCast(@min(fd_raw, 0x7FFFFFFF));
+    const ptr: [*]const u8 = @ptrFromInt(buf_ptr);
+    const len = @min(count, 4096);
+
+    // fd 1 = stdout, fd 2 = stderr → serial
     if (fd == 1 or fd == 2) {
-        const buf: [*]const u8 = @ptrFromInt(buf_ptr);
-        const len = @min(count, 4096);
-
-        for (0..len) |i| {
-            serial.writeChar(buf[i]);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            serial.writeChar(ptr[i]);
         }
-
         return @intCast(len);
     }
 
-    return EBADF;
-}
+    // fd 0 = stdin — cannot write
+    if (fd == 0) return EBADF;
 
-pub fn sysRead(fd: u64, buf_ptr: u64, count: u64) i64 {
-    if (buf_ptr == 0) return EFAULT;
-    if (count == 0) return 0;
-    if (fd == 0) return 0;
-    return EBADF;
-}
+    const table = getFdTable() orelse return EBADF;
+    const file = table.getFile(fd) orelse return EBADF;
 
-pub fn sysOpen(path_ptr: u64, flags: u64, mode: u64) i64 {
-    _ = path_ptr;
-    _ = flags;
-    _ = mode;
-    return ENOSYS;
-}
-
-pub fn sysClose(fd: u64) i64 {
-    _ = fd;
-    return 0;
+    const result = vfs.write(file, ptr[0..len]);
+    return result;
 }
 
 // =============================================================================
-// Directory Syscalls
+// Core: Directory Operations
 // =============================================================================
 
 pub fn sysGetcwd(buf_ptr: u64, size: u64) i64 {
-    if (buf_ptr == 0) return EFAULT;
+    if (!validatePtr(buf_ptr, size)) return EFAULT;
     if (size == 0) return EINVAL;
 
     const buf: [*]u8 = @ptrFromInt(buf_ptr);
     const cwd = vfs.getcwd();
 
-    if (cwd.len >= size) return EINVAL;
+    if (cwd.len >= size) return ERANGE;
 
     for (cwd, 0..) |c, i| {
         buf[i] = c;
@@ -139,82 +375,152 @@ pub fn sysGetcwd(buf_ptr: u64, size: u64) i64 {
 }
 
 pub fn sysChdir(path_ptr: u64) i64 {
-    if (path_ptr == 0) return EFAULT;
-
-    const path: [*]const u8 = @ptrFromInt(path_ptr);
-    var len: usize = 0;
-    while (len < 256 and path[len] != 0) : (len += 1) {}
-    if (len == 0) return EINVAL;
-
-    if (vfs.chdir(path[0..len])) return 0;
+    const p = readCString(path_ptr, 256) orelse return EFAULT;
+    if (p.len == 0) return EINVAL;
+    if (vfs.chdir(p)) return SUCCESS;
     return ENOENT;
 }
 
 pub fn sysMkdir(path_ptr: u64, mode: u64) i64 {
     _ = mode;
-    if (path_ptr == 0) return EFAULT;
-
-    const path: [*]const u8 = @ptrFromInt(path_ptr);
-    var len: usize = 0;
-    while (len < 256 and path[len] != 0) : (len += 1) {}
-    if (len == 0) return EINVAL;
-
-    if (vfs.createDir(path[0..len]) != null) return 0;
+    const p = readCString(path_ptr, 256) orelse return EFAULT;
+    if (p.len == 0) return EINVAL;
+    if (vfs.createDir(p) != null) return SUCCESS;
     return EACCES;
 }
 
 pub fn sysRmdir(path_ptr: u64) i64 {
-    if (path_ptr == 0) return EFAULT;
-
-    const path: [*]const u8 = @ptrFromInt(path_ptr);
-    var len: usize = 0;
-    while (len < 256 and path[len] != 0) : (len += 1) {}
-    if (len == 0) return EINVAL;
-
-    if (vfs.removeDir(path[0..len])) return 0;
+    const p = readCString(path_ptr, 256) orelse return EFAULT;
+    if (p.len == 0) return EINVAL;
+    if (vfs.removeDir(p)) return SUCCESS;
     return ENOENT;
 }
 
 pub fn sysUnlink(path_ptr: u64) i64 {
-    if (path_ptr == 0) return EFAULT;
-
-    const path: [*]const u8 = @ptrFromInt(path_ptr);
-    var len: usize = 0;
-    while (len < 256 and path[len] != 0) : (len += 1) {}
-    if (len == 0) return EINVAL;
-
-    if (vfs.removeFile(path[0..len])) return 0;
+    const p = readCString(path_ptr, 256) orelse return EFAULT;
+    if (p.len == 0) return EINVAL;
+    if (vfs.removeFile(p)) return SUCCESS;
     return ENOENT;
 }
 
 // =============================================================================
-// Time Syscalls
+// Core: Time
 // =============================================================================
 
 pub fn sysNanosleep(req_ptr: u64, rem_ptr: u64) i64 {
     _ = rem_ptr;
-    if (req_ptr == 0) return EFAULT;
+    if (!validatePtr(req_ptr, 16)) return EFAULT;
 
     const timespec: *const extern struct { sec: i64, nsec: i64 } = @ptrFromInt(req_ptr);
-    const ms = timespec.sec * 1000 + @divTrunc(timespec.nsec, 1000000);
-    timer.sleep(@intCast(ms));
+    const ms = timespec.sec * 1000 + @divTrunc(timespec.nsec, 1_000_000);
+    timer.sleep(@intCast(@max(0, ms)));
 
-    return 0;
+    return SUCCESS;
 }
 
 // =============================================================================
-// Zamrud Debug Syscalls
+// FS Extended
+// =============================================================================
+
+pub fn sysStat(path_ptr: u64, stat_ptr: u64) i64 {
+    const p = readCString(path_ptr, 256) orelse return EFAULT;
+    if (!validatePtr(stat_ptr, @sizeOf(StatResult))) return EFAULT;
+
+    const inode = vfs.resolvePath(p) orelse return ENOENT;
+    const stat: *StatResult = @ptrFromInt(stat_ptr);
+
+    stat.size = inode.size;
+    stat.file_type = @intFromEnum(inode.file_type);
+    stat.mode = @bitCast(inode.mode);
+    stat.uid = @truncate(inode.uid);
+    stat.gid = @truncate(inode.gid);
+
+    return SUCCESS;
+}
+
+const StatResult = extern struct {
+    size: u64 = 0,
+    file_type: u8 = 0,
+    mode: u16 = 0,
+    uid: u16 = 0,
+    gid: u16 = 0,
+    _pad: [5]u8 = [_]u8{0} ** 5,
+};
+
+pub fn sysReaddir(path_ptr: u64, index: u64, entry_ptr: u64) i64 {
+    const p = readCString(path_ptr, 256) orelse return EFAULT;
+    if (!validatePtr(entry_ptr, @sizeOf(ReaddirResult))) return EFAULT;
+
+    const entry = vfs.readdir(p, @intCast(index)) orelse return 0;
+    const out: *ReaddirResult = @ptrFromInt(entry_ptr);
+
+    // Zero-initialize output
+    out.* = .{};
+
+    const name = entry.getName();
+    var i: usize = 0;
+    while (i < name.len and i < 255) : (i += 1) {
+        out.name[i] = name[i];
+    }
+    out.name[i] = 0;
+    out.name_len = @intCast(i);
+    out.file_type = @intFromEnum(entry.file_type);
+    out.size = entry.getSize();
+
+    return 1;
+}
+
+const ReaddirResult = extern struct {
+    name: [256]u8 = [_]u8{0} ** 256,
+    name_len: u16 = 0,
+    file_type: u8 = 0,
+    _pad: [5]u8 = [_]u8{0} ** 5,
+    size: u64 = 0,
+};
+
+pub fn sysRename(old_ptr: u64, new_ptr: u64) i64 {
+    _ = old_ptr;
+    _ = new_ptr;
+    return ENOSYS; // TODO SC8
+}
+
+pub fn sysTruncate(path_ptr: u64, length: u64) i64 {
+    _ = path_ptr;
+    _ = length;
+    return ENOSYS; // TODO SC8
+}
+
+pub fn sysSeek(fd_raw: u64, offset: u64, whence: u64) i64 {
+    const fd: i32 = @intCast(@min(fd_raw, 0x7FFFFFFF));
+    if (fd < 3) return EBADF;
+
+    const table = getFdTable() orelse return EBADF;
+    const file = table.getFile(fd) orelse return EBADF;
+
+    const w: vfs.SeekWhence = switch (whence) {
+        0 => .Set,
+        1 => .Cur,
+        2 => .End,
+        else => return EINVAL,
+    };
+
+    return vfs.seek(file, @intCast(offset), w);
+}
+
+// =============================================================================
+// Debug Syscalls
 // =============================================================================
 
 pub fn sysDebugPrint(str_ptr: u64, len: u64) i64 {
-    if (str_ptr == 0) return EFAULT;
+    if (!validatePtr(str_ptr, len)) return EFAULT;
 
-    const str: [*]const u8 = @ptrFromInt(str_ptr);
+    const ptr: [*]const u8 = @ptrFromInt(str_ptr);
     const actual_len = @min(len, 4096);
 
     serial.writeString("[USER] ");
-    for (0..actual_len) |i| {
-        serial.writeChar(str[i]);
+    var i: usize = 0;
+    while (i < actual_len) : (i += 1) {
+        serial.writeChar(ptr[i]);
     }
     serial.writeString("\n");
 
@@ -233,7 +539,6 @@ pub fn sysGetUptime() i64 {
 // Graphics Syscalls
 // =============================================================================
 
-/// SYS_FB_GET_INFO
 pub fn sysFbGetInfo(info_ptr: u64) i64 {
     if (info_ptr == 0) return EFAULT;
     if (!framebuffer.isInitialized()) return ENODEV;
@@ -252,79 +557,72 @@ pub fn sysFbGetInfo(info_ptr: u64) i64 {
     info.refresh_rate = 60;
     info.flags = .{};
 
-    return 0;
+    return SUCCESS;
 }
 
-/// SYS_FB_MAP
 pub fn sysFbMap() i64 {
     if (!framebuffer.isInitialized()) return ENODEV;
-    return @intCast(@intFromPtr(framebuffer.getAddress()));
+    // Framebuffer address is in higher-half (bit 63 set).
+    // Return as bitcast to preserve full 64-bit address.
+    const addr: u64 = @intFromPtr(framebuffer.getAddress());
+    return @bitCast(addr);
 }
 
-/// SYS_FB_UNMAP
 pub fn sysFbUnmap(addr: u64) i64 {
     _ = addr;
-    return 0;
+    return SUCCESS;
 }
 
-/// SYS_FB_FLUSH
 pub fn sysFbFlush(rect_ptr: u64) i64 {
-    if (!framebuffer.isInitialized()) return ENODEV;
     _ = rect_ptr;
-    return 0;
+    if (!framebuffer.isInitialized()) return ENODEV;
+    return SUCCESS;
 }
 
-/// SYS_CURSOR_SET_POS
 pub fn sysCursorSetPos(x: u64, y: u64) i64 {
     if (!framebuffer.isInitialized()) return ENODEV;
-
     cursor_x = @intCast(@min(x, @as(u64, framebuffer.getWidth())));
     cursor_y = @intCast(@min(y, @as(u64, framebuffer.getHeight())));
-
-    return 0;
+    return SUCCESS;
 }
 
-/// SYS_CURSOR_SET_VISIBLE
 pub fn sysCursorSetVisible(visible: u64) i64 {
     cursor_visible = visible != 0;
-    return 0;
+    return SUCCESS;
 }
 
-/// SYS_CURSOR_SET_TYPE
 pub fn sysCursorSetType(ctype: u64) i64 {
     cursor_type = @truncate(ctype);
-    return 0;
+    return SUCCESS;
 }
 
-/// SYS_SCREEN_GET_ORIENTATION
 pub fn sysScreenGetOrientation() i64 {
     if (!framebuffer.isInitialized()) return ENODEV;
-
     if (framebuffer.getWidth() > framebuffer.getHeight()) {
         return @intFromEnum(graphics_api.Orientation.Landscape);
     }
     return @intFromEnum(graphics_api.Orientation.Portrait);
 }
-
 // =============================================================================
 // Input Syscalls
 // =============================================================================
 
-/// SYS_INPUT_POLL
 pub fn sysInputPoll(event_ptr: u64) i64 {
     if (event_ptr == 0) return EFAULT;
 
     const event: *input_api.InputEvent = @ptrFromInt(event_ptr);
 
-    if (keyboard.getKey()) |key| {
+    if (keyboard.getKey()) |scancode| {
         event.timestamp = timer.getTicks();
-        event.event_type = if (key.released) .KeyRelease else .KeyPress;
+        const released = (scancode & 0x80) != 0;
+        const actual_scancode: u16 = @intCast(scancode & 0x7F);
+        event.event_type = if (released) .KeyUp else .KeyDown;
         event.device_id = 0;
         event.data.key = .{
-            .scancode = key.scancode,
-            .keycode = scancodeToKeycode(key.scancode),
+            .scancode = actual_scancode,
+            .keycode = scancodeToKeycode(actual_scancode),
             .modifiers = .{},
-            .unicode = scancodeToUnicode(key.scancode, false),
+            .unicode = scancodeToUnicode(actual_scancode, false),
         };
         return 1;
     }
@@ -333,7 +631,6 @@ pub fn sysInputPoll(event_ptr: u64) i64 {
     return 0;
 }
 
-/// SYS_INPUT_WAIT
 pub fn sysInputWait(event_ptr: u64, timeout_ms: u64) i64 {
     if (event_ptr == 0) return EFAULT;
 
@@ -345,31 +642,28 @@ pub fn sysInputWait(event_ptr: u64, timeout_ms: u64) i64 {
         if (result > 0) return result;
 
         if (timeout_ms > 0) {
-            const elapsed = timer.getTicks() - start;
-            if (elapsed >= timeout_ticks) return 0;
+            if (timer.getTicks() - start >= timeout_ticks) return 0;
         }
 
         asm volatile ("hlt");
     }
 }
 
-/// SYS_INPUT_GET_TOUCH_CAPS
 pub fn sysInputGetTouchCaps(caps_ptr: u64) i64 {
     if (caps_ptr == 0) return EFAULT;
 
     const caps: *input_api.TouchCapabilities = @ptrFromInt(caps_ptr);
-
     caps.has_touch = false;
     caps.max_touch_points = 0;
     caps.has_pressure = false;
     caps.has_radius = false;
     caps.has_stylus = false;
 
-    return 0;
+    return SUCCESS;
 }
 
 // =============================================================================
-// Helpers
+// Scancode helpers
 // =============================================================================
 
 fn scancodeToKeycode(scancode: u16) input_api.KeyCode {
@@ -445,7 +739,7 @@ fn scancodeToUnicode(scancode: u16, shift: bool) u32 {
         0x39 => ' ',
         else => null,
     };
-    return if (c) |char| char else 0;
+    return if (c) |ch| ch else 0;
 }
 
 fn printDec(val: u64) void {
@@ -453,17 +747,14 @@ fn printDec(val: u64) void {
         serial.writeChar('0');
         return;
     }
-
     var buf: [20]u8 = undefined;
     var i: usize = 0;
     var v = val;
-
     while (v > 0) {
         buf[i] = @intCast((v % 10) + '0');
         v /= 10;
         i += 1;
     }
-
     while (i > 0) {
         i -= 1;
         serial.writeChar(buf[i]);
