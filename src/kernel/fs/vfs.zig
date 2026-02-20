@@ -1,5 +1,6 @@
 //! Zamrud OS - Virtual File System (VFS)
 //! Main VFS interface with E3.2 Unveil + F3 Permission enforcement
+//! B2.3: Rename, Truncate, Ftruncate operations
 
 const serial = @import("../drivers/serial/serial.zig");
 const heap = @import("../mm/heap.zig");
@@ -146,26 +147,20 @@ pub fn init() void {
 // E3.2: Unveil Check Helper
 // =============================================================================
 
-/// Check unveil permission for current process
-/// Returns true if access allowed
 fn checkUnveil(file_path: []const u8, perm: u8) bool {
     if (!unveil.isInitialized()) return true;
-
     const pid = process.getCurrentPid();
     return unveil.checkAndEnforce(pid, file_path, perm);
 }
 
-/// Check unveil for read operations
 fn checkUnveilRead(file_path: []const u8) bool {
     return checkUnveil(file_path, unveil.PERM_READ);
 }
 
-/// Check unveil for write operations
 fn checkUnveilWrite(file_path: []const u8) bool {
     return checkUnveil(file_path, unveil.PERM_WRITE);
 }
 
-/// Check unveil for create operations (mkdir, touch)
 fn checkUnveilCreate(file_path: []const u8) bool {
     return checkUnveil(file_path, unveil.PERM_CREATE);
 }
@@ -174,12 +169,9 @@ fn checkUnveilCreate(file_path: []const u8) bool {
 // F3: File Permission Check Helper
 // =============================================================================
 
-/// Check Unix-style file permissions for current user on an inode
-/// Called AFTER unveil check, BEFORE actual I/O
 fn checkFilePerm(inode: *Inode, file_path: []const u8, perm: users.PermCheck) bool {
-    if (!users.isInitialized()) return true; // Not initialized = allow all
-    if (!users.isLoggedIn()) return true; // No session = kernel mode, allow all
-
+    if (!users.isInitialized()) return true;
+    if (!users.isLoggedIn()) return true;
     return users.checkAndEnforceFilePermission(
         file_path,
         inode.uid,
@@ -189,7 +181,6 @@ fn checkFilePerm(inode: *Inode, file_path: []const u8, perm: users.PermCheck) bo
     );
 }
 
-/// Set owner on newly created inode to current user
 fn setInodeOwner(inode: *Inode) void {
     if (users.isInitialized() and users.isLoggedIn()) {
         inode.uid = users.getCurrentUid();
@@ -316,25 +307,19 @@ pub fn open(file_path: []const u8, flags: OpenFlags) ?*File {
     if (!initialized) return null;
     if (root_fs == null) return null;
 
-    // E3.2: Unveil check
     if (flags.read and !checkUnveilRead(file_path)) return null;
     if (flags.write and !checkUnveilWrite(file_path)) return null;
 
     const inode = resolvePath(file_path) orelse {
         if (flags.create) {
-            // E3.2: Need create permission
             if (!checkUnveilCreate(file_path)) return null;
             const new_inode = createFileInternal(file_path) orelse return null;
-
-            // F3: Set owner to current user
             setInodeOwner(new_inode);
-
             return openInode(new_inode, file_path, flags);
         }
         return null;
     };
 
-    // F3: Permission check
     if (flags.read and !checkFilePerm(inode, file_path, .read)) return null;
     if (flags.write and !checkFilePerm(inode, file_path, .write)) return null;
 
@@ -384,7 +369,7 @@ fn openInode(inode: *Inode, file_path: []const u8, flags: OpenFlags) ?*File {
     return file;
 }
 
-fn isPathUnderMount(file_path: []const u8, mp: []const u8) bool {
+pub fn isPathUnderMount(file_path: []const u8, mp: []const u8) bool {
     if (file_path.len < mp.len) return false;
     var i: usize = 0;
     while (i < mp.len) : (i += 1) {
@@ -473,10 +458,8 @@ pub fn seek(file: *File, offset: i64, whence: SeekWhence) i64 {
 pub fn readdir(dir_path: []const u8, index: usize) ?*DirEntry {
     if (!initialized) return null;
 
-    // E3.2: Unveil check for directory read
     if (!checkUnveilRead(dir_path)) return null;
 
-    // Handle /disk path
     if (dir_path.len >= 5 and
         dir_path[0] == '/' and
         dir_path[1] == 'd' and
@@ -497,7 +480,6 @@ pub fn readdir(dir_path: []const u8, index: usize) ?*DirEntry {
     const inode = resolvePath(dir_path) orelse return null;
     if (inode.file_type != .Directory) return null;
 
-    // F3: Permission check for directory read
     if (!checkFilePerm(inode, dir_path, .read)) return null;
 
     if (inode.ops) |ops| {
@@ -524,7 +506,6 @@ pub fn chdir(dir_path: []const u8) bool {
     if (!initialized) return false;
     if (dir_path.len == 0) return false;
 
-    // E3.2: Unveil check for directory access
     if (!checkUnveilRead(dir_path)) return false;
 
     if (dir_path.len == 1 and dir_path[0] == '/') {
@@ -578,7 +559,6 @@ pub fn chdir(dir_path: []const u8) bool {
     const inode = resolvePath(dir_path) orelse return false;
     if (inode.file_type != .Directory) return false;
 
-    // F3: Check read+exec permission on target directory
     if (!checkFilePerm(inode, dir_path, .exec)) return false;
 
     if (dir_path[0] == '/') {
@@ -781,7 +761,6 @@ fn getParentInode(file_path: []const u8) ?*Inode {
     return resolvePath(parent_path);
 }
 
-/// Internal createFile without unveil/perm check (used by open with create flag)
 fn createFileInternal(file_path: []const u8) ?*Inode {
     if (root_fs == null) return null;
 
@@ -799,12 +778,9 @@ fn createFileInternal(file_path: []const u8) ?*Inode {
     return null;
 }
 
-/// Public createFile with E3.2 unveil + F3 permission check
 pub fn createFile(file_path: []const u8) ?*Inode {
-    // E3.2: Unveil check for create
     if (!checkUnveilCreate(file_path)) return null;
 
-    // F3: Check write permission on parent directory
     const parent = getParentInode(file_path);
     if (parent != null) {
         const parent_path = path.dirname(file_path);
@@ -812,8 +788,6 @@ pub fn createFile(file_path: []const u8) ?*Inode {
     }
 
     const inode = createFileInternal(file_path) orelse return null;
-
-    // F3: Set owner
     setInodeOwner(inode);
 
     return inode;
@@ -822,7 +796,6 @@ pub fn createFile(file_path: []const u8) ?*Inode {
 pub fn createDir(dir_path: []const u8) ?*Inode {
     if (root_fs == null) return null;
 
-    // E3.2: Unveil check for create
     if (!checkUnveilCreate(dir_path)) return null;
 
     const dir_name = path.basename(dir_path);
@@ -830,17 +803,13 @@ pub fn createDir(dir_path: []const u8) ?*Inode {
 
     const parent_inode = getParentInode(dir_path) orelse return null;
 
-    // F3: Check write permission on parent directory
     const parent_path = path.dirname(dir_path);
     if (!checkFilePerm(parent_inode, parent_path, .write)) return null;
 
     if (parent_inode.ops) |ops| {
         if (ops.mkdir) |mkdir_fn| {
             const new_dir = mkdir_fn(parent_inode, dir_name, FileMode.directory()) orelse return null;
-
-            // F3: Set owner
             setInodeOwner(new_dir);
-
             return new_dir;
         }
     }
@@ -851,10 +820,8 @@ pub fn createDir(dir_path: []const u8) ?*Inode {
 pub fn removeFile(file_path: []const u8) bool {
     if (root_fs == null) return false;
 
-    // E3.2: Unveil check for write (delete = write)
     if (!checkUnveilWrite(file_path)) return false;
 
-    // F3: Check write permission on the file
     const inode = resolvePath(file_path) orelse return false;
     if (!checkFilePerm(inode, file_path, .write)) return false;
 
@@ -863,7 +830,6 @@ pub fn removeFile(file_path: []const u8) bool {
 
     const parent_inode = getParentInode(file_path) orelse return false;
 
-    // F3: Also need write permission on parent directory
     const parent_path = path.dirname(file_path);
     if (!checkFilePerm(parent_inode, parent_path, .write)) return false;
 
@@ -879,10 +845,8 @@ pub fn removeFile(file_path: []const u8) bool {
 pub fn removeDir(dir_path: []const u8) bool {
     if (root_fs == null) return false;
 
-    // E3.2: Unveil check for write (delete = write)
     if (!checkUnveilWrite(dir_path)) return false;
 
-    // F3: Check write permission
     const inode = resolvePath(dir_path) orelse return false;
     if (!checkFilePerm(inode, dir_path, .write)) return false;
 
@@ -891,7 +855,6 @@ pub fn removeDir(dir_path: []const u8) bool {
 
     const parent_inode = getParentInode(dir_path) orelse return false;
 
-    // F3: Need write permission on parent
     const parent_path = path.dirname(dir_path);
     if (!checkFilePerm(parent_inode, parent_path, .write)) return false;
 
@@ -903,6 +866,219 @@ pub fn removeDir(dir_path: []const u8) bool {
 
     return false;
 }
+
+// =============================================================================
+// B2.3: Rename Operation (with E3.2 unveil + F3 permission checks)
+// =============================================================================
+
+pub fn rename(old_path: []const u8, new_path: []const u8) bool {
+    if (root_fs == null) return false;
+    if (!initialized) return false;
+
+    // E3.2: Unveil check — need write on both paths
+    if (!checkUnveilWrite(old_path)) return false;
+    if (!checkUnveilCreate(new_path)) return false;
+
+    // Check source exists
+    const old_inode = resolvePath(old_path) orelse return false;
+
+    // F3: Need write permission on source
+    if (!checkFilePerm(old_inode, old_path, .write)) return false;
+
+    // Check destination doesn't exist
+    if (resolvePath(new_path) != null) return false;
+
+    // Both paths must be on the same mount point
+    const old_on_disk = isPathUnderMount(old_path, "/disk");
+    const new_on_disk = isPathUnderMount(new_path, "/disk");
+
+    if (old_on_disk and new_on_disk) {
+        // FAT32 rename via direct driver
+        const fat32 = @import("fat32.zig");
+        const old_name = path.basename(old_path);
+        const new_name = path.basename(new_path);
+        if (old_name.len == 0 or new_name.len == 0) return false;
+        return fat32.renameFile(old_name, new_name);
+    }
+
+    if (old_on_disk != new_on_disk) {
+        return false; // Cross-mount rename not supported
+    }
+
+    // Check if cwd is /disk and paths are relative
+    const cwd = getcwd();
+    if (isPathUnderMount(cwd, "/disk") and old_path.len > 0 and old_path[0] != '/' and new_path.len > 0 and new_path[0] != '/') {
+        const fat32 = @import("fat32.zig");
+        return fat32.renameFile(old_path, new_path);
+    }
+
+    // Same filesystem — use InodeOps.rename if available
+    const old_parent = getParentInode(old_path) orelse return false;
+    const new_parent = getParentInode(new_path) orelse return false;
+
+    // F3: Need write on parent directories
+    const old_parent_path = path.dirname(old_path);
+    if (!checkFilePerm(old_parent, old_parent_path, .write)) return false;
+    const new_parent_path = path.dirname(new_path);
+    if (!checkFilePerm(new_parent, new_parent_path, .write)) return false;
+
+    const old_name = path.basename(old_path);
+    const new_name = path.basename(new_path);
+    if (old_name.len == 0 or new_name.len == 0) return false;
+
+    if (old_parent.ops) |ops| {
+        if (ops.rename) |rename_fn| {
+            return rename_fn(old_parent, old_name, new_parent, new_name);
+        }
+    }
+
+    return false;
+}
+
+// =============================================================================
+// B2.3: Truncate Operation (with E3.2 unveil + F3 permission checks)
+// =============================================================================
+
+pub fn truncate(file_path: []const u8, length: u64) bool {
+    if (root_fs == null) return false;
+    if (!initialized) return false;
+
+    // E3.2: Unveil check — need write permission
+    if (!checkUnveilWrite(file_path)) return false;
+
+    // FAT32 path — check absolute /disk path
+    if (isPathUnderMount(file_path, "/disk")) {
+        const fat32 = @import("fat32.zig");
+        const fname = path.basename(file_path);
+        if (fname.len == 0) return false;
+
+        // F3: check via inode if resolvable
+        const inode_check = resolvePath(file_path);
+        if (inode_check) |ic| {
+            if (ic.file_type != .Regular) return false;
+            if (!checkFilePerm(ic, file_path, .write)) return false;
+        }
+
+        return fat32.truncateFile(fname, @intCast(@min(length, 0xFFFFFFFF)));
+    }
+
+    // Check if cwd is /disk and path is relative
+    const cwd = getcwd();
+    if (isPathUnderMount(cwd, "/disk") and file_path.len > 0 and file_path[0] != '/') {
+        const fat32 = @import("fat32.zig");
+        return fat32.truncateFile(file_path, @intCast(@min(length, 0xFFFFFFFF)));
+    }
+
+    // RAMFS path
+    const inode_result = resolvePath(file_path) orelse return false;
+    if (inode_result.file_type != .Regular) return false;
+
+    // F3: Need write permission
+    if (!checkFilePerm(inode_result, file_path, .write)) return false;
+
+    // Use ramfs public helper
+    const ramfs = @import("ramfs.zig");
+    const entry = ramfs.getEntryFromInodePublic(inode_result);
+    if (entry) |e| {
+        return ramfsTruncateEntry(e, length);
+    }
+
+    return false;
+}
+
+/// Truncate by open file descriptor
+pub fn ftruncate(file: *File, length: u64) bool {
+    if (file.inode.file_type != .Regular) return false;
+    if (!file.flags.write) return false;
+
+    // Try RAMFS first
+    const ramfs = @import("ramfs.zig");
+    const entry = ramfs.getEntryFromInodePublic(file.inode);
+    if (entry) |e| {
+        if (ramfsTruncateEntry(e, length)) {
+            if (file.position > length) {
+                file.position = length;
+            }
+            return true;
+        }
+    }
+
+    // Try FAT32
+    const fat32 = @import("fat32.zig");
+    const name = fat32.getInodeName(file.inode);
+    if (name) |n| {
+        if (fat32.truncateFile(n, @intCast(@min(length, 0xFFFFFFFF)))) {
+            file.inode.size = length;
+            if (file.position > length) {
+                file.position = length;
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/// Internal helper: truncate a RAMFS entry to given length
+fn ramfsTruncateEntry(e: *@import("ramfs.zig").RamfsEntry, length: u64) bool {
+    const max_size: u64 = 1024 * 1024;
+    const new_len = @min(length, max_size);
+    const needed: usize = @intCast(new_len);
+
+    if (new_len <= e.data_size) {
+        // Shrink
+        e.data_size = needed;
+        e.inode.size = new_len;
+        return true;
+    }
+
+    // Extend
+    if (needed <= e.data_capacity) {
+        // Zero fill from old size to new size
+        if (e.data) |data| {
+            var i: usize = e.data_size;
+            while (i < needed) : (i += 1) {
+                data[i] = 0;
+            }
+        }
+        e.data_size = needed;
+        e.inode.size = new_len;
+        return true;
+    }
+
+    // Need realloc
+    const BLOCK_SIZE: usize = 4096;
+    const new_capacity = ((needed / BLOCK_SIZE) + 1) * BLOCK_SIZE;
+    if (new_capacity > max_size) return false;
+
+    const new_data = heap.kmalloc(new_capacity) orelse return false;
+    const new_ptr: [*]u8 = @ptrCast(@alignCast(new_data));
+
+    // Copy old data
+    if (e.data) |old_data| {
+        var i: usize = 0;
+        while (i < e.data_size) : (i += 1) {
+            new_ptr[i] = old_data[i];
+        }
+        heap.kfree(@ptrCast(old_data));
+    }
+
+    // Zero new space
+    var j: usize = e.data_size;
+    while (j < needed) : (j += 1) {
+        new_ptr[j] = 0;
+    }
+
+    e.data = new_ptr;
+    e.data_capacity = new_capacity;
+    e.data_size = needed;
+    e.inode.size = new_len;
+    return true;
+}
+
+// =============================================================================
+// Query Operations
+// =============================================================================
 
 pub fn exists(check_path: []const u8) bool {
     return resolvePath(check_path) != null;
@@ -956,6 +1132,7 @@ pub fn ensureDir(dir_path: []const u8) bool {
     if (resolvePath(dir_path) != null) return true;
     return createDir(dir_path) != null;
 }
+
 // =============================================================================
 // Module Tests
 // =============================================================================

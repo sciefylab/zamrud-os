@@ -1,6 +1,8 @@
 //! Zamrud OS - Filesystem Commands
 //! ls, cd, pwd, mkdir, touch, rm, rmdir, cat, write
+//! B2.3: mv (rename), cp (copy), truncate commands
 //! T4.1: Colored ls output
+//! B2.2: Fixed relative path handling in /disk
 
 const shell = @import("../shell.zig");
 const helpers = @import("helpers.zig");
@@ -19,7 +21,7 @@ pub fn cmdLs(args: []const u8) void {
     const dir_path = if (args.len > 0) helpers.trim(args) else vfs.getcwd();
     const theme = ui.getTheme();
 
-    // Special case: "ls /disk"
+    // Special case: "ls /disk" or cwd is /disk
     if (isDiskPath(dir_path)) {
         listDiskFiles();
         return;
@@ -96,7 +98,6 @@ pub fn cmdLs(args: []const u8) void {
         shell.println("  (empty)");
         if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
     } else {
-        // Summary line
         if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
         shell.print("  ");
         helpers.printUsize(count);
@@ -114,7 +115,6 @@ pub fn cmdLs(args: []const u8) void {
 // =============================================================================
 
 pub fn cmdCd(args: []const u8) void {
-    // cd tanpa args = go home
     if (args.len == 0) {
         const shell_mod = @import("../shell.zig");
         const home = shell_mod.getHomeDir();
@@ -126,7 +126,6 @@ pub fn cmdCd(args: []const u8) void {
         return;
     }
 
-    // cd ~ atau cd ~/path
     if (args[0] == '~') {
         const shell_mod = @import("../shell.zig");
         const home = shell_mod.getHomeDir();
@@ -169,7 +168,6 @@ pub fn cmdCd(args: []const u8) void {
         }
     }
 
-    // Normal cd
     const target = args;
     if (!vfs.chdir(target)) {
         shell.printError("cd: cannot change to '");
@@ -194,6 +192,32 @@ pub fn cmdMkdir(args: []const u8) void {
         return;
     }
 
+    if (isDiskFilePath(name)) {
+        const fname = extractDiskFilename(name);
+        if (fat32.createDirectory(fname)) {
+            shell.printSuccess("Created directory on disk: ");
+            shell.println(fname);
+        } else {
+            shell.printError("mkdir: cannot create '");
+            shell.print(name);
+            shell.printErrorLine("'");
+        }
+        return;
+    }
+
+    const cwd = vfs.getcwd();
+    if (isDiskPath(cwd)) {
+        if (fat32.createDirectory(name)) {
+            shell.printSuccess("Created directory on disk: ");
+            shell.println(name);
+        } else {
+            shell.printError("mkdir: cannot create '");
+            shell.print(name);
+            shell.printErrorLine("'");
+        }
+        return;
+    }
+
     if (vfs.createDir(name) != null) {
         shell.printSuccess("Created directory: ");
         shell.println(name);
@@ -208,6 +232,42 @@ pub fn cmdTouch(args: []const u8) void {
     const name = helpers.trim(args);
     if (name.len == 0) {
         shell.printErrorLine("touch: missing operand");
+        return;
+    }
+
+    if (isDiskFilePath(name)) {
+        const fname = extractDiskFilename(name);
+        if (fat32.findInRoot(fname) != null) {
+            shell.printWarning("File already exists: ");
+            shell.println(fname);
+            return;
+        }
+        if (fat32.createFile(fname, "")) {
+            shell.printSuccess("Created file on disk: ");
+            shell.println(fname);
+        } else {
+            shell.printError("touch: cannot create '");
+            shell.print(name);
+            shell.printErrorLine("'");
+        }
+        return;
+    }
+
+    const cwd = vfs.getcwd();
+    if (isDiskPath(cwd)) {
+        if (fat32.findInRoot(name) != null) {
+            shell.printWarning("File already exists: ");
+            shell.println(name);
+            return;
+        }
+        if (fat32.createFile(name, "")) {
+            shell.printSuccess("Created file on disk: ");
+            shell.println(name);
+        } else {
+            shell.printError("touch: cannot create '");
+            shell.print(name);
+            shell.printErrorLine("'");
+        }
         return;
     }
 
@@ -247,6 +307,19 @@ pub fn cmdRm(args: []const u8) void {
         return;
     }
 
+    const cwd = vfs.getcwd();
+    if (isDiskPath(cwd)) {
+        if (fat32.deleteFile(name)) {
+            shell.printSuccess("Removed from disk: ");
+            shell.println(name);
+        } else {
+            shell.printError("rm: cannot remove '");
+            shell.print(name);
+            shell.printErrorLine("'");
+        }
+        return;
+    }
+
     if (vfs.removeFile(name)) {
         shell.printSuccess("Removed: ");
         shell.println(name);
@@ -261,6 +334,32 @@ pub fn cmdRmdir(args: []const u8) void {
     const name = helpers.trim(args);
     if (name.len == 0) {
         shell.printErrorLine("rmdir: missing operand");
+        return;
+    }
+
+    if (isDiskFilePath(name)) {
+        const fname = extractDiskFilename(name);
+        if (fname.len > 0 and fat32.deleteDirectory(fname)) {
+            shell.printSuccess("Removed directory from disk: ");
+            shell.println(fname);
+        } else {
+            shell.printError("rmdir: cannot remove '");
+            shell.print(name);
+            shell.printErrorLine("' (not empty or not found)");
+        }
+        return;
+    }
+
+    const cwd = vfs.getcwd();
+    if (isDiskPath(cwd)) {
+        if (fat32.deleteDirectory(name)) {
+            shell.printSuccess("Removed directory from disk: ");
+            shell.println(name);
+        } else {
+            shell.printError("rmdir: cannot remove '");
+            shell.print(name);
+            shell.printErrorLine("' (not empty or not found)");
+        }
         return;
     }
 
@@ -287,7 +386,13 @@ pub fn cmdCat(args: []const u8) void {
         return;
     }
 
-    var flags = vfs.OpenFlags.O_RDONLY;
+    const cwd = vfs.getcwd();
+    if (isDiskPath(cwd)) {
+        catDiskFile(name);
+        return;
+    }
+
+    var flags = vfs.OpenFlags{};
     flags.read = true;
     const file = vfs.open(name, flags);
     if (file == null) {
@@ -363,6 +468,12 @@ pub fn cmdWrite(args: []const u8) void {
         return;
     }
 
+    const cwd = vfs.getcwd();
+    if (isDiskPath(cwd)) {
+        writeDiskFile(filename, content);
+        return;
+    }
+
     if (!vfs.exists(filename)) {
         if (vfs.createFile(filename) == null) {
             shell.printErrorLine("write: cannot create file");
@@ -370,7 +481,7 @@ pub fn cmdWrite(args: []const u8) void {
         }
     }
 
-    var flags = vfs.OpenFlags.O_WRONLY;
+    var flags = vfs.OpenFlags{};
     flags.write = true;
     flags.truncate = true;
     const file = vfs.open(filename, flags);
@@ -390,6 +501,316 @@ pub fn cmdWrite(args: []const u8) void {
         shell.println(filename);
     } else {
         shell.printErrorLine("write: failed to write");
+    }
+}
+
+// =============================================================================
+// B2.3: mv (rename) command
+// =============================================================================
+
+pub fn cmdMv(args: []const u8) void {
+    const trimmed = helpers.trim(args);
+    if (trimmed.len == 0) {
+        shell.printErrorLine("mv: usage: mv <source> <destination>");
+        return;
+    }
+
+    // Parse two arguments
+    var space_pos: ?usize = null;
+    for (trimmed, 0..) |c, i| {
+        if (c == ' ') {
+            space_pos = i;
+            break;
+        }
+    }
+
+    if (space_pos == null) {
+        shell.printErrorLine("mv: usage: mv <source> <destination>");
+        return;
+    }
+
+    const src = trimmed[0..space_pos.?];
+    var dst_start = space_pos.? + 1;
+    while (dst_start < trimmed.len and trimmed[dst_start] == ' ') {
+        dst_start += 1;
+    }
+    if (dst_start >= trimmed.len) {
+        shell.printErrorLine("mv: missing destination");
+        return;
+    }
+    const dst = trimmed[dst_start..];
+
+    // Try disk path first
+    const src_disk = isDiskFilePath(src);
+    const dst_disk = isDiskFilePath(dst);
+    const cwd = vfs.getcwd();
+    const cwd_disk = isDiskPath(cwd);
+
+    if (src_disk and dst_disk) {
+        // Both absolute /disk paths
+        const src_name = extractDiskFilename(src);
+        const dst_name = extractDiskFilename(dst);
+        if (fat32.renameFile(src_name, dst_name)) {
+            shell.printSuccess("Renamed: ");
+            shell.print(src_name);
+            shell.print(" -> ");
+            shell.println(dst_name);
+        } else {
+            shell.printError("mv: cannot rename '");
+            shell.print(src);
+            shell.printErrorLine("'");
+        }
+        return;
+    }
+
+    if (cwd_disk and !src_disk and !dst_disk) {
+        // Both relative in /disk
+        if (fat32.renameFile(src, dst)) {
+            shell.printSuccess("Renamed: ");
+            shell.print(src);
+            shell.print(" -> ");
+            shell.println(dst);
+        } else {
+            shell.printError("mv: cannot rename '");
+            shell.print(src);
+            shell.printErrorLine("'");
+        }
+        return;
+    }
+
+    // VFS rename
+    if (vfs.rename(src, dst)) {
+        shell.printSuccess("Renamed: ");
+        shell.print(src);
+        shell.print(" -> ");
+        shell.println(dst);
+    } else {
+        shell.printError("mv: cannot rename '");
+        shell.print(src);
+        shell.print("' to '");
+        shell.print(dst);
+        shell.printErrorLine("'");
+    }
+}
+
+// =============================================================================
+// B2.3: cp (copy) command
+// =============================================================================
+
+pub fn cmdCp(args: []const u8) void {
+    const trimmed = helpers.trim(args);
+    if (trimmed.len == 0) {
+        shell.printErrorLine("cp: usage: cp <source> <destination>");
+        return;
+    }
+
+    var space_pos: ?usize = null;
+    for (trimmed, 0..) |c, i| {
+        if (c == ' ') {
+            space_pos = i;
+            break;
+        }
+    }
+
+    if (space_pos == null) {
+        shell.printErrorLine("cp: usage: cp <source> <destination>");
+        return;
+    }
+
+    const src = trimmed[0..space_pos.?];
+    var dst_start = space_pos.? + 1;
+    while (dst_start < trimmed.len and trimmed[dst_start] == ' ') {
+        dst_start += 1;
+    }
+    if (dst_start >= trimmed.len) {
+        shell.printErrorLine("cp: missing destination");
+        return;
+    }
+    const dst = trimmed[dst_start..];
+
+    // Disk paths
+    const src_disk = isDiskFilePath(src);
+    const dst_disk = isDiskFilePath(dst);
+    const cwd = vfs.getcwd();
+    const cwd_disk = isDiskPath(cwd);
+
+    if (src_disk and dst_disk) {
+        const src_name = extractDiskFilename(src);
+        const dst_name = extractDiskFilename(dst);
+        if (fat32.copyFile(src_name, dst_name)) {
+            shell.printSuccess("Copied: ");
+            shell.print(src_name);
+            shell.print(" -> ");
+            shell.println(dst_name);
+        } else {
+            shell.printError("cp: cannot copy '");
+            shell.print(src);
+            shell.printErrorLine("'");
+        }
+        return;
+    }
+
+    if (cwd_disk and !src_disk and !dst_disk) {
+        if (fat32.copyFile(src, dst)) {
+            shell.printSuccess("Copied: ");
+            shell.print(src);
+            shell.print(" -> ");
+            shell.println(dst);
+        } else {
+            shell.printError("cp: cannot copy '");
+            shell.print(src);
+            shell.printErrorLine("'");
+        }
+        return;
+    }
+
+    // VFS copy: read source, write to destination
+    // Read source file
+    var flags_r = vfs.OpenFlags{};
+    flags_r.read = true;
+    const src_file = vfs.open(src, flags_r) orelse {
+        shell.printError("cp: cannot open source '");
+        shell.print(src);
+        shell.printErrorLine("'");
+        return;
+    };
+
+    // Create destination
+    if (!vfs.exists(dst)) {
+        if (vfs.createFile(dst) == null) {
+            vfs.close(src_file);
+            shell.printError("cp: cannot create '");
+            shell.print(dst);
+            shell.printErrorLine("'");
+            return;
+        }
+    }
+
+    var flags_w = vfs.OpenFlags{};
+    flags_w.write = true;
+    flags_w.truncate = true;
+    const dst_file = vfs.open(dst, flags_w) orelse {
+        vfs.close(src_file);
+        shell.printError("cp: cannot open destination '");
+        shell.print(dst);
+        shell.printErrorLine("'");
+        return;
+    };
+
+    var copy_buf: [512]u8 = undefined;
+    var total: usize = 0;
+
+    while (true) {
+        const n = vfs.read(src_file, &copy_buf);
+        if (n <= 0) break;
+        const written = vfs.write(dst_file, copy_buf[0..@intCast(n)]);
+        if (written <= 0) break;
+        total += @intCast(written);
+    }
+
+    vfs.close(src_file);
+    vfs.close(dst_file);
+
+    shell.printSuccess("Copied ");
+    helpers.printUsize(total);
+    shell.print(" bytes: ");
+    shell.print(src);
+    shell.print(" -> ");
+    shell.println(dst);
+}
+
+// =============================================================================
+// B2.3: truncate command
+// =============================================================================
+
+pub fn cmdTruncate(args: []const u8) void {
+    const trimmed = helpers.trim(args);
+    if (trimmed.len == 0) {
+        shell.printErrorLine("truncate: usage: truncate <filename> <size>");
+        return;
+    }
+
+    var space_pos: ?usize = null;
+    for (trimmed, 0..) |c, i| {
+        if (c == ' ') {
+            space_pos = i;
+            break;
+        }
+    }
+
+    if (space_pos == null) {
+        // Truncate to 0 if no size given
+        const fname = trimmed;
+        truncateFile(fname, 0);
+        return;
+    }
+
+    const fname = trimmed[0..space_pos.?];
+    var size_start = space_pos.? + 1;
+    while (size_start < trimmed.len and trimmed[size_start] == ' ') {
+        size_start += 1;
+    }
+    const size_str = trimmed[size_start..];
+
+    // Parse size
+    var size: u64 = 0;
+    for (size_str) |c| {
+        if (c >= '0' and c <= '9') {
+            size = size * 10 + (c - '0');
+        } else {
+            shell.printErrorLine("truncate: invalid size");
+            return;
+        }
+    }
+
+    truncateFile(fname, size);
+}
+
+fn truncateFile(fname: []const u8, size: u64) void {
+    // Disk paths
+    if (isDiskFilePath(fname)) {
+        const disk_name = extractDiskFilename(fname);
+        if (fat32.truncateFile(disk_name, @intCast(@min(size, 0xFFFFFFFF)))) {
+            shell.printSuccess("Truncated ");
+            shell.print(disk_name);
+            shell.print(" to ");
+            helpers.printUsize(@intCast(size));
+            shell.println(" bytes");
+        } else {
+            shell.printError("truncate: cannot truncate '");
+            shell.print(fname);
+            shell.printErrorLine("'");
+        }
+        return;
+    }
+
+    const cwd = vfs.getcwd();
+    if (isDiskPath(cwd)) {
+        if (fat32.truncateFile(fname, @intCast(@min(size, 0xFFFFFFFF)))) {
+            shell.printSuccess("Truncated ");
+            shell.print(fname);
+            shell.print(" to ");
+            helpers.printUsize(@intCast(size));
+            shell.println(" bytes");
+        } else {
+            shell.printError("truncate: cannot truncate '");
+            shell.print(fname);
+            shell.printErrorLine("'");
+        }
+        return;
+    }
+
+    // VFS truncate
+    if (vfs.truncate(fname, size)) {
+        shell.printSuccess("Truncated ");
+        shell.print(fname);
+        shell.print(" to ");
+        helpers.printUsize(@intCast(size));
+        shell.println(" bytes");
+    } else {
+        shell.printError("truncate: cannot truncate '");
+        shell.print(fname);
+        shell.printErrorLine("'");
     }
 }
 
@@ -446,8 +867,8 @@ fn listDiskFiles() void {
 
     shell.newLine();
     if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
-    shell.println("  Name            Size       Type");
-    shell.println("  ────────────────────────────────────");
+    shell.println("  Name             Size      Type");
+    shell.println("  ------------------------------------");
     if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
 
     for (entries[0..count]) |entry| {
@@ -465,8 +886,8 @@ fn listDiskFiles() void {
             while (pad_name > 0) : (pad_name -= 1) shell.printChar(' ');
 
             if (terminal.isInitialized()) terminal.setFgColor(theme.text_dim);
-            shell.print("-          ");
-            terminal.setFgColor(theme.text_info);
+            shell.print("-         ");
+            if (terminal.isInitialized()) terminal.setFgColor(theme.text_info);
             shell.print("[DIR]");
         } else {
             if (terminal.isInitialized()) terminal.setFgColor(theme.text_normal);
@@ -540,6 +961,7 @@ fn writeDiskFile(name: []const u8, content: []const u8) void {
         return;
     }
 
+    // Delete if exists, then create new
     if (fat32.findInRoot(name) != null) {
         _ = fat32.deleteFile(name);
     }

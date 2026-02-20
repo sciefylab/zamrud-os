@@ -1,4 +1,5 @@
 //! Zamrud OS - Disk Commands
+//! B2.3: Added rename, copy, truncate tests
 
 const helpers = @import("helpers.zig");
 const shell = @import("../shell.zig");
@@ -368,27 +369,35 @@ fn readSector(args: []const u8) void {
 fn runTest() void {
     shell.println("");
     shell.printInfoLine("========================================");
-    shell.printInfoLine("  STORAGE TEST SUITE (Step 1-4)");
+    shell.printInfoLine("  STORAGE TEST SUITE (B2.2 + B2.3)");
     shell.printInfoLine("========================================");
     shell.println("");
 
     var passed: u32 = 0;
     var failed: u32 = 0;
 
+    const fat32_mod = @import("../../fs/fat32.zig");
+    const vfs = @import("../../fs/vfs.zig");
+
+    // =========================================================================
     // Test 1: ATA Driver
-    shell.println("[1/5] ATA Driver");
+    // =========================================================================
+    shell.println("[1/8] ATA Driver");
     passed += helpers.doTest("Drive detection", storage.getDriveCount() > 0, &failed);
 
+    // =========================================================================
     // Test 2: MBR
+    // =========================================================================
     shell.println("");
-    shell.println("[2/5] MBR Partition Table");
+    shell.println("[2/8] MBR Partition Table");
     passed += helpers.doTest("Partition found", storage.getPartitionCount() > 0, &failed);
     passed += helpers.doTest("FAT32 partition", storage.findFAT32Partition() != null, &failed);
 
-    // Test 3: FAT32 Basic
+    // =========================================================================
+    // Test 3: FAT32 Basic Read/Write
+    // =========================================================================
     shell.println("");
-    shell.println("[3/5] FAT32 Filesystem");
-    const fat32_mod = @import("../../fs/fat32.zig");
+    shell.println("[3/8] FAT32 Filesystem");
     passed += helpers.doTest("FAT32 mounted", fat32_mod.isMounted(), &failed);
 
     if (fat32_mod.isMounted()) {
@@ -397,7 +406,7 @@ fn runTest() void {
         const write_ok = fat32_mod.createFile("STEP4.TXT", test_data);
         passed += helpers.doTest("Create file", write_ok, &failed);
 
-        // Read test - use file size to limit read
+        // Read test
         if (fat32_mod.findInRoot("STEP4.TXT")) |file| {
             var buf: [256]u8 = [_]u8{0} ** 256;
             const file_size: usize = @intCast(file.size);
@@ -435,40 +444,264 @@ fn runTest() void {
         helpers.doSkip("Verify deleted");
     }
 
+    // =========================================================================
     // Test 4: VFS Integration
+    // =========================================================================
     shell.println("");
-    shell.println("[4/5] VFS Integration");
-    const vfs = @import("../../fs/vfs.zig");
+    shell.println("[4/8] VFS Integration");
 
-    // Check /disk mount point
     const disk_exists = vfs.resolvePath("/disk") != null;
     passed += helpers.doTest("Mount /disk", disk_exists, &failed);
 
     if (fat32_mod.isMounted() and disk_exists) {
-        // Create a file via FAT32 and read via VFS
         _ = fat32_mod.createFile("VFSTEST.TXT", "VFS works!");
 
-        // Check via VFS readdir
         const dir_entry = vfs.readdir("/disk", 0);
         passed += helpers.doTest("VFS readdir", dir_entry != null, &failed);
 
-        // Check via VFS lookup
         const lookup = vfs.resolvePath("/disk/VFSTEST.TXT");
         passed += helpers.doTest("VFS lookup", lookup != null, &failed);
 
-        // Cleanup
         _ = fat32_mod.deleteFile("VFSTEST.TXT");
     } else {
         helpers.doSkip("VFS readdir");
         helpers.doSkip("VFS lookup");
     }
 
-    // Test 5: Shell Integration
+    // =========================================================================
+    // Test 5: B2.3 — Rename
+    // =========================================================================
     shell.println("");
-    shell.println("[5/5] Shell Integration");
+    shell.println("[5/8] B2.3 Rename");
+
+    if (fat32_mod.isMounted()) {
+        // Cleanup any leftover test files
+        _ = fat32_mod.deleteFile("RNTEST.TXT");
+        _ = fat32_mod.deleteFile("RENAMED.TXT");
+
+        // Create source file
+        const rn_create = fat32_mod.createFile("RNTEST.TXT", "rename test data");
+        passed += helpers.doTest("Create source", rn_create, &failed);
+
+        // Rename
+        const rn_ok = fat32_mod.renameFile("RNTEST.TXT", "RENAMED.TXT");
+        passed += helpers.doTest("Rename file", rn_ok, &failed);
+
+        // Verify old name gone
+        const old_gone = fat32_mod.findInRoot("RNTEST.TXT") == null;
+        passed += helpers.doTest("Old name gone", old_gone, &failed);
+
+        // Verify new name exists
+        const new_exists = fat32_mod.findInRoot("RENAMED.TXT") != null;
+        passed += helpers.doTest("New name exists", new_exists, &failed);
+
+        // Verify content preserved
+        if (fat32_mod.findInRoot("RENAMED.TXT")) |file| {
+            var rbuf: [64]u8 = [_]u8{0} ** 64;
+            const rsize: usize = @intCast(file.size);
+            const rbytes = fat32_mod.readFile(file.cluster, rbuf[0..@min(rsize, 64)]);
+            const expected = "rename test data";
+            var content_ok = (rbytes == expected.len);
+            if (content_ok) {
+                for (expected, 0..) |c, i| {
+                    if (rbuf[i] != c) {
+                        content_ok = false;
+                        break;
+                    }
+                }
+            }
+            passed += helpers.doTest("Content preserved", content_ok, &failed);
+        } else {
+            passed += helpers.doTest("Content preserved", false, &failed);
+        }
+
+        // Rename to existing name should fail
+        _ = fat32_mod.createFile("EXIST.TXT", "x");
+        const rn_dup = fat32_mod.renameFile("RENAMED.TXT", "EXIST.TXT");
+        passed += helpers.doTest("Rename dup fails", !rn_dup, &failed);
+
+        // Cleanup
+        _ = fat32_mod.deleteFile("RENAMED.TXT");
+        _ = fat32_mod.deleteFile("EXIST.TXT");
+    } else {
+        helpers.doSkip("Create source");
+        helpers.doSkip("Rename file");
+        helpers.doSkip("Old name gone");
+        helpers.doSkip("New name exists");
+        helpers.doSkip("Content preserved");
+        helpers.doSkip("Rename dup fails");
+    }
+
+    // =========================================================================
+    // Test 6: B2.3 — Copy
+    // =========================================================================
+    shell.println("");
+    shell.println("[6/8] B2.3 Copy");
+
+    if (fat32_mod.isMounted()) {
+        // Cleanup
+        _ = fat32_mod.deleteFile("CPSRC.TXT");
+        _ = fat32_mod.deleteFile("CPDST.TXT");
+
+        // Create source
+        const cp_data = "copy test content 123";
+        const cp_create = fat32_mod.createFile("CPSRC.TXT", cp_data);
+        passed += helpers.doTest("Create source", cp_create, &failed);
+
+        // Copy
+        const cp_ok = fat32_mod.copyFile("CPSRC.TXT", "CPDST.TXT");
+        passed += helpers.doTest("Copy file", cp_ok, &failed);
+
+        // Verify source still exists
+        const src_exists = fat32_mod.findInRoot("CPSRC.TXT") != null;
+        passed += helpers.doTest("Source intact", src_exists, &failed);
+
+        // Verify destination exists
+        const dst_exists = fat32_mod.findInRoot("CPDST.TXT") != null;
+        passed += helpers.doTest("Dest exists", dst_exists, &failed);
+
+        // Verify destination content
+        if (fat32_mod.findInRoot("CPDST.TXT")) |file| {
+            var cbuf: [64]u8 = [_]u8{0} ** 64;
+            const csize: usize = @intCast(file.size);
+            const cbytes = fat32_mod.readFile(file.cluster, cbuf[0..@min(csize, 64)]);
+            var cp_match = (cbytes == cp_data.len);
+            if (cp_match) {
+                for (cp_data, 0..) |c, i| {
+                    if (cbuf[i] != c) {
+                        cp_match = false;
+                        break;
+                    }
+                }
+            }
+            passed += helpers.doTest("Dest content OK", cp_match, &failed);
+        } else {
+            passed += helpers.doTest("Dest content OK", false, &failed);
+        }
+
+        // Copy to existing name should fail
+        const cp_dup = fat32_mod.copyFile("CPSRC.TXT", "CPDST.TXT");
+        passed += helpers.doTest("Copy dup fails", !cp_dup, &failed);
+
+        // Cleanup
+        _ = fat32_mod.deleteFile("CPSRC.TXT");
+        _ = fat32_mod.deleteFile("CPDST.TXT");
+    } else {
+        helpers.doSkip("Create source");
+        helpers.doSkip("Copy file");
+        helpers.doSkip("Source intact");
+        helpers.doSkip("Dest exists");
+        helpers.doSkip("Dest content OK");
+        helpers.doSkip("Copy dup fails");
+    }
+
+    // =========================================================================
+    // Test 7: B2.3 — Truncate
+    // =========================================================================
+    shell.println("");
+    shell.println("[7/8] B2.3 Truncate");
+
+    if (fat32_mod.isMounted()) {
+        // Cleanup
+        _ = fat32_mod.deleteFile("TRUNC.TXT");
+
+        // Create file with known content
+        const tr_data = "abcdefghijklmnopqrstuvwxyz";
+        const tr_create = fat32_mod.createFile("TRUNC.TXT", tr_data);
+        passed += helpers.doTest("Create 26-byte file", tr_create, &failed);
+
+        // Verify initial size
+        if (fat32_mod.findInRoot("TRUNC.TXT")) |f| {
+            passed += helpers.doTest("Initial size=26", f.size == 26, &failed);
+        } else {
+            passed += helpers.doTest("Initial size=26", false, &failed);
+        }
+
+        // Truncate to 10 bytes
+        const tr_shrink = fat32_mod.truncateFile("TRUNC.TXT", 10);
+        passed += helpers.doTest("Truncate to 10", tr_shrink, &failed);
+
+        // Verify new size
+        if (fat32_mod.findInRoot("TRUNC.TXT")) |f| {
+            passed += helpers.doTest("Size now 10", f.size == 10, &failed);
+
+            // Verify content preserved (first 10 bytes)
+            var tbuf: [32]u8 = [_]u8{0} ** 32;
+            const tbytes = fat32_mod.readFile(f.cluster, tbuf[0..10]);
+            var tr_match = (tbytes == 10);
+            if (tr_match) {
+                const expected_10 = "abcdefghij";
+                for (expected_10, 0..) |c, i| {
+                    if (tbuf[i] != c) {
+                        tr_match = false;
+                        break;
+                    }
+                }
+            }
+            passed += helpers.doTest("Content preserved", tr_match, &failed);
+        } else {
+            passed += helpers.doTest("Size now 10", false, &failed);
+            passed += helpers.doTest("Content preserved", false, &failed);
+        }
+
+        // Truncate to 0
+        const tr_zero = fat32_mod.truncateFile("TRUNC.TXT", 0);
+        passed += helpers.doTest("Truncate to 0", tr_zero, &failed);
+
+        if (fat32_mod.findInRoot("TRUNC.TXT")) |f| {
+            passed += helpers.doTest("Size now 0", f.size == 0, &failed);
+        } else {
+            passed += helpers.doTest("Size now 0", false, &failed);
+        }
+
+        // Truncate extend (grow)
+        const tr_grow = fat32_mod.truncateFile("TRUNC.TXT", 100);
+        passed += helpers.doTest("Truncate extend 100", tr_grow, &failed);
+
+        if (fat32_mod.findInRoot("TRUNC.TXT")) |f| {
+            passed += helpers.doTest("Size now 100", f.size == 100, &failed);
+        } else {
+            passed += helpers.doTest("Size now 100", false, &failed);
+        }
+
+        // Truncate same size (noop)
+        const tr_same = fat32_mod.truncateFile("TRUNC.TXT", 100);
+        passed += helpers.doTest("Truncate same size", tr_same, &failed);
+
+        // Truncate directory should fail
+        _ = fat32_mod.deleteFile("TRDIR");
+        _ = fat32_mod.createDirectory("TRDIR");
+        const tr_dir = fat32_mod.truncateFile("TRDIR", 0);
+        passed += helpers.doTest("Truncate dir fails", !tr_dir, &failed);
+        _ = fat32_mod.deleteDirectory("TRDIR");
+
+        // Cleanup
+        _ = fat32_mod.deleteFile("TRUNC.TXT");
+    } else {
+        helpers.doSkip("Create 26-byte file");
+        helpers.doSkip("Initial size=26");
+        helpers.doSkip("Truncate to 10");
+        helpers.doSkip("Size now 10");
+        helpers.doSkip("Content preserved");
+        helpers.doSkip("Truncate to 0");
+        helpers.doSkip("Size now 0");
+        helpers.doSkip("Truncate extend 100");
+        helpers.doSkip("Size now 100");
+        helpers.doSkip("Truncate same size");
+        helpers.doSkip("Truncate dir fails");
+    }
+
+    // =========================================================================
+    // Test 8: Shell Integration
+    // =========================================================================
+    shell.println("");
+    shell.println("[8/8] Shell Integration");
     passed += helpers.doTest("ls /disk ready", fat32_mod.isMounted(), &failed);
     passed += helpers.doTest("cat /disk ready", fat32_mod.isMounted(), &failed);
     passed += helpers.doTest("write /disk ready", fat32_mod.isMounted(), &failed);
+    passed += helpers.doTest("mv /disk ready", fat32_mod.isMounted(), &failed);
+    passed += helpers.doTest("cp /disk ready", fat32_mod.isMounted(), &failed);
+    passed += helpers.doTest("truncate /disk ready", fat32_mod.isMounted(), &failed);
 
     // Summary
     helpers.printTestResults(passed, failed);

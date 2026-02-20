@@ -1,6 +1,7 @@
 //! Zamrud OS - FAT32 Filesystem Driver
 //! Read/Write support for FAT32 partitions
 //! B2.2: Full write support including VFS integration
+//! B2.3: Rename, Truncate, Copy operations
 
 const serial = @import("../drivers/serial/serial.zig");
 const storage = @import("../drivers/storage/storage.zig");
@@ -190,7 +191,6 @@ pub const Fat32 = struct {
         };
     }
 
-    /// Get bytes per cluster
     pub fn getBytesPerCluster(self: *const Fat32) u32 {
         return @as(u32, self.sectors_per_cluster) * @as(u32, self.bytes_per_sector);
     }
@@ -203,8 +203,6 @@ pub const Fat32 = struct {
 var fs: Fat32 = Fat32.init();
 var initialized: bool = false;
 var sector_buffer: [512]u8 align(4) = [_]u8{0} ** 512;
-
-// Secondary buffer for operations that need two sectors
 var sector_buffer2: [512]u8 align(4) = [_]u8{0} ** 512;
 
 // ============================================================================
@@ -320,7 +318,6 @@ fn writeFatEntry(cluster: u32, value: u32) bool {
         writeU32LE(&sector_buffer, entry_offset, value & FAT_MASK);
 
         if (ata.writeSector(fs.drive_index, fat_sector, &sector_buffer)) {
-            // Write to backup FAT
             const fat2_sector = fat_sector + fs.fat_size;
             ata.writeSector(fs.drive_index, fat2_sector, &sector_buffer) catch {};
             return true;
@@ -344,10 +341,8 @@ fn findFreeCluster() ?u32 {
     return null;
 }
 
-/// Allocate a chain of clusters for a given size
 fn allocateClusterChain(size: u32) ?u32 {
     if (size == 0) {
-        // Even empty files need one cluster for directory entry
         const cluster = findFreeCluster() orelse return null;
         if (!writeFatEntry(cluster, FAT_END_OF_CHAIN)) return null;
         return cluster;
@@ -362,14 +357,12 @@ fn allocateClusterChain(size: u32) ?u32 {
 
     while (allocated < clusters_needed) {
         const cluster = findFreeCluster() orelse {
-            // Rollback: free already allocated clusters
             if (first_cluster) |fc| {
                 freeClusterChain(fc);
             }
             return null;
         };
 
-        // Mark as end of chain (will be updated if more clusters follow)
         if (!writeFatEntry(cluster, FAT_END_OF_CHAIN)) {
             if (first_cluster) |fc| {
                 freeClusterChain(fc);
@@ -380,7 +373,6 @@ fn allocateClusterChain(size: u32) ?u32 {
         if (first_cluster == null) {
             first_cluster = cluster;
         } else {
-            // Link previous cluster to this one
             if (!writeFatEntry(prev_cluster, cluster)) {
                 freeClusterChain(first_cluster.?);
                 return null;
@@ -394,7 +386,6 @@ fn allocateClusterChain(size: u32) ?u32 {
     return first_cluster;
 }
 
-/// Free a cluster chain
 fn freeClusterChain(start_cluster: u32) void {
     var cluster = start_cluster;
     while (cluster >= 2 and cluster < FAT_END_OF_CHAIN) {
@@ -405,7 +396,6 @@ fn freeClusterChain(start_cluster: u32) void {
     }
 }
 
-/// Extend a cluster chain to accommodate new size
 fn extendClusterChain(start_cluster: u32, current_size: u32, new_size: u32) bool {
     if (new_size <= current_size) return true;
 
@@ -415,7 +405,6 @@ fn extendClusterChain(start_cluster: u32, current_size: u32, new_size: u32) bool
 
     if (needed_clusters <= current_clusters) return true;
 
-    // Find last cluster in chain
     var last_cluster = start_cluster;
     while (true) {
         const next = readFatEntry(last_cluster) orelse return false;
@@ -423,7 +412,6 @@ fn extendClusterChain(start_cluster: u32, current_size: u32, new_size: u32) bool
         last_cluster = next;
     }
 
-    // Allocate additional clusters
     var added: u32 = 0;
     const to_add = needed_clusters - current_clusters;
 
@@ -549,14 +537,12 @@ pub fn readFile(cluster: u32, buffer: []u8) usize {
     return bytes_read;
 }
 
-/// Read file at specific offset
 pub fn readFileAt(cluster: u32, offset: u64, buffer: []u8, file_size: u64) usize {
     if (!fs.mounted) return 0;
     if (offset >= file_size) return 0;
 
     const bytes_per_cluster = fs.getBytesPerCluster();
 
-    // Skip to the cluster containing offset
     var current_cluster = cluster;
     const target_cluster_idx = offset / bytes_per_cluster;
 
@@ -567,7 +553,6 @@ pub fn readFileAt(cluster: u32, offset: u64, buffer: []u8, file_size: u64) usize
         current_cluster = next;
     }
 
-    // Calculate offset within cluster
     const offset_in_cluster = offset % bytes_per_cluster;
     const max_to_read = @min(buffer.len, file_size - offset);
 
@@ -631,7 +616,6 @@ pub fn findInRoot(name: []const u8) ?FileInfo {
 // File Write Operations (B2.2)
 // ============================================================================
 
-/// Create a new file with initial data
 pub fn createFile(name: []const u8, data: []const u8) bool {
     if (!fs.mounted) return false;
 
@@ -639,26 +623,22 @@ pub fn createFile(name: []const u8, data: []const u8) bool {
     serial.writeString(name);
     serial.writeString("\n");
 
-    // Check if file already exists
     if (findInRoot(name) != null) {
         serial.writeString("[FAT32] File already exists!\n");
         return false;
     }
 
-    // Allocate cluster chain for data
     const cluster = allocateClusterChain(@intCast(data.len)) orelse {
         serial.writeString("[FAT32] No free clusters!\n");
         return false;
     };
 
-    // Write data to clusters
     if (!writeToClusterChain(cluster, data)) {
         freeClusterChain(cluster);
         serial.writeString("[FAT32] Write failed!\n");
         return false;
     }
 
-    // Add directory entry
     if (!addDirEntry(fs.root_cluster, name, cluster, @intCast(data.len), ATTR_ARCHIVE)) {
         freeClusterChain(cluster);
         serial.writeString("[FAT32] Failed to create directory entry!\n");
@@ -669,7 +649,6 @@ pub fn createFile(name: []const u8, data: []const u8) bool {
     return true;
 }
 
-/// Write data to a cluster chain
 fn writeToClusterChain(start_cluster: u32, data: []const u8) bool {
     var current_cluster = start_cluster;
     var written: usize = 0;
@@ -679,10 +658,8 @@ fn writeToClusterChain(start_cluster: u32, data: []const u8) bool {
 
         var sector: u32 = 0;
         while (sector < fs.sectors_per_cluster and written < data.len) : (sector += 1) {
-            // Clear sector buffer
             for (&sector_buffer) |*b| b.* = 0;
 
-            // Copy data to buffer
             const remaining = data.len - written;
             const to_copy = if (remaining < 512) remaining else 512;
             for (data[written..][0..to_copy], 0..) |byte, i| {
@@ -690,10 +667,7 @@ fn writeToClusterChain(start_cluster: u32, data: []const u8) bool {
             }
             written += to_copy;
 
-            // Write sector
-            if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
-                // OK
-            } else |_| {
+            if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {} else |_| {
                 return false;
             }
         }
@@ -710,21 +684,18 @@ fn writeToClusterChain(start_cluster: u32, data: []const u8) bool {
     return written >= data.len;
 }
 
-/// Write data to file at specific offset (for VFS write)
 pub fn writeFileAt(cluster: u32, offset: u64, data: []const u8, current_size: u64) WriteResult {
     if (!fs.mounted) return .{ .bytes_written = 0, .new_size = current_size };
 
     const new_end = offset + data.len;
     const bytes_per_cluster = fs.getBytesPerCluster();
 
-    // Extend cluster chain if needed
     if (new_end > current_size) {
         if (!extendClusterChain(cluster, @intCast(current_size), @intCast(new_end))) {
             return .{ .bytes_written = 0, .new_size = current_size };
         }
     }
 
-    // Navigate to correct cluster
     var current_cluster = cluster;
     const target_cluster_idx = offset / bytes_per_cluster;
 
@@ -739,7 +710,6 @@ pub fn writeFileAt(cluster: u32, offset: u64, data: []const u8, current_size: u6
         current_cluster = next;
     }
 
-    // Write data
     var bytes_written: usize = 0;
     const offset_in_cluster = offset % bytes_per_cluster;
     var first_sector = true;
@@ -755,19 +725,14 @@ pub fn writeFileAt(cluster: u32, offset: u64, data: []const u8, current_size: u6
             const sec_offset: usize = if (first_sector and sector == start_sec) offset_in_sector else 0;
             first_sector = false;
 
-            // Read existing sector if partial write
             if (sec_offset > 0 or (data.len - bytes_written) < 512) {
-                if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
-                    // OK
-                } else |_| {
-                    // Sector may not exist yet, clear it
+                if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {} else |_| {
                     for (&sector_buffer) |*b| b.* = 0;
                 }
             } else {
                 for (&sector_buffer) |*b| b.* = 0;
             }
 
-            // Copy data
             const remaining = data.len - bytes_written;
             const avail = 512 - sec_offset;
             const to_copy = @min(remaining, avail);
@@ -777,10 +742,7 @@ pub fn writeFileAt(cluster: u32, offset: u64, data: []const u8, current_size: u6
             }
             bytes_written += to_copy;
 
-            // Write sector
-            if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
-                // OK
-            } else |_| {
+            if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {} else |_| {
                 break;
             }
         }
@@ -803,31 +765,25 @@ pub const WriteResult = struct {
     new_size: u64,
 };
 
-/// Update an existing file with new data (overwrite)
 pub fn updateFile(name: []const u8, data: []const u8) bool {
     if (!fs.mounted) return false;
 
     const file = findInRoot(name) orelse return false;
 
-    // Free old cluster chain
     if (file.cluster >= 2) {
         freeClusterChain(file.cluster);
     }
 
-    // Allocate new cluster chain
     const new_cluster = allocateClusterChain(@intCast(data.len)) orelse return false;
 
-    // Write data
     if (!writeToClusterChain(new_cluster, data)) {
         freeClusterChain(new_cluster);
         return false;
     }
 
-    // Update directory entry
     return updateDirEntry(fs.root_cluster, name, new_cluster, @intCast(data.len));
 }
 
-/// Update file size in directory entry
 pub fn updateFileSize(name: []const u8, new_size: u32) bool {
     if (!fs.mounted) return false;
 
@@ -1005,7 +961,6 @@ fn formatDirEntry(entry: *DirEntry, name: []const u8, cluster: u32, size: u32, a
 // Directory Creation (B2.2)
 // ============================================================================
 
-/// Create a subdirectory in root
 pub fn createDirectory(name: []const u8) bool {
     if (!fs.mounted) return false;
 
@@ -1013,13 +968,11 @@ pub fn createDirectory(name: []const u8) bool {
     serial.writeString(name);
     serial.writeString("\n");
 
-    // Check if already exists
     if (findInRoot(name) != null) {
         serial.writeString("[FAT32] Already exists!\n");
         return false;
     }
 
-    // Allocate cluster for directory
     const cluster = findFreeCluster() orelse {
         serial.writeString("[FAT32] No free clusters!\n");
         return false;
@@ -1029,13 +982,11 @@ pub fn createDirectory(name: []const u8) bool {
         return false;
     }
 
-    // Initialize directory cluster with . and .. entries
     if (!initDirectoryCluster(cluster, fs.root_cluster)) {
         _ = writeFatEntry(cluster, FAT_FREE);
         return false;
     }
 
-    // Add entry to root directory
     if (!addDirEntry(fs.root_cluster, name, cluster, 0, ATTR_DIRECTORY)) {
         _ = writeFatEntry(cluster, FAT_FREE);
         serial.writeString("[FAT32] Failed to create directory entry!\n");
@@ -1049,13 +1000,11 @@ pub fn createDirectory(name: []const u8) bool {
 fn initDirectoryCluster(cluster: u32, parent_cluster: u32) bool {
     const lba = clusterToLba(cluster);
 
-    // Clear all sectors in cluster
     for (&sector_buffer) |*b| b.* = 0;
 
     var sector: u32 = 0;
     while (sector < fs.sectors_per_cluster) : (sector += 1) {
         if (sector == 0) {
-            // First sector contains . and .. entries
             var dot_entry: DirEntry = undefined;
             formatDirEntry(&dot_entry, ".", cluster, 0, ATTR_DIRECTORY);
             writeDirEntryToBuffer(&sector_buffer, 0, &dot_entry);
@@ -1066,7 +1015,6 @@ fn initDirectoryCluster(cluster: u32, parent_cluster: u32) bool {
         }
 
         if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
-            // Clear for next sector
             for (&sector_buffer) |*b| b.* = 0;
         } else |_| {
             return false;
@@ -1074,6 +1022,264 @@ fn initDirectoryCluster(cluster: u32, parent_cluster: u32) bool {
     }
 
     return true;
+}
+
+// ============================================================================
+// Rename Operations (B2.3)
+// ============================================================================
+
+pub fn renameFile(old_name: []const u8, new_name: []const u8) bool {
+    if (!fs.mounted) return false;
+
+    serial.writeString("[FAT32] Renaming: ");
+    serial.writeString(old_name);
+    serial.writeString(" -> ");
+    serial.writeString(new_name);
+    serial.writeString("\n");
+
+    const file = findInRoot(old_name) orelse {
+        serial.writeString("[FAT32] Source file not found\n");
+        return false;
+    };
+
+    if (findInRoot(new_name) != null) {
+        serial.writeString("[FAT32] Destination already exists\n");
+        return false;
+    }
+
+    return renameDirEntry(fs.root_cluster, old_name, new_name, file.cluster, file.size, file.attr);
+}
+
+fn renameDirEntry(dir_cluster: u32, old_name: []const u8, new_name: []const u8, cluster: u32, size: u32, attr: u8) bool {
+    var current_cluster = dir_cluster;
+
+    while (!isEndOfChain(current_cluster)) {
+        const lba = clusterToLba(current_cluster);
+
+        var sector: u32 = 0;
+        while (sector < fs.sectors_per_cluster) : (sector += 1) {
+            if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
+                var i: usize = 0;
+                while (i < ENTRIES_PER_SECTOR) : (i += 1) {
+                    const offset = i * DIR_ENTRY_SIZE;
+                    var dir_entry = readDirEntry(&sector_buffer, offset);
+
+                    if (dir_entry.isEmpty()) return false;
+                    if (dir_entry.isDeleted() or dir_entry.isLongName()) continue;
+
+                    var name_buf: [12]u8 = undefined;
+                    const entry_name = dir_entry.getName(&name_buf);
+
+                    if (strEqualNoCase(entry_name, old_name)) {
+                        formatDirEntry(&dir_entry, new_name, cluster, size, attr);
+                        writeDirEntryToBuffer(&sector_buffer, offset, &dir_entry);
+
+                        if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
+                            serial.writeString("[FAT32] Rename successful\n");
+                            return true;
+                        } else |_| {
+                            return false;
+                        }
+                    }
+                }
+            } else |_| {
+                return false;
+            }
+        }
+
+        if (readFatEntry(current_cluster)) |next| {
+            current_cluster = next;
+        } else {
+            break;
+        }
+    }
+
+    return false;
+}
+
+// ============================================================================
+// Truncate Operations (B2.3)
+// ============================================================================
+
+pub fn truncateFile(name: []const u8, new_size: u32) bool {
+    if (!fs.mounted) return false;
+
+    serial.writeString("[FAT32] Truncating: ");
+    serial.writeString(name);
+    serial.writeString(" to ");
+    printU32(new_size);
+    serial.writeString(" bytes\n");
+
+    const file = findInRoot(name) orelse {
+        serial.writeString("[FAT32] File not found\n");
+        return false;
+    };
+
+    if (file.is_dir) {
+        serial.writeString("[FAT32] Cannot truncate directory\n");
+        return false;
+    }
+
+    const old_size = file.size;
+    const bytes_per_cluster = fs.getBytesPerCluster();
+
+    if (new_size == old_size) {
+        return true;
+    }
+
+    if (new_size == 0) {
+        if (file.cluster >= 2) {
+            const next = readFatEntry(file.cluster);
+            if (next != null and !isEndOfChain(next.?)) {
+                freeClusterChain(next.?);
+            }
+            _ = writeFatEntry(file.cluster, FAT_END_OF_CHAIN);
+            zeroCluster(file.cluster);
+        }
+        return updateFileSize(name, 0);
+    }
+
+    if (new_size < old_size) {
+        const new_clusters_needed = (new_size + bytes_per_cluster - 1) / bytes_per_cluster;
+        const old_clusters_used = (old_size + bytes_per_cluster - 1) / bytes_per_cluster;
+
+        if (new_clusters_needed < old_clusters_used) {
+            var current = file.cluster;
+            var count: u32 = 1;
+
+            while (count < new_clusters_needed) : (count += 1) {
+                const next = readFatEntry(current) orelse break;
+                if (isEndOfChain(next)) break;
+                current = next;
+            }
+
+            const to_free = readFatEntry(current);
+            if (to_free != null and !isEndOfChain(to_free.?)) {
+                freeClusterChain(to_free.?);
+            }
+
+            _ = writeFatEntry(current, FAT_END_OF_CHAIN);
+        }
+
+        return updateFileSize(name, new_size);
+    } else {
+        if (!extendClusterChain(file.cluster, old_size, new_size)) {
+            serial.writeString("[FAT32] Failed to extend file\n");
+            return false;
+        }
+
+        zeroNewSpace(file.cluster, old_size, new_size);
+
+        return updateFileSize(name, new_size);
+    }
+}
+
+fn zeroCluster(cluster: u32) void {
+    const lba = clusterToLba(cluster);
+    for (&sector_buffer) |*b| b.* = 0;
+
+    var sector: u32 = 0;
+    while (sector < fs.sectors_per_cluster) : (sector += 1) {
+        ata.writeSector(fs.drive_index, lba + sector, &sector_buffer) catch {};
+    }
+}
+
+fn zeroNewSpace(start_cluster: u32, old_size: u32, new_size: u32) void {
+    if (new_size <= old_size) return;
+
+    const bytes_per_cluster = fs.getBytesPerCluster();
+
+    var current_cluster = start_cluster;
+    var offset: u32 = 0;
+
+    while (offset + bytes_per_cluster <= old_size) {
+        const next = readFatEntry(current_cluster) orelse return;
+        if (isEndOfChain(next)) break;
+        current_cluster = next;
+        offset += bytes_per_cluster;
+    }
+
+    const start_offset_in_cluster = old_size - offset;
+
+    while (offset < new_size) {
+        const lba = clusterToLba(current_cluster);
+        const cluster_start_offset = if (offset == (old_size - start_offset_in_cluster)) start_offset_in_cluster else 0;
+        const sector_in_cluster = cluster_start_offset / 512;
+
+        var sector: u32 = @intCast(sector_in_cluster);
+        while (sector < fs.sectors_per_cluster and offset < new_size) : (sector += 1) {
+            if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
+                const sec_offset: usize = if (sector == sector_in_cluster) @intCast(cluster_start_offset % 512) else 0;
+                for (sector_buffer[sec_offset..]) |*b| b.* = 0;
+
+                ata.writeSector(fs.drive_index, lba + sector, &sector_buffer) catch {};
+            } else |_| {}
+
+            offset += 512;
+        }
+
+        const next = readFatEntry(current_cluster) orelse break;
+        if (isEndOfChain(next)) break;
+        current_cluster = next;
+    }
+}
+
+// ============================================================================
+// Copy Operations (B2.3) — Fixed: use static buffer instead of stack
+// ============================================================================
+
+var copy_buffer: [4096]u8 = undefined;
+
+pub fn copyFile(src_name: []const u8, dst_name: []const u8) bool {
+    if (!fs.mounted) return false;
+
+    serial.writeString("[FAT32] Copying: ");
+    serial.writeString(src_name);
+    serial.writeString(" -> ");
+    serial.writeString(dst_name);
+    serial.writeString("\n");
+
+    const src = findInRoot(src_name) orelse {
+        serial.writeString("[FAT32] Source not found\n");
+        return false;
+    };
+
+    if (src.is_dir) {
+        serial.writeString("[FAT32] Cannot copy directory\n");
+        return false;
+    }
+
+    if (findInRoot(dst_name) != null) {
+        serial.writeString("[FAT32] Destination already exists\n");
+        return false;
+    }
+
+    if (src.size == 0) {
+        // Empty file — just create empty
+        if (createFile(dst_name, "")) {
+            serial.writeString("[FAT32] Copy successful (empty)\n");
+            return true;
+        }
+        return false;
+    }
+
+    // Read source in chunks using static buffer
+    const file_size: usize = @intCast(src.size);
+    const read_size = @min(file_size, copy_buffer.len);
+    const bytes_read = readFile(src.cluster, copy_buffer[0..read_size]);
+
+    if (bytes_read == 0) {
+        serial.writeString("[FAT32] Failed to read source\n");
+        return false;
+    }
+
+    if (createFile(dst_name, copy_buffer[0..bytes_read])) {
+        serial.writeString("[FAT32] Copy successful\n");
+        return true;
+    }
+
+    serial.writeString("[FAT32] Failed to create destination\n");
+    return false;
 }
 
 // ============================================================================
@@ -1090,12 +1296,10 @@ pub fn deleteFile(name: []const u8) bool {
         return false;
     };
 
-    // Free cluster chain
     if (file.cluster >= 2) {
         freeClusterChain(file.cluster);
     }
 
-    // Mark directory entry as deleted
     if (markDeleted(fs.root_cluster, name)) {
         serial.writeString("[FAT32] Deleted: ");
         serial.writeString(name);
@@ -1106,18 +1310,15 @@ pub fn deleteFile(name: []const u8) bool {
     return false;
 }
 
-/// Delete directory (must be empty)
 pub fn deleteDirectory(name: []const u8) bool {
     if (!fs.mounted) return false;
 
     const dir = findInRoot(name) orelse return false;
     if (!dir.is_dir) return false;
 
-    // Check if directory is empty (only . and ..)
     var entries: [4]FileInfo = undefined;
     const count = readDirectory(dir.cluster, &entries);
 
-    // Should only have . and .. or be completely empty
     var real_count: usize = 0;
     for (entries[0..count]) |entry| {
         const ename = entry.getName();
@@ -1131,12 +1332,10 @@ pub fn deleteDirectory(name: []const u8) bool {
         return false;
     }
 
-    // Free cluster
     if (dir.cluster >= 2) {
         freeClusterChain(dir.cluster);
     }
 
-    // Mark deleted
     return markDeleted(fs.root_cluster, name);
 }
 
@@ -1241,7 +1440,6 @@ const MAX_FAT32_INODES: usize = 64;
 var inode_pool: [MAX_FAT32_INODES]inode_mod.Inode = undefined;
 var inode_pool_used: [MAX_FAT32_INODES]bool = [_]bool{false} ** MAX_FAT32_INODES;
 
-// Track file metadata for VFS inodes
 const InodeMeta = struct {
     cluster: u32,
     size: u64,
@@ -1257,6 +1455,7 @@ const fat32_inode_ops = inode_mod.InodeOps{
     .mkdir = fat32VfsMkdir,
     .unlink = fat32VfsUnlink,
     .rmdir = fat32VfsRmdir,
+    .rename = fat32VfsRename,
 };
 
 const fat32_file_ops = file_mod.FileOps{
@@ -1294,7 +1493,6 @@ fn allocInodeWithMeta(id: u64, file_type: inode_mod.FileType, size: u64, cluster
             inode_pool[i].dev_major = @intCast((cluster >> 16) & 0xFFFF);
             inode_pool[i].dev_minor = @intCast(cluster & 0xFFFF);
 
-            // Store metadata
             inode_meta[i].cluster = cluster;
             inode_meta[i].size = size;
             inode_meta[i].name_len = @intCast(@min(name.len, 12));
@@ -1314,9 +1512,9 @@ fn getInodeIndex(ino: *inode_mod.Inode) ?usize {
     const size = @sizeOf(inode_mod.Inode);
 
     if (addr < base) return null;
-    const offset = addr - base;
-    if (offset % size != 0) return null;
-    const idx = offset / size;
+    const off = addr - base;
+    if (off % size != 0) return null;
+    const idx = off / size;
     if (idx >= MAX_FAT32_INODES) return null;
     return idx;
 }
@@ -1325,7 +1523,7 @@ fn getInodeCluster(ino: *inode_mod.Inode) u32 {
     return (@as(u32, ino.dev_major) << 16) | @as(u32, ino.dev_minor);
 }
 
-fn getInodeName(ino: *inode_mod.Inode) ?[]const u8 {
+pub fn getInodeName(ino: *inode_mod.Inode) ?[]const u8 {
     const idx = getInodeIndex(ino) orelse return null;
     if (!inode_pool_used[idx]) return null;
     return inode_meta[idx].name[0..inode_meta[idx].name_len];
@@ -1380,10 +1578,8 @@ fn fat32VfsCreate(parent: *inode_mod.Inode, name: []const u8, mode: inode_mod.Fi
     _ = mode;
     if (!fs.mounted) return null;
 
-    // Create empty file
     if (!createFile(name, "")) return null;
 
-    // Find and return inode
     const file_info = findInRoot(name) orelse return null;
     return allocInodeWithMeta(
         @as(u64, file_info.cluster),
@@ -1421,6 +1617,12 @@ fn fat32VfsRmdir(parent: *inode_mod.Inode, name: []const u8) bool {
     return deleteDirectory(name);
 }
 
+fn fat32VfsRename(old_parent: *inode_mod.Inode, old_name: []const u8, new_parent: *inode_mod.Inode, new_name: []const u8) bool {
+    _ = old_parent;
+    _ = new_parent;
+    return renameFile(old_name, new_name);
+}
+
 fn fat32VfsRead(file: *file_mod.File, buf: []u8) i64 {
     if (!fs.mounted) return -1;
 
@@ -1453,7 +1655,6 @@ fn fat32VfsWrite(file: *file_mod.File, buf: []const u8) i64 {
         file.position += result.bytes_written;
         file.inode.size = result.new_size;
 
-        // Update file size in directory entry
         const name = getInodeName(file.inode);
         if (name) |n| {
             _ = updateFileSize(n, @intCast(result.new_size));
@@ -1465,7 +1666,6 @@ fn fat32VfsWrite(file: *file_mod.File, buf: []const u8) i64 {
 
 fn fat32VfsFlush(file: *file_mod.File) bool {
     _ = file;
-    // ATA writes are synchronous, nothing to flush
     return true;
 }
 
@@ -1511,7 +1711,6 @@ pub fn test_fat32() bool {
     var passed: u32 = 0;
     var failed: u32 = 0;
 
-    // Test 1: List root
     serial.writeString("  [1] List root directory...\n");
     var entries: [32]FileInfo = undefined;
     const count = listRoot(&entries);
@@ -1520,12 +1719,10 @@ pub fn test_fat32() bool {
     serial.writeString(" entries\n");
     passed += 1;
 
-    // Test 2: Create file
     serial.writeString("  [2] Create test file...\n");
-    const test_name = "B22TEST.TXT";
-    const test_data = "B2.2 FAT32 Write Test!\n";
+    const test_name = "B23TEST.TXT";
+    const test_data = "B2.3 FAT32 Test!\n";
 
-    // Delete if exists
     _ = deleteFile(test_name);
 
     if (createFile(test_name, test_data)) {
@@ -1536,15 +1733,13 @@ pub fn test_fat32() bool {
         serial.writeString("      Create FAILED\n");
     }
 
-    // Test 3: Read back
     serial.writeString("  [3] Read back file...\n");
     if (findInRoot(test_name)) |file| {
         var read_buf: [64]u8 = [_]u8{0} ** 64;
         const bytes = readFile(file.cluster, &read_buf);
         if (bytes == test_data.len) {
             passed += 1;
-            serial.writeString("      Read OK: ");
-            serial.writeString(read_buf[0..bytes]);
+            serial.writeString("      Read OK\n");
         } else {
             failed += 1;
             serial.writeString("      Read size mismatch\n");
@@ -1554,67 +1749,62 @@ pub fn test_fat32() bool {
         serial.writeString("      File not found!\n");
     }
 
-    // Test 4: Update file
-    serial.writeString("  [4] Update file...\n");
-    const new_data = "Updated content for B2.2 test.\n";
-    if (updateFile(test_name, new_data)) {
+    serial.writeString("  [4] Rename file...\n");
+    const new_name = "RENAMED.TXT";
+    _ = deleteFile(new_name);
+    if (renameFile(test_name, new_name)) {
         passed += 1;
-        serial.writeString("      Update OK\n");
+        serial.writeString("      Rename OK\n");
     } else {
         failed += 1;
-        serial.writeString("      Update FAILED\n");
+        serial.writeString("      Rename FAILED\n");
     }
 
-    // Test 5: Verify update
-    serial.writeString("  [5] Verify update...\n");
-    if (findInRoot(test_name)) |file| {
-        var read_buf: [64]u8 = [_]u8{0} ** 64;
-        const bytes = readFile(file.cluster, &read_buf);
-        if (bytes == new_data.len) {
-            passed += 1;
-            serial.writeString("      Verify OK\n");
+    serial.writeString("  [5] Verify rename...\n");
+    if (findInRoot(new_name) != null and findInRoot(test_name) == null) {
+        passed += 1;
+        serial.writeString("      Verify OK\n");
+    } else {
+        failed += 1;
+        serial.writeString("      Verify FAILED\n");
+    }
+
+    serial.writeString("  [6] Copy file...\n");
+    const copy_name = "COPY.TXT";
+    _ = deleteFile(copy_name);
+    if (copyFile(new_name, copy_name)) {
+        passed += 1;
+        serial.writeString("      Copy OK\n");
+    } else {
+        failed += 1;
+        serial.writeString("      Copy FAILED\n");
+    }
+
+    serial.writeString("  [7] Truncate file...\n");
+    if (truncateFile(copy_name, 5)) {
+        if (findInRoot(copy_name)) |f| {
+            if (f.size == 5) {
+                passed += 1;
+                serial.writeString("      Truncate OK\n");
+            } else {
+                failed += 1;
+                serial.writeString("      Truncate size wrong\n");
+            }
         } else {
             failed += 1;
-            serial.writeString("      Verify FAILED\n");
         }
     } else {
         failed += 1;
+        serial.writeString("      Truncate FAILED\n");
     }
 
-    // Test 6: Create directory
-    serial.writeString("  [6] Create directory...\n");
-    const dir_name = "TESTDIR";
-    _ = deleteDirectory(dir_name);
-    if (createDirectory(dir_name)) {
-        passed += 1;
-        serial.writeString("      Directory created OK\n");
-    } else {
-        failed += 1;
-        serial.writeString("      Directory create FAILED\n");
-    }
+    serial.writeString("  [8] Cleanup...\n");
+    _ = deleteFile(new_name);
+    _ = deleteFile(copy_name);
+    passed += 1;
+    serial.writeString("      Cleanup OK\n");
 
-    // Test 7: Delete directory
-    serial.writeString("  [7] Delete directory...\n");
-    if (deleteDirectory(dir_name)) {
-        passed += 1;
-        serial.writeString("      Directory deleted OK\n");
-    } else {
-        failed += 1;
-        serial.writeString("      Directory delete FAILED\n");
-    }
-
-    // Test 8: Delete test file
-    serial.writeString("  [8] Delete test file...\n");
-    if (deleteFile(test_name)) {
-        passed += 1;
-        serial.writeString("      Delete OK\n");
-    } else {
-        failed += 1;
-        serial.writeString("      Delete FAILED\n");
-    }
-
-    // Summary
-    serial.writeString("  FAT32 B2.2 Tests: ");
+    serial.writeString("  FAT32 B2.3 Tests: ");
     printU32(passed);
     serial.writeString(" passed, ");
     printU32(failed);

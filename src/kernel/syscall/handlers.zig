@@ -2,6 +2,7 @@
 //! All handlers use numbers.zig error codes.
 //! Capability checks done in table.zig BEFORE handlers.
 //! Production fixes: fd overflow, user address validation, safe casts.
+//! B2.3: Implemented sysRename and sysTruncate
 
 const serial = @import("../drivers/serial/serial.zig");
 const vfs = @import("../fs/vfs.zig");
@@ -419,7 +420,7 @@ pub fn sysNanosleep(req_ptr: u64, rem_ptr: u64) i64 {
 }
 
 // =============================================================================
-// FS Extended
+// FS Extended (B2.3: Rename & Truncate implemented)
 // =============================================================================
 
 pub fn sysStat(path_ptr: u64, stat_ptr: u64) i64 {
@@ -478,16 +479,55 @@ const ReaddirResult = extern struct {
     size: u64 = 0,
 };
 
+/// B2.3: SYS_RENAME — rename/move a file or directory
 pub fn sysRename(old_ptr: u64, new_ptr: u64) i64 {
-    _ = old_ptr;
-    _ = new_ptr;
-    return ENOSYS; // TODO SC8
+    const old_path = readCString(old_ptr, 256) orelse return EFAULT;
+    const new_path = readCString(new_ptr, 256) orelse return EFAULT;
+
+    if (old_path.len == 0 or new_path.len == 0) return EINVAL;
+
+    if (vfs.rename(old_path, new_path)) {
+        return SUCCESS;
+    }
+
+    // Determine more specific error
+    if (vfs.resolvePath(old_path) == null) return ENOENT;
+    if (vfs.resolvePath(new_path) != null) return EEXIST;
+    return EACCES;
 }
 
+/// B2.3: SYS_TRUNCATE — truncate a file to specified length
 pub fn sysTruncate(path_ptr: u64, length: u64) i64 {
-    _ = path_ptr;
-    _ = length;
-    return ENOSYS; // TODO SC8
+    const p = readCString(path_ptr, 256) orelse return EFAULT;
+    if (p.len == 0) return EINVAL;
+
+    // Check file exists and is regular
+    const inode = vfs.resolvePath(p) orelse return ENOENT;
+    if (inode.file_type == .Directory) return numbers.EISDIR;
+
+    if (vfs.truncate(p, length)) {
+        return SUCCESS;
+    }
+
+    return EACCES;
+}
+
+/// B2.3: SYS_FTRUNCATE — truncate by file descriptor
+pub fn sysFtruncate(fd_raw: u64, length: u64) i64 {
+    const fd: i32 = @intCast(@min(fd_raw, 0x7FFFFFFF));
+    if (fd < 3) return EBADF;
+
+    const table = getFdTable() orelse return EBADF;
+    const file = table.getFile(fd) orelse return EBADF;
+
+    if (!file.flags.write) return EBADF;
+    if (file.inode.file_type == .Directory) return numbers.EISDIR;
+
+    if (vfs.ftruncate(file, length)) {
+        return SUCCESS;
+    }
+
+    return EIO;
 }
 
 pub fn sysSeek(fd_raw: u64, offset: u64, whence: u64) i64 {
@@ -562,8 +602,6 @@ pub fn sysFbGetInfo(info_ptr: u64) i64 {
 
 pub fn sysFbMap() i64 {
     if (!framebuffer.isInitialized()) return ENODEV;
-    // Framebuffer address is in higher-half (bit 63 set).
-    // Return as bitcast to preserve full 64-bit address.
     const addr: u64 = @intFromPtr(framebuffer.getAddress());
     return @bitCast(addr);
 }
@@ -603,6 +641,7 @@ pub fn sysScreenGetOrientation() i64 {
     }
     return @intFromEnum(graphics_api.Orientation.Portrait);
 }
+
 // =============================================================================
 // Input Syscalls
 // =============================================================================
@@ -632,9 +671,8 @@ pub fn sysInputPoll(event_ptr: u64) i64 {
     const mouse = @import("../drivers/input/mouse.zig");
     if (mouse.pollEvent()) |me| {
         event.timestamp = me.timestamp;
-        event.device_id = 1; // mouse = device 1
+        event.device_id = 1;
 
-        // Determine event type
         const prev_buttons = event.data.mouse.buttons;
         _ = prev_buttons;
 
@@ -643,7 +681,6 @@ pub fn sysInputPoll(event_ptr: u64) i64 {
         } else if (me.scroll != 0) {
             event.event_type = .MouseScroll;
         } else {
-            // Button change
             event.event_type = .MouseButtonDown;
         }
 

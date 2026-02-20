@@ -1,4 +1,5 @@
 //! Zamrud OS - RAM File System (RAMFS)
+//! B2.3: Added rename support + public inode helper
 
 const serial = @import("../drivers/serial/serial.zig");
 const heap = @import("../mm/heap.zig");
@@ -306,6 +307,78 @@ fn ramfsReaddir(inode: *vfs.Inode, index: usize) ?*vfs.DirEntry {
     return null;
 }
 
+// =============================================================================
+// B2.3: Rename Operation
+// =============================================================================
+
+fn ramfsRename(old_parent: *vfs.Inode, old_name: []const u8, new_parent: *vfs.Inode, new_name: []const u8) bool {
+    const old_parent_entry = getEntryFromInode(old_parent) orelse return false;
+    const new_parent_entry = getEntryFromInode(new_parent) orelse return false;
+
+    if (old_parent_entry.inode.file_type != .Directory) return false;
+    if (new_parent_entry.inode.file_type != .Directory) return false;
+
+    // Find source child
+    var src_idx: ?usize = null;
+    var src_child: ?*RamfsEntry = null;
+    var i: usize = 0;
+    while (i < old_parent_entry.children_count) : (i += 1) {
+        if (old_parent_entry.children[i]) |child| {
+            if (strEqual(child.getName(), old_name)) {
+                src_idx = i;
+                src_child = child;
+                break;
+            }
+        }
+    }
+
+    if (src_child == null or src_idx == null) return false;
+
+    // Check destination name doesn't exist in new parent
+    i = 0;
+    while (i < new_parent_entry.children_count) : (i += 1) {
+        if (new_parent_entry.children[i]) |child| {
+            if (strEqual(child.getName(), new_name)) {
+                return false; // Destination exists
+            }
+        }
+    }
+
+    const child = src_child.?;
+
+    // Same parent — just rename in place
+    if (old_parent_entry == new_parent_entry) {
+        child.setName(new_name);
+        return true;
+    }
+
+    // Different parent — move child
+    if (new_parent_entry.children_count >= MAX_CHILDREN) return false;
+
+    // Update child name and parent
+    child.setName(new_name);
+    child.parent = new_parent_entry;
+
+    // Add to new parent
+    new_parent_entry.children[new_parent_entry.children_count] = child;
+    new_parent_entry.children_count += 1;
+
+    // Remove from old parent
+    const idx = src_idx.?;
+    var j = idx;
+    while (j < old_parent_entry.children_count - 1) : (j += 1) {
+        old_parent_entry.children[j] = old_parent_entry.children[j + 1];
+    }
+    old_parent_entry.children[old_parent_entry.children_count - 1] = null;
+    old_parent_entry.children_count -= 1;
+
+    return true;
+}
+
+// =============================================================================
+// Inode Ops Table (B2.3: added rename)
+// =============================================================================
+
 const ramfs_inode_ops = vfs.InodeOps{
     .lookup = &ramfsLookup,
     .create = &ramfsCreate,
@@ -313,6 +386,7 @@ const ramfs_inode_ops = vfs.InodeOps{
     .unlink = &ramfsUnlink,
     .rmdir = &ramfsRmdir,
     .readdir = &ramfsReaddir,
+    .rename = &ramfsRename,
 };
 
 // =============================================================================
@@ -473,6 +547,11 @@ fn getEntryFromInode(inode: *vfs.Inode) ?*RamfsEntry {
         }
     }
     return null;
+}
+
+/// B2.3: Public accessor for VFS truncate support
+pub fn getEntryFromInodePublic(inode_ptr: *vfs.Inode) ?*RamfsEntry {
+    return getEntryFromInode(inode_ptr);
 }
 
 fn strEqual(a: []const u8, b: []const u8) bool {

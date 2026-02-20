@@ -1,5 +1,6 @@
 //! Zamrud OS - Shell Commands Main Dispatcher
 //! Phases A-F5.0 + T4.2 (Environment Variables)
+//! B2.3: Added mv, cp, truncate commands
 
 const shell = @import("shell.zig");
 
@@ -28,9 +29,9 @@ const shmem_cmd = @import("commands/shmem.zig");
 const vio_cmd = @import("commands/violation.zig");
 const user_cmd = @import("commands/user.zig");
 const encfs_cmd = @import("commands/encfs.zig");
-const enc_int_cmd = @import("commands/enc_int.zig"); // F4.1
-const sys_encrypt_cmd = @import("commands/sys_encrypt.zig"); // F4.2
-const zam_cmd = @import("commands/zam.zig"); // F5.0
+const enc_int_cmd = @import("commands/enc_int.zig");
+const sys_encrypt_cmd = @import("commands/sys_encrypt.zig");
+const zam_cmd = @import("commands/zam.zig");
 const mouse_cmd = @import("commands/mouse.zig");
 
 // =============================================================================
@@ -74,7 +75,7 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "theme")) {
         system.cmdTheme(args);
     }
-    // Filesystem
+    // Filesystem (B2.3: added mv, cp, truncate)
     else if (helpers.strEql(command, "ls")) {
         filesystem.cmdLs(args);
     } else if (helpers.strEql(command, "cd")) {
@@ -93,6 +94,12 @@ pub fn execute(input: []const u8) void {
         filesystem.cmdCat(args);
     } else if (helpers.strEql(command, "write")) {
         filesystem.cmdWrite(args);
+    } else if (helpers.strEql(command, "mv") or helpers.strEql(command, "rename")) {
+        filesystem.cmdMv(args);
+    } else if (helpers.strEql(command, "cp") or helpers.strEql(command, "copy")) {
+        filesystem.cmdCp(args);
+    } else if (helpers.strEql(command, "truncate")) {
+        filesystem.cmdTruncate(args);
     }
     // Device
     else if (helpers.strEql(command, "lsdev")) {
@@ -343,8 +350,7 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "power")) {
         power_cmd.execute(args);
     }
-
-    // In the dispatch function, add:
+    // Mouse
     else if (helpers.strEql(command, "mouse")) {
         mouse_cmd.execute(args);
     }
@@ -457,7 +463,6 @@ fn runAllTests() void {
     zam_cmd.cmdZamTest();
     shell.newLine();
 
-    // T4.2: Environment variable tests
     shell.printInfoLine("=== ENVIRONMENT VARIABLE TESTS (T4.2) ===");
     system.cmdEnvTest("");
     shell.newLine();
