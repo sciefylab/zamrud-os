@@ -229,6 +229,7 @@ pub const SYS_READDIR: u64 = 281;
 pub const SYS_RENAME: u64 = 282;
 pub const SYS_TRUNCATE: u64 = 283;
 pub const SYS_SEEK: u64 = 284;
+pub const SYS_FTRUNCATE: u64 = 285;
 
 // =============================================================================
 // Graphics/Framebuffer Syscalls (300-319)

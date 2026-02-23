@@ -657,7 +657,7 @@ fn runEncTests() void {
 }
 
 // =============================================================================
-// SC8: FS Extended Tests
+// SC8: FS Extended Tests — FIXED: B2.3 rename/truncate now implemented
 // =============================================================================
 
 fn runFsTestsInline(p: *u32, f: *u32) void {
@@ -699,12 +699,12 @@ fn runFsTestsInline(p: *u32, f: *u32) void {
         0,
     ) == numbers.EFAULT, f);
 
-    // READDIR on root, index 0 → should return 1 (entry found) or 0
+    // READDIR on root, index 0
     var dir_buf: [280]u8 = [_]u8{0} ** 280;
     const readdir_r = syscall_dispatcher.dispatch(
         numbers.SYS_READDIR,
         @intFromPtr(root_path.ptr),
-        0, // index 0
+        0,
         @intFromPtr(&dir_buf),
         0,
         0,
@@ -735,9 +735,7 @@ fn runFsTestsInline(p: *u32, f: *u32) void {
         0,
     ) == numbers.EBADF, f);
 
-    // SEEK invalid whence
-    // First need a valid fd — open a test file if VFS has one
-    // For safety, just test with bad fd
+    // SEEK fd<3 → EBADF
     p.* += helpers.doTest("SEEK fd<3", syscall_dispatcher.dispatch(
         numbers.SYS_SEEK,
         0,
@@ -748,10 +746,10 @@ fn runFsTestsInline(p: *u32, f: *u32) void {
         0,
     ) == numbers.EBADF, f);
 
-    // RENAME → ENOSYS (stub)
+    // B2.3: RENAME — source doesn't exist → ENOENT
     const old_name = "/old.txt";
     const new_name = "/new.txt";
-    p.* += helpers.doTest("RENAME stub", syscall_dispatcher.dispatch(
+    const rename_r = syscall_dispatcher.dispatch(
         numbers.SYS_RENAME,
         @intFromPtr(old_name.ptr),
         @intFromPtr(new_name.ptr),
@@ -759,10 +757,22 @@ fn runFsTestsInline(p: *u32, f: *u32) void {
         0,
         0,
         0,
-    ) == numbers.ENOSYS, f);
+    );
+    p.* += helpers.doTest("RENAME noexist", rename_r == numbers.ENOENT, f);
 
-    // TRUNCATE → ENOSYS (stub)
-    p.* += helpers.doTest("TRUNCATE stub", syscall_dispatcher.dispatch(
+    // B2.3: RENAME null path → EFAULT
+    p.* += helpers.doTest("RENAME null", syscall_dispatcher.dispatch(
+        numbers.SYS_RENAME,
+        0,
+        @intFromPtr(new_name.ptr),
+        0,
+        0,
+        0,
+        0,
+    ) == numbers.EFAULT, f);
+
+    // B2.3: TRUNCATE directory → EISDIR
+    const trunc_dir = syscall_dispatcher.dispatch(
         numbers.SYS_TRUNCATE,
         @intFromPtr(root_path.ptr),
         0,
@@ -770,7 +780,43 @@ fn runFsTestsInline(p: *u32, f: *u32) void {
         0,
         0,
         0,
-    ) == numbers.ENOSYS, f);
+    );
+    p.* += helpers.doTest("TRUNCATE dir", trunc_dir == numbers.EISDIR, f);
+
+    // B2.3: TRUNCATE nonexistent → ENOENT
+    const trunc_nopath = "/nonexist_trunc_xyz";
+    const trunc_no = syscall_dispatcher.dispatch(
+        numbers.SYS_TRUNCATE,
+        @intFromPtr(trunc_nopath.ptr),
+        0,
+        0,
+        0,
+        0,
+        0,
+    );
+    p.* += helpers.doTest("TRUNCATE noexist", trunc_no == numbers.ENOENT, f);
+
+    // B2.3: TRUNCATE null → EFAULT
+    p.* += helpers.doTest("TRUNCATE null", syscall_dispatcher.dispatch(
+        numbers.SYS_TRUNCATE,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ) == numbers.EFAULT, f);
+
+    // B2.3: FTRUNCATE bad fd → EBADF
+    p.* += helpers.doTest("FTRUNCATE bad fd", syscall_dispatcher.dispatch(
+        numbers.SYS_FTRUNCATE,
+        999,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ) == numbers.EBADF, f);
 }
 
 fn runFsTests() void {

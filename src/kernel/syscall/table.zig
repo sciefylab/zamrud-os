@@ -175,6 +175,7 @@ fn dispatchFsExt(num: u64, a1: u64, a2: u64, a3: u64) i64 {
         numbers.SYS_RENAME => handlers.sysRename(a1, a2),
         numbers.SYS_TRUNCATE => handlers.sysTruncate(a1, a2),
         numbers.SYS_SEEK => handlers.sysSeek(a1, a2, a3),
+        numbers.SYS_FTRUNCATE => handlers.sysFtruncate(a1, a2),
         else => numbers.ENOSYS,
     };
 }
