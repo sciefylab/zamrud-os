@@ -467,6 +467,13 @@ fn runAllTests() void {
     system.cmdEnvTest("");
     shell.newLine();
 
+    // =========================================================
+    // ADD THIS: Privacy & Identity Tests (P.1/P.2/P.5)
+    // =========================================================
+    shell.printInfoLine("=== IDENTITY & PRIVACY TESTS (P.1/P.2/P.5) ===");
+    identity_cmd.runTest("all");
+    shell.newLine();
+
     shell.printInfoLine("########################################");
     shell.printInfoLine("##  COMPLETE TEST SUITE FINISHED      ##");
     shell.printInfoLine("########################################");
