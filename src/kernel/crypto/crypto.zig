@@ -1,4 +1,5 @@
 //! Zamrud OS - Cryptography Module
+//! H.1 + H.2: Security Hardened
 
 const serial = @import("../drivers/serial/serial.zig");
 
@@ -7,17 +8,21 @@ pub const random = @import("random.zig");
 pub const keys = @import("keys.zig");
 pub const signature = @import("signature.zig");
 pub const aes = @import("aes.zig");
+pub const constant_time = @import("constant_time.zig");
+pub const entropy = @import("entropy.zig");
 
-// Re-exports
+// Hash re-exports
 pub const Sha256 = hash.Sha256;
 pub const sha256 = hash.sha256;
 pub const sha256Into = hash.sha256Into;
 pub const sha256Ptr = hash.sha256Ptr;
 pub const hashEqual = hash.hashEqual;
 
+// Signature re-exports
 pub const KeyPair = signature.KeyPair;
 pub const verify = signature.verify;
 
+// Key re-exports
 pub const SeedPhrase = keys.SeedPhrase;
 
 // AES re-exports
@@ -26,9 +31,23 @@ pub const encryptCBC = aes.encryptCBC;
 pub const decryptCBC = aes.decryptCBC;
 pub const deriveKey = aes.deriveKey;
 
+// H.1: Constant-time re-exports
+pub const constantTimeCompare = constant_time.constantTimeCompare;
+pub const constantTimeCompare32 = constant_time.constantTimeCompare32;
+pub const constantTimeCompare64 = constant_time.constantTimeCompare64;
+pub const constantTimeIsZero = constant_time.constantTimeIsZero;
+pub const secureZero = constant_time.secureZero;
+pub const secureZero32 = constant_time.secureZero32;
+pub const secureZero64 = constant_time.secureZero64;
+
+// H.2: Entropy re-exports
+pub const getSecureBytes = entropy.getSecureBytes;
+pub const addEventEntropy = entropy.addEventEntropy;
+
 pub fn init() void {
     serial.writeString("[CRYPTO] Initializing...\n");
     random.init();
+    entropy.init();
     serial.writeString("[CRYPTO] Crypto subsystem ready\n");
 }
 
@@ -38,7 +57,7 @@ pub fn isInitialized() bool {
 
 pub fn runTests() bool {
     serial.writeString("\n========================================\n");
-    serial.writeString("  CRYPTO TEST SUITE\n");
+    serial.writeString("  CRYPTO TEST SUITE (HARDENED)\n");
     serial.writeString("========================================\n\n");
 
     var passed: u32 = 0;
@@ -88,8 +107,8 @@ pub fn runTests() bool {
     }
     serial.writeString("\n");
 
-    // Test 5: Signatures
-    serial.writeString("[DEBUG] Starting signature test...\n");
+    // Test 5: Signatures (HARDENED)
+    serial.writeString("[DEBUG] Starting signature test (HARDENED)...\n");
     if (signature.test_signature()) {
         passed += 1;
         serial.writeString("[DEBUG] Signature test completed OK\n");
@@ -108,13 +127,35 @@ pub fn runTests() bool {
         failed += 1;
         serial.writeString("[DEBUG] AES-256 test FAILED\n");
     }
+    serial.writeString("\n");
+
+    // Test 7: Constant-Time Operations (H.1)
+    serial.writeString("[DEBUG] Starting constant-time test (H.1)...\n");
+    if (constant_time.runTests()) {
+        passed += 1;
+        serial.writeString("[DEBUG] Constant-time test completed OK\n");
+    } else {
+        failed += 1;
+        serial.writeString("[DEBUG] Constant-time test FAILED\n");
+    }
+    serial.writeString("\n");
+
+    // Test 8: Entropy & CSPRNG (H.2)
+    serial.writeString("[DEBUG] Starting entropy test (H.2)...\n");
+    if (entropy.runTests()) {
+        passed += 1;
+        serial.writeString("[DEBUG] Entropy test completed OK\n");
+    } else {
+        failed += 1;
+        serial.writeString("[DEBUG] Entropy test FAILED\n");
+    }
 
     serial.writeString("\n========================================\n");
     serial.writeString("  RESULTS: ");
     printU32(passed);
     serial.writeString(" passed, ");
     printU32(failed);
-    serial.writeString(" failed\n");
+    serial.writeString(" failed (of 8 suites)\n");
     serial.writeString("========================================\n");
 
     if (failed == 0) {
