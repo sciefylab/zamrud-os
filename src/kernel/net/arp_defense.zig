@@ -814,8 +814,8 @@ fn logEvent(
             .gratuitous => "GRATUITOUS",
             .probe => "PROBE",
             .announcement => "ANNOUNCE",
-            .spoof_attempt => "⚠️ SPOOF",
-            .flood => "⚠️ FLOOD",
+            .spoof_attempt => "[!] SPOOF",
+            .flood => "[!] FLOOD",
             .binding_changed => "BINDING",
         });
         serial.writeString(" from ");

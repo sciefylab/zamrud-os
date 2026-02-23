@@ -373,51 +373,51 @@ pub fn execute(input: []const u8) void {
 // =============================================================================
 
 fn runAllTests() void {
-    // helpers.printTestHeader("ZAMRUD OS - COMPLETE TEST SUITE");
+    helpers.printTestHeader("ZAMRUD OS - COMPLETE TEST SUITE");
 
-    // shell.printInfoLine("=== SMOKE TESTS ===");
-    // smoke_cmd.execute("run");
-    // shell.newLine();
+    shell.printInfoLine("=== SMOKE TESTS ===");
+    smoke_cmd.execute("run");
+    shell.newLine();
 
-    // shell.printInfoLine("=== NETWORK TESTS ===");
-    // network_cmd.runTest("all");
-    // shell.newLine();
+    shell.printInfoLine("=== NETWORK TESTS ===");
+    network_cmd.runTest("all");
+    shell.newLine();
 
-    // shell.printInfoLine("=== P2P TESTS ===");
-    // p2p_cmd.runTest("all");
-    // shell.newLine();
+    shell.printInfoLine("=== P2P TESTS ===");
+    p2p_cmd.runTest("all");
+    shell.newLine();
 
-    // shell.printInfoLine("=== GATEWAY TESTS ===");
-    // gateway_cmd.execute("test");
-    // shell.newLine();
+    shell.printInfoLine("=== GATEWAY TESTS ===");
+    gateway_cmd.execute("test");
+    shell.newLine();
 
-    // shell.printInfoLine("=== SECURITY/FIREWALL TESTS ===");
-    // security_cmd.runTest("all");
-    // shell.newLine();
+    shell.printInfoLine("=== SECURITY/FIREWALL TESTS ===");
+    security_cmd.runTest("all");
+    shell.newLine();
 
-    // shell.printInfoLine("=== CRYPTO TESTS ===");
-    // crypto_cmd.execute("test");
-    // shell.newLine();
+    shell.printInfoLine("=== CRYPTO TESTS ===");
+    crypto_cmd.execute("test");
+    shell.newLine();
 
-    // shell.printInfoLine("=== SYSCALL TESTS ===");
-    // syscall_cmd.execute("test");
-    // shell.newLine();
+    shell.printInfoLine("=== SYSCALL TESTS ===");
+    syscall_cmd.execute("test");
+    shell.newLine();
 
-    // shell.printInfoLine("=== BOOT TESTS ===");
-    // boot_cmd.execute("test");
-    // shell.newLine();
+    shell.printInfoLine("=== BOOT TESTS ===");
+    boot_cmd.execute("test");
+    shell.newLine();
 
-    // shell.printInfoLine("=== DISK TESTS ===");
-    // disk_cmd.execute("test");
-    // shell.newLine();
+    shell.printInfoLine("=== DISK TESTS ===");
+    disk_cmd.execute("test");
+    shell.newLine();
 
-    // shell.printInfoLine("=== CONFIG PERSISTENCE TESTS ===");
-    // config_cmd.execute("test");
-    // shell.newLine();
+    shell.printInfoLine("=== CONFIG PERSISTENCE TESTS ===");
+    config_cmd.execute("test");
+    shell.newLine();
 
-    // shell.printInfoLine("=== CAPABILITY TESTS (E3.1) ===");
-    // process_cmd.cmdCaps("test");
-    // shell.newLine();
+    shell.printInfoLine("=== CAPABILITY TESTS (E3.1) ===");
+    process_cmd.cmdCaps("test");
+    shell.newLine();
 
     shell.printInfoLine("=== UNVEIL TESTS (E3.2) ===");
     process_cmd.cmdUnveil("test");

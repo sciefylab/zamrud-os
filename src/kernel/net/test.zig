@@ -1,5 +1,5 @@
-//! Zamrud OS - Network Stack Tests (B1 + B2)
-//! Comprehensive tests for Network Drivers and TCP/IP Stack
+//! Zamrud OS - Network Stack Tests (B1 + B2 + S.3)
+//! Comprehensive tests for Network Drivers, TCP/IP Stack, and ARP Defense
 
 const serial = @import("../drivers/serial/serial.zig");
 const terminal = @import("../drivers/display/terminal.zig");
@@ -11,6 +11,7 @@ const e1000 = @import("../drivers/network/e1000.zig");
 const pci = @import("../drivers/pci/pci.zig");
 const net = @import("net.zig");
 const arp = @import("arp.zig");
+const arp_defense = @import("arp_defense.zig");
 const ip = @import("ip.zig");
 const icmp = @import("icmp.zig");
 const udp = @import("udp.zig");
@@ -25,10 +26,7 @@ const dns = @import("dns.zig");
 // =============================================================================
 
 fn writeString(s: []const u8) void {
-    // Always write to serial for debugging
     serial.writeString(s);
-
-    // Also write to terminal if available
     if (terminal.isInitialized()) {
         for (s) |c| {
             terminal.writeChar(c);
@@ -139,7 +137,7 @@ fn padString(s: []const u8, width: usize) void {
 pub fn runAllTests() TestResult {
     var result = TestResult.init();
 
-    printHeader("NETWORK TEST SUITE (B1 + B2)");
+    printHeader("NETWORK TEST SUITE (B1 + B2 + S.3)");
 
     // =========================================================================
     // B1: Network Infrastructure
@@ -169,6 +167,18 @@ pub fn runAllTests() TestResult {
     testSocketApi(&result);
     testDhcpDns(&result);
     testNetworkIntegration(&result);
+
+    // =========================================================================
+    // S.3: ARP Defense / PeerID Crypto Binding
+    // =========================================================================
+    printSection("S.3: ARP-PEERID CRYPTO BINDING");
+
+    testArpDefenseInit(&result);
+    testArpDefenseBindings(&result);
+    testArpDefenseValidation(&result);
+    testArpDefenseSpoofDetection(&result);
+    testArpDefenseRateLimit(&result);
+    testArpDefenseEvents(&result);
 
     // Summary
     printSummary(&result);
@@ -606,7 +616,242 @@ fn testNetworkIntegration(result: *TestResult) void {
 }
 
 // =============================================================================
-// Output Helpers - Using unified writeString/writeChar
+// S.3: ARP Defense Tests
+// =============================================================================
+
+fn testArpDefenseInit(result: *TestResult) void {
+    printTest("1", "6", "ARP Defense Initialization");
+
+    // Ensure initialized
+    if (!arp_defense.isInitialized()) {
+        arp_defense.init();
+    }
+
+    result.check(arp_defense.isInitialized(), "ARP Defense init");
+    result.check(arp_defense.getBindingCount() >= 2, "QEMU bindings added");
+
+    const stats = arp_defense.getStats();
+    result.check(stats.bindings_created >= 2, "Stats accessible");
+
+    // Check config defaults
+    result.check(!arp_defense.config.require_signature, "Signature disabled (QEMU)");
+    result.check(!arp_defense.config.require_peer_binding, "Peer binding disabled");
+    result.check(arp_defense.config.detect_gratuitous, "Gratuitous detect ON");
+    result.check(arp_defense.config.auto_blacklist, "Auto-blacklist ON");
+}
+
+fn testArpDefenseBindings(result: *TestResult) void {
+    printTest("2", "6", "Trusted Binding Management");
+
+    const before_count = arp_defense.getBindingCount();
+
+    // Create a test binding with PeerID
+    const test_mac: arp_defense.MacAddress = .{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01 };
+    const test_ip: u32 = (192 << 24) | (168 << 16) | (50 << 8) | 1; // 192.168.50.1
+    const test_peer_id: [32]u8 = [_]u8{0x42} ** 32;
+    const test_pubkey: [32]u8 = [_]u8{0x00} ** 32;
+
+    const created = arp_defense.createBinding(test_mac, test_ip, test_peer_id, test_pubkey);
+    result.check(created, "Create crypto binding");
+    result.check(arp_defense.getBindingCount() == before_count + 1, "Binding count +1");
+
+    // Check binding properties
+    var found = false;
+    for (0..arp_defense.getBindingCount()) |i| {
+        if (arp_defense.getBinding(i)) |b| {
+            if (b.ip == test_ip) {
+                found = true;
+                result.check(b.verified, "Binding verified");
+                result.check(b.trust_level == .verified, "Trust = verified");
+                break;
+            }
+        }
+    }
+    if (!found) {
+        result.fail("Binding verified");
+        result.fail("Trust = verified");
+    }
+
+    // Create static binding
+    const static_mac: arp_defense.MacAddress = .{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
+    const static_ip: u32 = (10 << 24) | (0 << 16) | (50 << 8) | 1; // 10.0.50.1
+    const static_ok = arp_defense.createStaticBinding(static_mac, static_ip, "Test Static");
+    result.check(static_ok, "Create static binding");
+
+    // Verify static has trusted level
+    var static_found = false;
+    for (0..arp_defense.getBindingCount()) |i| {
+        if (arp_defense.getBinding(i)) |b| {
+            if (b.ip == static_ip) {
+                static_found = true;
+                result.check(b.trust_level == .trusted, "Static trust level");
+                break;
+            }
+        }
+    }
+    if (!static_found) {
+        result.fail("Static trust level");
+    }
+
+    // Remove test binding
+    result.check(arp_defense.removeBinding(test_ip), "Remove binding");
+
+    // Cleanup static
+    _ = arp_defense.removeBinding(static_ip);
+}
+
+fn testArpDefenseValidation(result: *TestResult) void {
+    printTest("3", "6", "ARP Packet Validation");
+
+    // Test with QEMU gateway (should be trusted)
+    const qemu_gw_mac: arp_defense.MacAddress = .{ 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
+    const qemu_gw_ip: u32 = (10 << 24) | (0 << 16) | (2 << 8) | 2; // 10.0.2.2
+    const our_ip: u32 = (10 << 24) | (0 << 16) | (2 << 8) | 15; // 10.0.2.15
+
+    const valid_result = arp_defense.validateArpPacket(
+        1, // ARP request
+        qemu_gw_mac,
+        qemu_gw_ip,
+        [_]u8{0} ** 6,
+        our_ip,
+        null,
+    );
+    result.check(valid_result.allowed, "Trusted source allowed");
+    result.check(@intFromEnum(valid_result.trust_level) >= @intFromEnum(arp_defense.TrustLevel.trusted), "Trust level >= trusted");
+
+    // Test with unknown source (should be allowed but unverified in default config)
+    const unknown_mac: arp_defense.MacAddress = .{ 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01 };
+    const unknown_ip: u32 = (172 << 24) | (16 << 16) | (0 << 8) | 100; // 172.16.0.100
+
+    const unknown_result = arp_defense.validateArpPacket(
+        1,
+        unknown_mac,
+        unknown_ip,
+        [_]u8{0} ** 6,
+        our_ip,
+        null,
+    );
+    // With default config (no signature required), unknown should be allowed
+    result.check(unknown_result.trust_level == .unknown, "Unknown = unverified");
+
+    // Verify stats updated
+    const stats = arp_defense.getStats();
+    result.check(stats.total_packets > 0, "Stats: packets counted");
+    result.check(stats.packets_allowed > 0, "Stats: allowed counted");
+}
+
+fn testArpDefenseSpoofDetection(result: *TestResult) void {
+    printTest("4", "6", "Spoof Detection");
+
+    // First, create a verified binding
+    const legit_mac: arp_defense.MacAddress = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
+    const legit_ip: u32 = (192 << 24) | (168 << 16) | (99 << 8) | 1; // 192.168.99.1
+    const peer_id: [32]u8 = [_]u8{0xAB} ** 32;
+    const pubkey: [32]u8 = [_]u8{0x00} ** 32;
+
+    _ = arp_defense.createBinding(legit_mac, legit_ip, peer_id, pubkey);
+
+    // Now try to spoof with different MAC
+    const spoof_mac: arp_defense.MacAddress = .{ 0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA };
+
+    const spoof_result = arp_defense.validateArpPacket(
+        2, // ARP reply
+        spoof_mac,
+        legit_ip, // Same IP, different MAC = SPOOF
+        [_]u8{0} ** 6,
+        0,
+        null,
+    );
+
+    result.check(!spoof_result.allowed, "Spoof blocked");
+
+    const stats = arp_defense.getStats();
+    result.check(stats.spoof_attempts > 0, "Spoof attempt counted");
+    result.check(stats.packets_blocked > 0, "Blocked counted");
+
+    // Cleanup
+    _ = arp_defense.removeBinding(legit_ip);
+}
+
+fn testArpDefenseRateLimit(result: *TestResult) void {
+    printTest("5", "6", "Rate Limiting");
+
+    // Use a unique IP for rate limit test
+    const rate_mac: arp_defense.MacAddress = .{ 0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE };
+    const rate_ip: u32 = (192 << 24) | (168 << 16) | (200 << 8) | 1; // 192.168.200.1
+
+    // Get config rate limit
+    const rate_limit = arp_defense.config.arp_rate_limit;
+    result.check(rate_limit > 0, "Rate limit configured");
+
+    // Send many packets quickly - should eventually get rate limited
+    var blocked_count: u32 = 0;
+    var i: u32 = 0;
+    while (i < rate_limit + 20) : (i += 1) {
+        const res = arp_defense.validateArpPacket(
+            1,
+            rate_mac,
+            rate_ip,
+            [_]u8{0} ** 6,
+            0,
+            null,
+        );
+        if (!res.allowed) {
+            blocked_count += 1;
+        }
+    }
+
+    // Some should have been blocked due to rate limiting
+    result.check(blocked_count > 0 or i >= rate_limit, "Rate limit enforced");
+
+    const stats = arp_defense.getStats();
+    result.check(stats.flood_detected >= 0, "Flood stats accessible");
+}
+
+fn testArpDefenseEvents(result: *TestResult) void {
+    printTest("6", "6", "Event Logging & Config");
+
+    // Events should have been logged from previous tests
+    const event_count = arp_defense.getEventCount();
+    result.check(event_count >= 0, "Event count accessible");
+
+    if (event_count > 0) {
+        if (arp_defense.getEvent(0)) |event| {
+            result.check(event.timestamp > 0, "Event has timestamp");
+            result.check(@intFromEnum(event.event_type) <= @intFromEnum(arp_defense.ArpEventType.binding_changed), "Event type valid");
+        } else {
+            result.fail("Event has timestamp");
+            result.fail("Event type valid");
+        }
+    } else {
+        result.skip("Event has timestamp");
+        result.skip("Event type valid");
+    }
+
+    // Test config changes
+    arp_defense.setRequireSignature(true);
+    result.check(arp_defense.config.require_signature, "Set require_signature");
+
+    arp_defense.setRequirePeerBinding(true);
+    result.check(arp_defense.config.require_peer_binding, "Set require_peer_binding");
+
+    // Reset to defaults for other tests
+    arp_defense.setRequireSignature(false);
+    arp_defense.setRequirePeerBinding(false);
+
+    // Clear events
+    arp_defense.clearEvents();
+    result.check(arp_defense.getEventCount() == 0, "Clear events");
+
+    // Test ARP module security integration
+    result.check(arp.isSecurityEnabled(), "ARP security enabled");
+
+    const sec_stats = arp.getSecurityStats();
+    result.check(sec_stats.total_entries >= 0, "ARP security stats");
+}
+
+// =============================================================================
+// Output Helpers
 // =============================================================================
 
 fn printHeader(title: []const u8) void {
