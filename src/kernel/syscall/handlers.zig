@@ -673,9 +673,6 @@ pub fn sysInputPoll(event_ptr: u64) i64 {
         event.timestamp = me.timestamp;
         event.device_id = 1;
 
-        const prev_buttons = event.data.mouse.buttons;
-        _ = prev_buttons;
-
         if (me.dx != 0 or me.dy != 0) {
             event.event_type = .MouseMove;
         } else if (me.scroll != 0) {

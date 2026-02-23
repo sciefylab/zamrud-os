@@ -1,5 +1,6 @@
 //! Zamrud OS - MBR Partition Table Parser & Creator
 //! Supports MBR (Master Boot Record) partition tables
+//! B2.4: Pluggable I/O for AHCI/ATA backend support
 
 const serial = @import("../serial/serial.zig");
 const ata = @import("ata.zig");
@@ -176,6 +177,49 @@ var partition_count: usize = 0;
 var initialized: bool = false;
 
 // ============================================================================
+// B2.4: Pluggable I/O Functions
+// Routes through storage.zig when AHCI is active, falls back to ata.zig
+// ============================================================================
+
+pub const ReadSectorFn = *const fn (usize, u64, *[512]u8) ata.AtaError!void;
+pub const WriteSectorFn = *const fn (usize, u64, *const [512]u8) ata.AtaError!void;
+
+var read_sector_fn: ?ReadSectorFn = null;
+var write_sector_fn: ?WriteSectorFn = null;
+
+/// Called by storage.zig to set up I/O routing through the active backend
+pub fn setIoFunctions(read_fn: ReadSectorFn, write_fn: WriteSectorFn) void {
+    read_sector_fn = read_fn;
+    write_sector_fn = write_fn;
+    serial.writeString("[MBR] I/O functions set (routed through storage layer)\n");
+}
+
+/// Read a sector using the active backend (AHCI or ATA)
+fn diskReadSector(drive_idx: usize, lba: u64, buffer: *[512]u8) ata.AtaError!void {
+    if (read_sector_fn) |f| {
+        return f(drive_idx, lba, buffer);
+    }
+    // Fallback to direct ATA if no routing set up yet
+    return ata.readSector(drive_idx, lba, buffer);
+}
+
+/// Write a sector using the active backend (AHCI or ATA)
+fn diskWriteSector(drive_idx: usize, lba: u64, buffer: *const [512]u8) ata.AtaError!void {
+    if (write_sector_fn) |f| {
+        return f(drive_idx, lba, buffer);
+    }
+    return ata.writeSector(drive_idx, lba, buffer);
+}
+
+/// Get drive count from the active backend
+fn diskGetDriveCount() usize {
+    // When I/O functions are set, storage.zig manages the drive count
+    // But we still need to scan drives during init
+    // Use ATA count as minimum, AHCI may add more via storage layer
+    return ata.getDriveCount();
+}
+
+// ============================================================================
 // Initialization
 // ============================================================================
 
@@ -187,11 +231,17 @@ pub fn init() void {
     }
     partition_count = 0;
 
-    const drive_count = ata.getDriveCount();
-    var drive_idx: usize = 0;
+    // Scan drives — we try reading sector 0 of each potential drive
+    // The diskReadSector function will route to the correct backend
+    scanDrive(0); // Always try drive 0
 
-    while (drive_idx < drive_count) : (drive_idx += 1) {
-        scanDrive(drive_idx);
+    // Also scan ATA drives if any were detected directly
+    const ata_count = ata.getDriveCount();
+    if (ata_count > 1) {
+        var drive_idx: usize = 1;
+        while (drive_idx < ata_count) : (drive_idx += 1) {
+            scanDrive(drive_idx);
+        }
     }
 
     initialized = true;
@@ -208,11 +258,11 @@ fn scanDrive(drive_idx: usize) void {
     // Retry up to 5 times for reliable read after cold boot
     var attempt: usize = 0;
     while (attempt < 5) : (attempt += 1) {
-        if (ata.readSector(drive_idx, 0, &sector)) {
+        if (diskReadSector(drive_idx, 0, &sector)) {
             success = true;
             break;
         } else |_| {
-            // Delay between retries - let ATA controller settle
+            // Delay between retries - let controller settle
             ioDelay(2000);
         }
     }
@@ -338,12 +388,18 @@ pub fn formatDisk(drive_idx: usize, options: FormatOptions) FormatError!void {
         return FormatError.InvalidConfirmation;
     }
 
-    const drive = ata.getDrive(drive_idx) orelse {
-        serial.writeString("[MBR] ERROR: Drive not found!\n");
+    // Get drive size — try AHCI first, then ATA
+    const size_mb = getDriveSizeMB(drive_idx);
+    if (size_mb == 0) {
+        serial.writeString("[MBR] ERROR: Drive not found or zero size!\n");
         return FormatError.DriveNotFound;
-    };
+    }
 
-    const size_mb: u32 = drive.size_mb;
+    const total_sectors = getDriveSectors(drive_idx);
+    if (total_sectors == 0) {
+        return FormatError.DriveNotFound;
+    }
+
     const min_size = options.format_type.getMinSizeMB();
     const max_size = options.format_type.getMaxSizeMB();
 
@@ -376,12 +432,12 @@ pub fn formatDisk(drive_idx: usize, options: FormatOptions) FormatError!void {
     serial.writeString(options.format_type.getName());
     serial.writeString("...\n");
 
-    if (!createMBR(drive_idx, options.format_type)) {
+    if (!createMBR(drive_idx, options.format_type, total_sectors)) {
         return FormatError.WriteError;
     }
 
     if (options.format_type == .FAT32) {
-        if (!createFAT32BootSector(drive_idx, options.label)) {
+        if (!createFAT32BootSector(drive_idx, options.label, total_sectors)) {
             return FormatError.WriteError;
         }
     }
@@ -405,7 +461,7 @@ pub fn formatDiskSimple(drive_idx: usize, confirm: u32) bool {
 fn hasExistingData(drive_idx: usize) bool {
     var sector: [512]u8 = [_]u8{0} ** 512;
 
-    if (ata.readSector(drive_idx, 0, &sector)) {
+    if (diskReadSector(drive_idx, 0, &sector)) {
         const sig = @as(u16, sector[510]) | (@as(u16, sector[511]) << 8);
         return sig == MBR_SIGNATURE;
     } else |_| {
@@ -414,12 +470,38 @@ fn hasExistingData(drive_idx: usize) bool {
 }
 
 // ============================================================================
+// B2.4: Drive info helpers (backend-agnostic)
+// ============================================================================
+
+fn getDriveSizeMB(drive_idx: usize) u32 {
+    // Try AHCI info first
+    const ahci = @import("ahci.zig");
+    if (ahci.isInitialized() and drive_idx < ahci.getDriveCount()) {
+        return ahci.getDriveSizeMB(drive_idx);
+    }
+    // Fallback to ATA
+    if (ata.getDrive(drive_idx)) |drv| {
+        return drv.size_mb;
+    }
+    return 0;
+}
+
+fn getDriveSectors(drive_idx: usize) u64 {
+    const ahci = @import("ahci.zig");
+    if (ahci.isInitialized() and drive_idx < ahci.getDriveCount()) {
+        return ahci.getDriveSectors(drive_idx);
+    }
+    if (ata.getDrive(drive_idx)) |drv| {
+        return drv.sectors;
+    }
+    return 0;
+}
+
+// ============================================================================
 // Create MBR
 // ============================================================================
 
-fn createMBR(drive_idx: usize, format_type: FormatType) bool {
-    const drive = ata.getDrive(drive_idx) orelse return false;
-
+fn createMBR(drive_idx: usize, format_type: FormatType, total_drive_sectors: u64) bool {
     var sector: [512]u8 = [_]u8{0} ** 512;
 
     // Boot code (infinite loop)
@@ -431,8 +513,12 @@ fn createMBR(drive_idx: usize, format_type: FormatType) bool {
     const start_lba: u32 = 2048;
 
     var total_sectors: u32 = 0;
-    if (drive.sectors > 2048) {
-        total_sectors = @intCast(drive.sectors - 2048);
+    if (total_drive_sectors > 2048) {
+        if (total_drive_sectors - 2048 > 0xFFFFFFFF) {
+            total_sectors = 0xFFFFFFFF; // Cap to 32-bit for MBR
+        } else {
+            total_sectors = @intCast(total_drive_sectors - 2048);
+        }
     } else {
         return false;
     }
@@ -463,7 +549,7 @@ fn createMBR(drive_idx: usize, format_type: FormatType) bool {
     sector[510] = 0x55;
     sector[511] = 0xAA;
 
-    if (ata.writeSector(drive_idx, 0, &sector)) {
+    if (diskWriteSector(drive_idx, 0, &sector)) {
         serial.writeString("[MBR] Partition table created\n");
         return true;
     } else |_| {
@@ -476,15 +562,17 @@ fn createMBR(drive_idx: usize, format_type: FormatType) bool {
 // Create FAT32 Boot Sector
 // ============================================================================
 
-fn createFAT32BootSector(drive_idx: usize, label: [11]u8) bool {
-    const drive = ata.getDrive(drive_idx) orelse return false;
-
+fn createFAT32BootSector(drive_idx: usize, label: [11]u8, total_drive_sectors: u64) bool {
     var sector: [512]u8 = [_]u8{0} ** 512;
 
     const start_lba: u32 = 2048;
     var total_sectors: u32 = 0;
-    if (drive.sectors > 2048) {
-        total_sectors = @intCast(drive.sectors - 2048);
+    if (total_drive_sectors > 2048) {
+        if (total_drive_sectors - 2048 > 0xFFFFFFFF) {
+            total_sectors = 0xFFFFFFFF;
+        } else {
+            total_sectors = @intCast(total_drive_sectors - 2048);
+        }
     }
 
     // Jump instruction
@@ -540,7 +628,7 @@ fn createFAT32BootSector(drive_idx: usize, label: [11]u8) bool {
     sector[511] = 0xAA;
 
     // Write boot sector
-    if (ata.writeSector(drive_idx, start_lba, &sector)) {
+    if (diskWriteSector(drive_idx, start_lba, &sector)) {
         serial.writeString("[FAT32] Boot sector created\n");
     } else |_| {
         serial.writeString("[FAT32] Failed to write boot sector!\n");
@@ -553,7 +641,7 @@ fn createFAT32BootSector(drive_idx: usize, label: [11]u8) bool {
     }
 
     // Create backup boot sector
-    if (ata.writeSector(drive_idx, start_lba + 6, &sector)) {
+    if (diskWriteSector(drive_idx, start_lba + 6, &sector)) {
         serial.writeString("[FAT32] Backup boot sector created\n");
     } else |_| {
         // Not critical
@@ -586,7 +674,7 @@ fn createFSInfoSector(drive_idx: usize, lba: u32) bool {
     sector[510] = 0x55;
     sector[511] = 0xAA;
 
-    if (ata.writeSector(drive_idx, lba, &sector)) {
+    if (diskWriteSector(drive_idx, lba, &sector)) {
         serial.writeString("[FAT32] FSInfo sector created\n");
         return true;
     } else |_| {
@@ -601,13 +689,13 @@ fn initializeFAT(drive_idx: usize, fat_start: u32, fat_size: u32) bool {
     writeU32LE(&sector, 4, 0x0FFFFFFF);
     writeU32LE(&sector, 8, 0x0FFFFFFF);
 
-    if (ata.writeSector(drive_idx, fat_start, &sector)) {
+    if (diskWriteSector(drive_idx, fat_start, &sector)) {
         serial.writeString("[FAT32] FAT1 initialized\n");
     } else |_| {
         return false;
     }
 
-    if (ata.writeSector(drive_idx, fat_start + fat_size, &sector)) {
+    if (diskWriteSector(drive_idx, fat_start + fat_size, &sector)) {
         serial.writeString("[FAT32] FAT2 initialized\n");
     } else |_| {
         // Not critical

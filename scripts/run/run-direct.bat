@@ -1,7 +1,7 @@
 @echo off
 
 echo ============================================
-echo   Zamrud OS - Direct FAT Boot
+echo   Zamrud OS - Direct FAT Boot (AHCI + Disk)
 echo ============================================
 
 if not exist "zig-out\bin\kernel" (
@@ -31,14 +31,39 @@ copy /Y boot\limine.cfg build\direct\limine.cfg >nul
 copy /Y boot\limine.cfg build\direct\boot\limine\limine.cfg >nul
 copy /Y tools\limine\limine-bios.sys build\direct\boot\limine\ >nul
 
+REM Check for persistent disk
+set DISK_OPTS=
+if exist "disks\system.qcow2" (
+    echo Disk: disks\system.qcow2 [AHCI/SATA]
+    set DISK_OPTS=-device ahci,id=ahci0 -drive file=disks\system.qcow2,format=qcow2,if=none,id=sata0 -device ide-hd,drive=sata0,bus=ahci0.0
+) else (
+    echo Disk: None
+    echo   Run 'scripts\run\create-disk.bat' to create virtual disk
+)
+
 echo Starting Zamrud OS (FAT mode)...
+echo Network: E1000
 echo Press Ctrl+C to exit
 echo.
 
 qemu-system-x86_64 ^
     -drive format=raw,file=fat:rw:build\direct ^
+    %DISK_OPTS% ^
     -m 256M ^
     -serial stdio ^
     -cpu qemu64,+rdrand ^
     -no-reboot ^
-    -no-shutdown
+    -no-shutdown ^
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 ^
+    -device e1000,netdev=net0,mac=52:54:00:12:34:56 ^
+    -netdev user,id=net0
+
+REM ============================================
+REM Boot:    FAT directory (build\direct)
+REM Storage: AHCI/SATA (disks\system.qcow2)
+REM Network: E1000
+REM
+REM Fallback (IDE mode):
+REM   Replace DISK_OPTS with:
+REM   set DISK_OPTS=-drive file=disks\system.qcow2,format=qcow2,if=ide
+REM ============================================

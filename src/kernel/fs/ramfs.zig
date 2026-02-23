@@ -308,7 +308,7 @@ fn ramfsReaddir(inode: *vfs.Inode, index: usize) ?*vfs.DirEntry {
 }
 
 // =============================================================================
-// B2.3: Rename Operation
+// B2.3: Rename Operation — FIXED: same-name same-parent = no-op
 // =============================================================================
 
 fn ramfsRename(old_parent: *vfs.Inode, old_name: []const u8, new_parent: *vfs.Inode, new_name: []const u8) bool {
@@ -334,10 +334,19 @@ fn ramfsRename(old_parent: *vfs.Inode, old_name: []const u8, new_parent: *vfs.In
 
     if (src_child == null or src_idx == null) return false;
 
+    // ── FIX #4: Same parent + same name = no-op ──
+    if (old_parent_entry == new_parent_entry and strEqual(old_name, new_name)) {
+        return true;
+    }
+
     // Check destination name doesn't exist in new parent
+    // (Skip source entry itself when checking same parent)
     i = 0;
     while (i < new_parent_entry.children_count) : (i += 1) {
         if (new_parent_entry.children[i]) |child| {
+            // Skip the source entry when same parent (it will be renamed)
+            if (old_parent_entry == new_parent_entry and child == src_child.?) continue;
+
             if (strEqual(child.getName(), new_name)) {
                 return false; // Destination exists
             }
@@ -534,6 +543,69 @@ const ramfs_file_ops = vfs.FileOps{
     .seek = &ramfsSeek,
     .close = &ramfsClose,
 };
+
+// =============================================================================
+// B2.3: Truncate by Inode — called from VFS
+// =============================================================================
+
+pub fn truncateByInode(inode_ptr: *vfs.Inode, length: u64) bool {
+    const entry = getEntryFromInode(inode_ptr) orelse return false;
+
+    if (entry.inode.file_type != .Regular) return false;
+
+    const max_size: u64 = MAX_FILE_SIZE;
+    const new_len = @min(length, max_size);
+    const needed: usize = @intCast(new_len);
+
+    if (new_len <= entry.data_size) {
+        // Shrink
+        entry.data_size = needed;
+        entry.inode.size = new_len;
+        return true;
+    }
+
+    // Extend within existing capacity
+    if (needed <= entry.data_capacity) {
+        // Zero fill from old size to new size
+        if (entry.data) |data| {
+            var i: usize = entry.data_size;
+            while (i < needed) : (i += 1) {
+                data[i] = 0;
+            }
+        }
+        entry.data_size = needed;
+        entry.inode.size = new_len;
+        return true;
+    }
+
+    // Need realloc
+    const new_capacity = ((needed / BLOCK_SIZE) + 1) * BLOCK_SIZE;
+    if (new_capacity > MAX_FILE_SIZE) return false;
+
+    const new_data = heap.kmalloc(new_capacity) orelse return false;
+    const new_ptr: [*]u8 = @ptrCast(@alignCast(new_data));
+
+    // Copy old data
+    if (entry.data) |old_data| {
+        var i: usize = 0;
+        while (i < entry.data_size) : (i += 1) {
+            new_ptr[i] = old_data[i];
+        }
+        heap.kfree(@ptrCast(old_data));
+    }
+
+    // Zero new space
+    var j: usize = entry.data_size;
+    while (j < needed) : (j += 1) {
+        new_ptr[j] = 0;
+    }
+
+    entry.data = new_ptr;
+    entry.data_capacity = new_capacity;
+    entry.data_size = needed;
+    entry.inode.size = new_len;
+    return true;
+}
 
 // =============================================================================
 // Helpers

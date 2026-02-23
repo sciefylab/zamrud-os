@@ -1,5 +1,6 @@
 //! Zamrud OS - Interrupt Descriptor Table (IDT)
 //! Updated for Preemptive Scheduling + Syscall Support
+//! B2.4: AHCI IRQ handler
 
 const cpu = @import("../../core/cpu.zig");
 const gdt = @import("gdt.zig");
@@ -10,6 +11,7 @@ const mouse = @import("../../drivers/input/mouse.zig");
 const timer = @import("../../drivers/timer/timer.zig");
 const scheduler = @import("../../proc/scheduler.zig");
 const syscall_handler = @import("../../syscall/table.zig");
+const ahci = @import("../../drivers/storage/ahci.zig");
 
 const IDTEntry = packed struct {
     isr_low: u16,
@@ -184,6 +186,11 @@ export fn handleTimer() void {
     timer.handleInterrupt();
     scheduler.checkPreempt();
     pic.sendEoi(0);
+}
+
+export fn handleAhci() void {
+    ahci.handleInterrupt();
+    pic.sendEoi(11);
 }
 
 export fn handleDefault() void {
@@ -456,6 +463,43 @@ fn isr_timer() callconv(.naked) void {
             "iretq");
 }
 
+fn isr_ahci() callconv(.naked) void {
+    asm volatile ("push %%rax\n" ++
+            "push %%rcx\n" ++
+            "push %%rdx\n" ++
+            "push %%rbx\n" ++
+            "push %%rsi\n" ++
+            "push %%rdi\n" ++
+            "push %%rbp\n" ++
+            "push %%r8\n" ++
+            "push %%r9\n" ++
+            "push %%r10\n" ++
+            "push %%r11\n" ++
+            "push %%r12\n" ++
+            "push %%r13\n" ++
+            "push %%r14\n" ++
+            "push %%r15\n" ++
+            "sub $8, %%rsp\n" ++
+            "call handleAhci\n" ++
+            "add $8, %%rsp\n" ++
+            "pop %%r15\n" ++
+            "pop %%r14\n" ++
+            "pop %%r13\n" ++
+            "pop %%r12\n" ++
+            "pop %%r11\n" ++
+            "pop %%r10\n" ++
+            "pop %%r9\n" ++
+            "pop %%r8\n" ++
+            "pop %%rbp\n" ++
+            "pop %%rdi\n" ++
+            "pop %%rsi\n" ++
+            "pop %%rbx\n" ++
+            "pop %%rdx\n" ++
+            "pop %%rcx\n" ++
+            "pop %%rax\n" ++
+            "iretq");
+}
+
 fn isr_default() callconv(.naked) void {
     asm volatile ("push %%rax\n" ++
             "push %%rcx\n" ++
@@ -621,6 +665,7 @@ pub fn init() void {
     //    IRQ1  = vector 33 (Keyboard)
     //    IRQ2  = vector 34 (Cascade)
     //    IRQ3-11 = vectors 35-43
+    //    IRQ11 = vector 43 (AHCI)
     //    IRQ12 = vector 44 (Mouse)
     //    IRQ13-15 = vectors 45-47
 
@@ -632,10 +677,12 @@ pub fn init() void {
     // Override specific IRQ handlers AFTER the default loop
     setDescriptor(32, &isr_timer); // IRQ0  - Timer
     setDescriptor(33, &isr_keyboard); // IRQ1  - Keyboard
+    setDescriptor(43, &isr_ahci); // IRQ11 - AHCI/SATA
     setDescriptor(44, &isr_mouse); // IRQ12 - Mouse
 
     serial.writeString("   IDT: Timer    at vector 32 (IRQ0)\n");
     serial.writeString("   IDT: Keyboard at vector 33 (IRQ1)\n");
+    serial.writeString("   IDT: AHCI     at vector 43 (IRQ11)\n");
     serial.writeString("   IDT: Mouse    at vector 44 (IRQ12)\n");
 
     // 6. Syscall handler (INT 0x80) - ring 3 accessible

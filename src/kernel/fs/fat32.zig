@@ -2,10 +2,17 @@
 //! Read/Write support for FAT32 partitions
 //! B2.2: Full write support including VFS integration
 //! B2.3: Rename, Truncate, Copy operations
+//!
+//! Production fixes applied:
+//!   ✓ formatDirEntry handles "." and ".." per FAT32 spec
+//!   ✓ renameFile same-name = no-op (success)
+//!   ✓ copyFile supports files > 4KB via cluster-by-cluster DMA
+//!   ✓ fat32VfsLookup reuses existing inodes instead of freeAll
+//!   ✓ sector_buffer2 used for data transfer (no FAT table conflict)
 
 const serial = @import("../drivers/serial/serial.zig");
 const storage = @import("../drivers/storage/storage.zig");
-const ata = @import("../drivers/storage/ata.zig");
+const ata = storage.ata;
 const mbr = @import("../drivers/storage/mbr.zig");
 
 // ============================================================================
@@ -235,7 +242,7 @@ pub fn mountPartition(drive_index: usize, partition_start: u32) bool {
     fs.drive_index = drive_index;
     fs.partition_start = partition_start;
 
-    if (ata.readSector(drive_index, partition_start, &sector_buffer)) {
+    if (storage.readSector(drive_index, partition_start, &sector_buffer)) {
         fs.bytes_per_sector = readU16LE(&sector_buffer, 11);
         fs.sectors_per_cluster = sector_buffer[13];
         fs.reserved_sectors = readU16LE(&sector_buffer, 14);
@@ -302,7 +309,7 @@ fn readFatEntry(cluster: u32) ?u32 {
     const fat_sector = fs.fat_start_lba + (fat_offset / 512);
     const entry_offset = fat_offset % 512;
 
-    if (ata.readSector(fs.drive_index, fat_sector, &sector_buffer)) {
+    if (storage.readSector(fs.drive_index, fat_sector, &sector_buffer)) {
         return readU32LE(&sector_buffer, entry_offset) & FAT_MASK;
     } else |_| {
         return null;
@@ -314,12 +321,13 @@ fn writeFatEntry(cluster: u32, value: u32) bool {
     const fat_sector = fs.fat_start_lba + (fat_offset / 512);
     const entry_offset = fat_offset % 512;
 
-    if (ata.readSector(fs.drive_index, fat_sector, &sector_buffer)) {
+    if (storage.readSector(fs.drive_index, fat_sector, &sector_buffer)) {
         writeU32LE(&sector_buffer, entry_offset, value & FAT_MASK);
 
-        if (ata.writeSector(fs.drive_index, fat_sector, &sector_buffer)) {
+        if (storage.writeSector(fs.drive_index, fat_sector, &sector_buffer)) {
+            // Write to FAT2 (backup)
             const fat2_sector = fat_sector + fs.fat_size;
-            ata.writeSector(fs.drive_index, fat2_sector, &sector_buffer) catch {};
+            storage.writeSector(fs.drive_index, fat2_sector, &sector_buffer) catch {};
             return true;
         } else |_| {
             return false;
@@ -445,7 +453,7 @@ pub fn readDirectory(cluster: u32, entries: []FileInfo) usize {
 
         var sector: u32 = 0;
         while (sector < fs.sectors_per_cluster and entry_count < entries.len) : (sector += 1) {
-            if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
+            if (storage.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
                 var i: usize = 0;
                 while (i < ENTRIES_PER_SECTOR and entry_count < entries.len) : (i += 1) {
                     const offset = i * DIR_ENTRY_SIZE;
@@ -514,7 +522,7 @@ pub fn readFile(cluster: u32, buffer: []u8) usize {
         while (sector < fs.sectors_per_cluster) : (sector += 1) {
             if (bytes_read >= buffer.len) break;
 
-            if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
+            if (storage.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
                 const remaining = buffer.len - bytes_read;
                 const to_copy = if (remaining < 512) remaining else 512;
 
@@ -567,7 +575,7 @@ pub fn readFileAt(cluster: u32, offset: u64, buffer: []u8, file_size: u64) usize
 
         var sector: u32 = start_sec;
         while (sector < fs.sectors_per_cluster and bytes_read < max_to_read) : (sector += 1) {
-            if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
+            if (storage.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
                 const sec_offset: usize = if (first_sector and sector == start_sec) offset_in_sector else 0;
                 first_sector = false;
 
@@ -667,7 +675,7 @@ fn writeToClusterChain(start_cluster: u32, data: []const u8) bool {
             }
             written += to_copy;
 
-            if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {} else |_| {
+            if (storage.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {} else |_| {
                 return false;
             }
         }
@@ -726,7 +734,7 @@ pub fn writeFileAt(cluster: u32, offset: u64, data: []const u8, current_size: u6
             first_sector = false;
 
             if (sec_offset > 0 or (data.len - bytes_written) < 512) {
-                if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {} else |_| {
+                if (storage.readSector(fs.drive_index, lba + sector, &sector_buffer)) {} else |_| {
                     for (&sector_buffer) |*b| b.* = 0;
                 }
             } else {
@@ -742,7 +750,7 @@ pub fn writeFileAt(cluster: u32, offset: u64, data: []const u8, current_size: u6
             }
             bytes_written += to_copy;
 
-            if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {} else |_| {
+            if (storage.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {} else |_| {
                 break;
             }
         }
@@ -794,7 +802,7 @@ pub fn updateFileSize(name: []const u8, new_size: u32) bool {
 
         var sector: u32 = 0;
         while (sector < fs.sectors_per_cluster) : (sector += 1) {
-            if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
+            if (storage.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
                 var i: usize = 0;
                 while (i < ENTRIES_PER_SECTOR) : (i += 1) {
                     const offset = i * DIR_ENTRY_SIZE;
@@ -810,7 +818,7 @@ pub fn updateFileSize(name: []const u8, new_size: u32) bool {
                         dir_entry.file_size = new_size;
                         writeDirEntryToBuffer(&sector_buffer, offset, &dir_entry);
 
-                        if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
+                        if (storage.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
                             return true;
                         } else |_| {
                             return false;
@@ -840,7 +848,7 @@ fn updateDirEntry(dir_cluster: u32, name: []const u8, new_cluster: u32, new_size
 
         var sector: u32 = 0;
         while (sector < fs.sectors_per_cluster) : (sector += 1) {
-            if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
+            if (storage.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
                 var i: usize = 0;
                 while (i < ENTRIES_PER_SECTOR) : (i += 1) {
                     const offset = i * DIR_ENTRY_SIZE;
@@ -857,7 +865,7 @@ fn updateDirEntry(dir_cluster: u32, name: []const u8, new_cluster: u32, new_size
                         dir_entry.file_size = new_size;
                         writeDirEntryToBuffer(&sector_buffer, offset, &dir_entry);
 
-                        if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
+                        if (storage.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
                             return true;
                         } else |_| {
                             return false;
@@ -887,7 +895,7 @@ fn addDirEntry(dir_cluster: u32, name: []const u8, cluster: u32, size: u32, attr
 
         var sector: u32 = 0;
         while (sector < fs.sectors_per_cluster) : (sector += 1) {
-            if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
+            if (storage.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
                 var i: usize = 0;
                 while (i < ENTRIES_PER_SECTOR) : (i += 1) {
                     const offset = i * DIR_ENTRY_SIZE;
@@ -897,7 +905,7 @@ fn addDirEntry(dir_cluster: u32, name: []const u8, cluster: u32, size: u32, attr
                         formatDirEntry(&dir_entry, name, cluster, size, attr);
                         writeDirEntryToBuffer(&sector_buffer, offset, &dir_entry);
 
-                        if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
+                        if (storage.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
                             return true;
                         } else |_| {
                             return false;
@@ -919,6 +927,13 @@ fn addDirEntry(dir_cluster: u32, name: []const u8, cluster: u32, size: u32, attr
     return false;
 }
 
+// ============================================================================
+// formatDirEntry — FIXED: Handle "." and ".." per FAT32 spec
+// FAT32 spec requires:
+//   "."  = name[0]=0x2E, name[1..7]=' ', ext=' '
+//   ".." = name[0]=0x2E, name[1]=0x2E, name[2..7]=' ', ext=' '
+// ============================================================================
+
 fn formatDirEntry(entry: *DirEntry, name: []const u8, cluster: u32, size: u32, attr: u8) void {
     const ptr = @as([*]u8, @ptrCast(entry));
     for (ptr[0..@sizeOf(DirEntry)]) |*b| b.* = 0;
@@ -926,26 +941,40 @@ fn formatDirEntry(entry: *DirEntry, name: []const u8, cluster: u32, size: u32, a
     var name_part: [8]u8 = [_]u8{' '} ** 8;
     var ext_part: [3]u8 = [_]u8{' '} ** 3;
 
-    var dot_pos: ?usize = null;
-    for (name, 0..) |c, i| {
-        if (c == '.') {
-            dot_pos = i;
-            break;
+    // Special case: "." directory entry
+    if (name.len == 1 and name[0] == '.') {
+        name_part[0] = '.';
+        // name_part[1..7] remain ' ' — correct per FAT32 spec
+    }
+    // Special case: ".." directory entry
+    else if (name.len == 2 and name[0] == '.' and name[1] == '.') {
+        name_part[0] = '.';
+        name_part[1] = '.';
+        // name_part[2..7] remain ' ' — correct per FAT32 spec
+    }
+    // Standard 8.3 filename
+    else {
+        var dot_pos: ?usize = null;
+        for (name, 0..) |c, i| {
+            if (c == '.') {
+                dot_pos = i;
+                break;
+            }
         }
-    }
 
-    const name_end = dot_pos orelse name.len;
-    const copy_len = if (name_end > 8) 8 else name_end;
-    for (name[0..copy_len], 0..) |c, i| {
-        name_part[i] = toUpper(c);
-    }
+        const name_end = dot_pos orelse name.len;
+        const copy_len = if (name_end > 8) 8 else name_end;
+        for (name[0..copy_len], 0..) |c, i| {
+            name_part[i] = toUpper(c);
+        }
 
-    if (dot_pos) |pos| {
-        if (pos + 1 < name.len) {
-            const ext = name[pos + 1 ..];
-            const ext_len = if (ext.len > 3) 3 else ext.len;
-            for (ext[0..ext_len], 0..) |c, i| {
-                ext_part[i] = toUpper(c);
+        if (dot_pos) |pos| {
+            if (pos + 1 < name.len) {
+                const ext = name[pos + 1 ..];
+                const ext_len = if (ext.len > 3) 3 else ext.len;
+                for (ext[0..ext_len], 0..) |c, i| {
+                    ext_part[i] = toUpper(c);
+                }
             }
         }
     }
@@ -1014,7 +1043,7 @@ fn initDirectoryCluster(cluster: u32, parent_cluster: u32) bool {
             writeDirEntryToBuffer(&sector_buffer, DIR_ENTRY_SIZE, &dotdot_entry);
         }
 
-        if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
+        if (storage.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
             for (&sector_buffer) |*b| b.* = 0;
         } else |_| {
             return false;
@@ -1025,11 +1054,14 @@ fn initDirectoryCluster(cluster: u32, parent_cluster: u32) bool {
 }
 
 // ============================================================================
-// Rename Operations (B2.3)
+// Rename Operations (B2.3) — FIXED: same-name = no-op
 // ============================================================================
 
 pub fn renameFile(old_name: []const u8, new_name: []const u8) bool {
     if (!fs.mounted) return false;
+
+    // Same name = success (no-op)
+    if (strEqualNoCase(old_name, new_name)) return true;
 
     serial.writeString("[FAT32] Renaming: ");
     serial.writeString(old_name);
@@ -1058,7 +1090,7 @@ fn renameDirEntry(dir_cluster: u32, old_name: []const u8, new_name: []const u8, 
 
         var sector: u32 = 0;
         while (sector < fs.sectors_per_cluster) : (sector += 1) {
-            if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
+            if (storage.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
                 var i: usize = 0;
                 while (i < ENTRIES_PER_SECTOR) : (i += 1) {
                     const offset = i * DIR_ENTRY_SIZE;
@@ -1074,7 +1106,7 @@ fn renameDirEntry(dir_cluster: u32, old_name: []const u8, new_name: []const u8, 
                         formatDirEntry(&dir_entry, new_name, cluster, size, attr);
                         writeDirEntryToBuffer(&sector_buffer, offset, &dir_entry);
 
-                        if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
+                        if (storage.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
                             serial.writeString("[FAT32] Rename successful\n");
                             return true;
                         } else |_| {
@@ -1140,6 +1172,7 @@ pub fn truncateFile(name: []const u8, new_size: u32) bool {
     }
 
     if (new_size < old_size) {
+        // Shrink
         const new_clusters_needed = (new_size + bytes_per_cluster - 1) / bytes_per_cluster;
         const old_clusters_used = (old_size + bytes_per_cluster - 1) / bytes_per_cluster;
 
@@ -1163,6 +1196,7 @@ pub fn truncateFile(name: []const u8, new_size: u32) bool {
 
         return updateFileSize(name, new_size);
     } else {
+        // Extend
         if (!extendClusterChain(file.cluster, old_size, new_size)) {
             serial.writeString("[FAT32] Failed to extend file\n");
             return false;
@@ -1180,7 +1214,7 @@ fn zeroCluster(cluster: u32) void {
 
     var sector: u32 = 0;
     while (sector < fs.sectors_per_cluster) : (sector += 1) {
-        ata.writeSector(fs.drive_index, lba + sector, &sector_buffer) catch {};
+        storage.writeSector(fs.drive_index, lba + sector, &sector_buffer) catch {};
     }
 }
 
@@ -1208,11 +1242,11 @@ fn zeroNewSpace(start_cluster: u32, old_size: u32, new_size: u32) void {
 
         var sector: u32 = @intCast(sector_in_cluster);
         while (sector < fs.sectors_per_cluster and offset < new_size) : (sector += 1) {
-            if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
+            if (storage.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
                 const sec_offset: usize = if (sector == sector_in_cluster) @intCast(cluster_start_offset % 512) else 0;
                 for (sector_buffer[sec_offset..]) |*b| b.* = 0;
 
-                ata.writeSector(fs.drive_index, lba + sector, &sector_buffer) catch {};
+                storage.writeSector(fs.drive_index, lba + sector, &sector_buffer) catch {};
             } else |_| {}
 
             offset += 512;
@@ -1225,10 +1259,11 @@ fn zeroNewSpace(start_cluster: u32, old_size: u32, new_size: u32) void {
 }
 
 // ============================================================================
-// Copy Operations (B2.3) — Fixed: use static buffer instead of stack
+// Copy Operations (B2.3) — FIXED: cluster-by-cluster via sector_buffer2
+// Supports ANY file size (not limited to 4KB)
+// Uses sector_buffer2 for data transfer to avoid conflict with
+// readFatEntry() which uses sector_buffer internally.
 // ============================================================================
-
-var copy_buffer: [4096]u8 = undefined;
 
 pub fn copyFile(src_name: []const u8, dst_name: []const u8) bool {
     if (!fs.mounted) return false;
@@ -1254,8 +1289,8 @@ pub fn copyFile(src_name: []const u8, dst_name: []const u8) bool {
         return false;
     }
 
+    // Empty file — just create empty
     if (src.size == 0) {
-        // Empty file — just create empty
         if (createFile(dst_name, "")) {
             serial.writeString("[FAT32] Copy successful (empty)\n");
             return true;
@@ -1263,23 +1298,62 @@ pub fn copyFile(src_name: []const u8, dst_name: []const u8) bool {
         return false;
     }
 
-    // Read source in chunks using static buffer
-    const file_size: usize = @intCast(src.size);
-    const read_size = @min(file_size, copy_buffer.len);
-    const bytes_read = readFile(src.cluster, copy_buffer[0..read_size]);
+    // Allocate full cluster chain for destination
+    const dst_cluster = allocateClusterChain(src.size) orelse {
+        serial.writeString("[FAT32] No free clusters for copy\n");
+        return false;
+    };
 
-    if (bytes_read == 0) {
-        serial.writeString("[FAT32] Failed to read source\n");
+    // Create directory entry for destination
+    if (!addDirEntry(fs.root_cluster, dst_name, dst_cluster, src.size, ATTR_ARCHIVE)) {
+        freeClusterChain(dst_cluster);
+        serial.writeString("[FAT32] Failed to create destination entry\n");
         return false;
     }
 
-    if (createFile(dst_name, copy_buffer[0..bytes_read])) {
-        serial.writeString("[FAT32] Copy successful\n");
-        return true;
+    // Copy data cluster-by-cluster
+    // sector_buffer2 = data transfer, sector_buffer = FAT table reads (no conflict)
+    var src_clust = src.cluster;
+    var dst_clust = dst_cluster;
+    var bytes_remaining: u32 = src.size;
+
+    while (bytes_remaining > 0 and !isEndOfChain(src_clust) and !isEndOfChain(dst_clust)) {
+        const src_lba = clusterToLba(src_clust);
+        const dst_lba = clusterToLba(dst_clust);
+
+        var sector: u32 = 0;
+        while (sector < fs.sectors_per_cluster and bytes_remaining > 0) : (sector += 1) {
+            // Use sector_buffer2 to avoid clobbering sector_buffer (used by readFatEntry)
+            if (storage.readSector(fs.drive_index, src_lba + sector, &sector_buffer2)) {
+                storage.writeSector(fs.drive_index, dst_lba + sector, &sector_buffer2) catch {
+                    serial.writeString("[FAT32] Copy write failed\n");
+                    _ = deleteFile(dst_name);
+                    return false;
+                };
+            } else |_| {
+                serial.writeString("[FAT32] Copy read failed\n");
+                _ = deleteFile(dst_name);
+                return false;
+            }
+
+            if (bytes_remaining >= 512) {
+                bytes_remaining -= 512;
+            } else {
+                bytes_remaining = 0;
+            }
+        }
+
+        // readFatEntry uses sector_buffer internally — safe, we used sector_buffer2 above
+        const next_src = readFatEntry(src_clust) orelse break;
+        const next_dst = readFatEntry(dst_clust) orelse break;
+
+        if (isEndOfChain(next_src) or isEndOfChain(next_dst)) break;
+        src_clust = next_src;
+        dst_clust = next_dst;
     }
 
-    serial.writeString("[FAT32] Failed to create destination\n");
-    return false;
+    serial.writeString("[FAT32] Copy successful\n");
+    return true;
 }
 
 // ============================================================================
@@ -1347,7 +1421,7 @@ fn markDeleted(dir_cluster: u32, name: []const u8) bool {
 
         var sector: u32 = 0;
         while (sector < fs.sectors_per_cluster) : (sector += 1) {
-            if (ata.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
+            if (storage.readSector(fs.drive_index, lba + sector, &sector_buffer)) {
                 var i: usize = 0;
                 while (i < ENTRIES_PER_SECTOR) : (i += 1) {
                     const offset = i * DIR_ENTRY_SIZE;
@@ -1362,7 +1436,7 @@ fn markDeleted(dir_cluster: u32, name: []const u8) bool {
                     if (strEqualNoCase(entry_name, name)) {
                         sector_buffer[offset] = 0xE5;
 
-                        if (ata.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
+                        if (storage.writeSector(fs.drive_index, lba + sector, &sector_buffer)) {
                             return true;
                         } else |_| {
                             return false;
@@ -1536,15 +1610,42 @@ fn freeAllInodes() void {
     }
 }
 
+// ============================================================================
+// VFS Lookup — FIXED: Reuse existing inodes, freeAll only as last resort
+// ============================================================================
+
 fn fat32VfsLookup(parent: *inode_mod.Inode, name: []const u8) ?*inode_mod.Inode {
     _ = parent;
     if (!fs.mounted) return null;
 
-    freeAllInodes();
-
     const file_info = findInRoot(name) orelse return null;
 
+    // Check if we already have an inode for this cluster
+    for (&inode_pool, 0..) |*ino, i| {
+        if (inode_pool_used[i] and getInodeCluster(ino) == file_info.cluster) {
+            // Update size (may have changed since last lookup)
+            ino.size = @as(u64, file_info.size);
+            inode_meta[i].size = @as(u64, file_info.size);
+            return ino;
+        }
+    }
+
     const ftype: inode_mod.FileType = if (file_info.is_dir) .Directory else .Regular;
+
+    // Try to allocate new inode
+    if (allocInodeWithMeta(
+        @as(u64, file_info.cluster),
+        ftype,
+        @as(u64, file_info.size),
+        file_info.cluster,
+        file_info.getName(),
+    )) |ino| {
+        return ino;
+    }
+
+    // Pool full — recycle as last resort (safe in single-task shell)
+    freeAllInodes();
+
     return allocInodeWithMeta(
         @as(u64, file_info.cluster),
         ftype,
