@@ -1,9 +1,20 @@
-//! Zamrud OS - P2P Peer Management
-//! Manages connected peers and their state
+//! Zamrud OS - P2P Peer Management (H.3 HARDENED)
+//! Manages connected peers with Sybil defense integration
+//!
+//! H.3 CHANGES:
+//! ✅ Added proof_of_work field to Peer struct
+//! ✅ Added first_seen field for age tracking
+//! ✅ Added trust_level from reputation system
+//! ✅ New addWithVerification() with full Sybil checks
+//! ✅ Reputation delegates to reputation module
+//! ✅ Disconnect removes from subnet tracking
 
 const serial = @import("../drivers/serial/serial.zig");
 const socket = @import("../net/socket.zig");
 const crypto = @import("../crypto/crypto.zig");
+const ct = @import("../crypto/constant_time.zig");
+const reputation_mod = @import("reputation.zig");
+const sybil = @import("sybil_defense.zig");
 
 // =============================================================================
 // Constants
@@ -43,8 +54,11 @@ pub const Peer = struct {
     last_block: u64,
     capabilities: u32,
 
-    // Reputation
+    // H.3: Enhanced reputation
     reputation: i32,
+    proof_of_work: u64, // PoW nonce (verified)
+    first_seen: u64, // For age tracking
+    trust_level: reputation_mod.TrustLevel, // From reputation system
 
     pub fn isActive(self: *const Peer) bool {
         return self.status == .connected;
@@ -79,8 +93,12 @@ pub fn init() void {
         id.* = [_]u8{0} ** 32;
     }
 
+    // Initialize H.3 subsystems
+    reputation_mod.init();
+    sybil.init();
+
     initialized = true;
-    serial.writeString("[PEER] Peer manager initialized\n");
+    serial.writeString("[PEER] Peer manager initialized (H.3 hardened)\n");
 }
 
 pub fn isInitialized() bool {
@@ -104,6 +122,9 @@ fn emptyPeer() Peer {
         .last_block = 0,
         .capabilities = 0,
         .reputation = 0,
+        .proof_of_work = 0,
+        .first_seen = 0,
+        .trust_level = .untrusted,
     };
 }
 
@@ -111,6 +132,8 @@ fn emptyPeer() Peer {
 // Peer Operations
 // =============================================================================
 
+/// Original add function — backward compatible (no PoW required)
+/// Used for internal/trusted connections
 pub fn add(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket) ?*Peer {
     // Check if banned
     if (isBanned(id)) {
@@ -120,7 +143,6 @@ pub fn add(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket) ?*Peer {
 
     // Check if already exists
     if (getById(id)) |existing| {
-        // Update existing peer
         existing.ip = ip;
         existing.port = port;
         existing.socket = sock;
@@ -129,9 +151,82 @@ pub fn add(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket) ?*Peer {
         return existing;
     }
 
-    // Find empty slot
+    return addToSlot(id, ip, port, sock, 0, .provisional);
+}
+
+/// H.3: Add peer with full Sybil defense verification
+/// Used for incoming P2P connections
+pub fn addWithVerification(
+    id: [32]u8,
+    ip: u32,
+    port: u16,
+    sock: *socket.Socket,
+    pow_nonce: u64,
+    pow_difficulty: u8,
+) ?*Peer {
+    // Check if banned
+    if (isBanned(id)) {
+        serial.writeString("[PEER] Rejecting banned peer\n");
+        return null;
+    }
+
+    // Check if already exists
+    if (getById(id)) |existing| {
+        existing.ip = ip;
+        existing.port = port;
+        existing.socket = sock;
+        existing.status = .connected;
+        existing.last_seen = getTimestamp();
+        return existing;
+    }
+
+    // H.3: Full Sybil defense check
+    const result = sybil.checkRegistration(ip, &id, pow_nonce, pow_difficulty);
+
+    switch (result) {
+        .allowed => {},
+        .denied_no_pow => {
+            serial.writeString("[PEER] DENIED: No Proof-of-Work\n");
+            return null;
+        },
+        .denied_invalid_pow => {
+            serial.writeString("[PEER] DENIED: Invalid Proof-of-Work\n");
+            return null;
+        },
+        .denied_rate_limit => {
+            serial.writeString("[PEER] DENIED: Rate limit exceeded\n");
+            return null;
+        },
+        .denied_subnet_limit => {
+            serial.writeString("[PEER] DENIED: Too many peers from subnet\n");
+            return null;
+        },
+        .denied_sybil_detected => {
+            serial.writeString("[PEER] DENIED: Sybil attack pattern detected\n");
+            ban(id);
+            return null;
+        },
+    }
+
+    // Register in reputation system
+    const rep = reputation_mod.registerPeer(&id, pow_nonce, pow_difficulty);
+    const trust = if (rep) |r| r.trust_level else reputation_mod.TrustLevel.provisional;
+
+    return addToSlot(id, ip, port, sock, pow_nonce, trust);
+}
+
+/// Internal: add peer to a slot
+fn addToSlot(
+    id: [32]u8,
+    ip: u32,
+    port: u16,
+    sock: *socket.Socket,
+    pow_nonce: u64,
+    trust: reputation_mod.TrustLevel,
+) ?*Peer {
     for (&peers) |*p| {
         if (p.status == .disconnected) {
+            const now = getTimestamp();
             p.* = .{
                 .id = id,
                 .ip = ip,
@@ -139,19 +234,29 @@ pub fn add(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket) ?*Peer {
                 .status = .connected,
                 .socket = sock,
                 .public_key = [_]u8{0} ** 32,
-                .connected_at = getTimestamp(),
-                .last_seen = getTimestamp(),
+                .connected_at = now,
+                .last_seen = now,
                 .messages_sent = 0,
                 .messages_received = 0,
                 .bytes_sent = 0,
                 .bytes_received = 0,
                 .last_block = 0,
                 .capabilities = 0,
-                .reputation = 50, // Start neutral
+                .reputation = 50,
+                .proof_of_work = pow_nonce,
+                .first_seen = now,
+                .trust_level = trust,
             };
             peer_count += 1;
 
-            serial.writeString("[PEER] Added peer, total: ");
+            serial.writeString("[PEER] Added peer (trust=");
+            switch (trust) {
+                .untrusted => serial.writeString("untrusted"),
+                .provisional => serial.writeString("provisional"),
+                .member => serial.writeString("member"),
+                .trusted => serial.writeString("trusted"),
+            }
+            serial.writeString("), total: ");
             printUsize(peer_count);
             serial.writeString("\n");
 
@@ -169,9 +274,12 @@ pub fn remove(id: [32]u8) void {
             if (p.socket) |sock| {
                 socket.close(sock);
             }
+            // H.3: Remove from subnet tracking
+            sybil.removeSubnetPeer(p.ip);
+            // H.3: Remove from reputation
+            reputation_mod.removePeer(&p.id);
             p.* = emptyPeer();
             if (peer_count > 0) peer_count -= 1;
-
             serial.writeString("[PEER] Removed peer\n");
             return;
         }
@@ -183,6 +291,8 @@ pub fn disconnect(p: *Peer) void {
         socket.close(sock);
         p.socket = null;
     }
+    // H.3: Remove from subnet tracking on disconnect
+    sybil.removeSubnetPeer(p.ip);
     p.status = .disconnected;
 }
 
@@ -248,21 +358,42 @@ pub fn getTotalCount() usize {
 }
 
 // =============================================================================
-// Reputation System
+// Reputation System (H.3: delegates to reputation module)
 // =============================================================================
 
+/// Record good behavior — delegates to reputation module
 pub fn increaseReputation(p: *Peer, amount: i32) void {
-    p.reputation = @min(100, p.reputation + amount);
+    _ = amount;
+    reputation_mod.addGoodAction(&p.id);
+
+    // Sync cached values
+    if (reputation_mod.getReputation(&p.id)) |rep| {
+        p.reputation = rep.score;
+        p.trust_level = rep.trust_level;
+    }
 }
 
+/// Record bad behavior — delegates to reputation module
 pub fn decreaseReputation(p: *Peer, amount: i32) void {
-    p.reputation = @max(-100, p.reputation - amount);
+    _ = amount;
+    reputation_mod.addViolation(&p.id);
 
-    // Auto-ban if reputation too low
-    if (p.reputation <= -50) {
-        ban(p.id);
-        disconnect(p);
+    // Sync cached values
+    if (reputation_mod.getReputation(&p.id)) |rep| {
+        p.reputation = rep.score;
+        p.trust_level = rep.trust_level;
+
+        // Auto-ban if score drops below threshold
+        if (rep.score <= reputation_mod.SCORE_BAN) {
+            ban(p.id);
+            disconnect(p);
+        }
     }
+}
+
+/// Get trust level for a peer
+pub fn getTrustLevel(p: *const Peer) reputation_mod.TrustLevel {
+    return p.trust_level;
 }
 
 pub fn ban(id: [32]u8) void {
@@ -277,7 +408,6 @@ pub fn ban(id: [32]u8) void {
 pub fn unban(id: [32]u8) void {
     for (0..banned_count) |i| {
         if (eqlBytes(&banned_ids[i], &id)) {
-            // Shift remaining
             var j = i;
             while (j + 1 < banned_count) : (j += 1) {
                 banned_ids[j] = banned_ids[j + 1];
@@ -293,6 +423,25 @@ pub fn isBanned(id: [32]u8) bool {
         if (eqlBytes(&bid, &id)) return true;
     }
     return false;
+}
+
+// =============================================================================
+// H.3: Sybil Defense Accessors
+// =============================================================================
+
+/// Get peer diversity score (0-100)
+pub fn getDiversityScore() u8 {
+    return sybil.getDiversityScore();
+}
+
+/// Get Sybil alert count
+pub fn getSybilAlertCount() usize {
+    return sybil.getAlertCount();
+}
+
+/// Get total denied registrations
+pub fn getDeniedCount() u64 {
+    return sybil.getTotalDenials();
 }
 
 // =============================================================================
