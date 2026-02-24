@@ -1,9 +1,11 @@
-//! Zamrud OS - DHCP Client
+//! Zamrud OS - DHCP Client (H.6 Hardened)
 //! Dynamic Host Configuration Protocol (RFC 2131)
+//! H.6: Rogue detection, offer validation, trusted server pinning
 
 const serial = @import("../drivers/serial/serial.zig");
 const network = @import("../drivers/network/network.zig");
 const udp = @import("udp.zig");
+const dhcp_security = @import("dhcp_security.zig");
 
 // =============================================================================
 // Constants
@@ -95,8 +97,12 @@ pub fn init() void {
         .valid = false,
     };
     transaction_id = generateXid();
+
+    // H.6: Initialize DHCP security
+    dhcp_security.init();
+
     initialized = true;
-    serial.writeString("[DHCP] DHCP client initialized\n");
+    serial.writeString("[DHCP] DHCP client initialized (H.6 hardened)\n");
 }
 
 pub fn isInitialized() bool {
@@ -111,6 +117,15 @@ pub fn discover(iface: *network.NetworkInterface) bool {
     if (state != .init and state != .released) {
         return false;
     }
+
+    // H.6: Check if using static fallback
+    if (dhcp_security.isFallbackActive()) {
+        serial.writeString("[DHCP] Static fallback active - skipping discover\n");
+        return applyStaticFallback();
+    }
+
+    // H.6: Reset rate window for new discover cycle
+    dhcp_security.resetRateWindow();
 
     var buffer: [576]u8 = [_]u8{0} ** 576;
     const len = buildDiscover(&buffer, iface) orelse return false;
@@ -259,7 +274,7 @@ fn buildMessage(buffer: []u8, iface: *network.NetworkInterface, msg_type: u8, re
 }
 
 // =============================================================================
-// Response Handling
+// Response Handling (H.6 Hardened)
 // =============================================================================
 
 pub fn handleResponse(data: []const u8) void {
@@ -267,6 +282,14 @@ pub fn handleResponse(data: []const u8) void {
 
     const cookie = readU32BE(data[236..240]);
     if (cookie != DHCP_MAGIC_COOKIE) return;
+
+    // H.6: Rate limit check
+    if (dhcp_security.isEnabled()) {
+        if (!dhcp_security.checkRateLimit()) {
+            serial.writeString("[DHCP] Dropped: rate limited\n");
+            return;
+        }
+    }
 
     // Parse options
     var pos: usize = 240;
@@ -308,6 +331,19 @@ pub fn handleResponse(data: []const u8) void {
     switch (msg_type) {
         DHCPOFFER => {
             if (state == .selecting) {
+                // H.6: Validate offer
+                if (dhcp_security.isEnabled()) {
+                    if (!dhcp_security.validateOffer(offered_ip, subnet, gateway, dns)) {
+                        serial.writeString("[DHCP] Offer REJECTED by security\n");
+                        return;
+                    }
+
+                    if (!dhcp_security.checkServer(server_id)) {
+                        serial.writeString("[DHCP] ROGUE server - offer dropped\n");
+                        return;
+                    }
+                }
+
                 current_lease.ip_addr = offered_ip;
                 current_lease.subnet_mask = subnet;
                 current_lease.gateway = gateway;
@@ -318,10 +354,19 @@ pub fn handleResponse(data: []const u8) void {
         },
         DHCPACK => {
             if (state == .requesting or state == .renewing) {
+                // H.6: Verify ACK from trusted server
+                if (dhcp_security.isEnabled()) {
+                    if (!dhcp_security.verifyAck(server_id)) {
+                        serial.writeString("[DHCP] ACK from UNTRUSTED server - rejected\n");
+                        state = .init;
+                        return;
+                    }
+                }
+
                 current_lease.valid = true;
                 current_lease.obtained_at = 0;
                 state = .bound;
-                serial.writeString("[DHCP] Lease obtained\n");
+                serial.writeString("[DHCP] Lease obtained (verified)\n");
             }
         },
         DHCPNAK => {
@@ -331,6 +376,27 @@ pub fn handleResponse(data: []const u8) void {
         },
         else => {},
     }
+}
+
+// =============================================================================
+// H.6: Static Fallback
+// =============================================================================
+
+fn applyStaticFallback() bool {
+    const fb = dhcp_security.getStaticFallback();
+    if (!fb.configured) return false;
+
+    current_lease.ip_addr = fb.ip_addr;
+    current_lease.subnet_mask = fb.subnet_mask;
+    current_lease.gateway = fb.gateway;
+    current_lease.dns_server = fb.dns_server;
+    current_lease.server_id = 0;
+    current_lease.lease_time = 0xFFFFFFFF; // Infinite
+    current_lease.valid = true;
+    state = .bound;
+
+    serial.writeString("[DHCP] Using static fallback config\n");
+    return true;
 }
 
 // =============================================================================

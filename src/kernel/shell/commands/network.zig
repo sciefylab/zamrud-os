@@ -16,6 +16,7 @@ const ip_mod = @import("../../net/ip.zig");
 const ethernet_mod = @import("../../drivers/network/ethernet.zig");
 const dns_mod = @import("../../net/dns.zig");
 const dhcp_mod = @import("../../net/dhcp.zig");
+const dhcp_security = @import("../../net/dhcp_security.zig"); // H.6 NEW
 
 // Import the comprehensive test suite
 const net_test = @import("../../net/test.zig");
@@ -803,13 +804,13 @@ fn runB1TestsOnly() void {
 }
 
 fn runB2TestsOnly() void {
-    helpers.printTestHeader("NETWORK PROTOCOLS (B2)");
+    helpers.printTestHeader("NETWORK PROTOCOLS (B2+H.6)");
     shell.newLine();
 
     var p: u32 = 0;
     var f: u32 = 0;
 
-    helpers.printTestCategory(1, 9, "TCP/IP Stack");
+    helpers.printTestCategory(1, 10, "TCP/IP Stack");
     p += helpers.doTest("Stack initialized", net_stack.isInitialized(), &f);
     p += helpers.doTest("IP module ready", ip_mod.isInitialized(), &f);
     p += helpers.doTest("IP header = 20", ip_mod.HEADER_SIZE == 20, &f);
@@ -818,7 +819,7 @@ fn runB2TestsOnly() void {
     p += helpers.doTest("UDP proto = 17", ip_mod.PROTO_UDP == 17, &f);
 
     const checksum_mod = @import("../../net/checksum.zig");
-    helpers.printTestCategory(2, 9, "Checksum Utilities");
+    helpers.printTestCategory(2, 10, "Checksum Utilities");
     p += helpers.doTest("Checksum module", checksum_mod.isInitialized(), &f);
     const data1 = [_]u8{ 0x00, 0x01, 0x00, 0x02 };
     const cksum1 = checksum_mod.calculate(&data1);
@@ -835,7 +836,7 @@ fn runB2TestsOnly() void {
     );
     p += helpers.doTest("Pseudo-header checksum", pseudo > 0, &f);
 
-    helpers.printTestCategory(3, 9, "ARP Protocol");
+    helpers.printTestCategory(3, 10, "ARP Protocol");
     p += helpers.doTest("ARP initialized", arp_mod.isInitialized(), &f);
     const test_mac: [6]u8 = .{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
     arp_mod.addEntry(net_driver.ipToU32(192, 168, 1, 100), test_mac);
@@ -846,7 +847,7 @@ fn runB2TestsOnly() void {
     const entries = arp_mod.getCache();
     p += helpers.doTest("getCache works", entries.len >= 0, &f);
 
-    helpers.printTestCategory(4, 9, "ICMP Protocol");
+    helpers.printTestCategory(4, 10, "ICMP Protocol");
     p += helpers.doTest("ICMP initialized", icmp_mod.isInitialized(), &f);
     p += helpers.doTest("Echo request = 8", icmp_mod.TYPE_ECHO_REQUEST == 8, &f);
     p += helpers.doTest("Echo reply = 0", icmp_mod.TYPE_ECHO_REPLY == 0, &f);
@@ -855,7 +856,7 @@ fn runB2TestsOnly() void {
     const icmp_stats = icmp_mod.getStats();
     p += helpers.doTest("Stats accessible", icmp_stats.sent >= 0, &f);
 
-    helpers.printTestCategory(5, 9, "UDP Protocol");
+    helpers.printTestCategory(5, 10, "UDP Protocol");
     p += helpers.doTest("UDP initialized", udp_mod.isInitialized(), &f);
     p += helpers.doTest("Header size = 8", udp_mod.HEADER_SIZE == 8, &f);
     const udp_result = testUdpSocket();
@@ -866,7 +867,7 @@ fn runB2TestsOnly() void {
     const udp_stats = udp_mod.getStats();
     p += helpers.doTest("UDP stats", udp_stats.sent >= 0 and udp_stats.received >= 0, &f);
 
-    helpers.printTestCategory(6, 9, "TCP Protocol");
+    helpers.printTestCategory(6, 10, "TCP Protocol");
     p += helpers.doTest("TCP initialized", tcp_mod.isInitialized(), &f);
     p += helpers.doTest("Header size = 20", tcp_mod.HEADER_SIZE == 20, &f);
     p += helpers.doTest("SYN = 0x02", tcp_mod.FLAG_SYN == 0x02, &f);
@@ -877,7 +878,7 @@ fn runB2TestsOnly() void {
     const syn_ack = tcp_mod.FLAG_SYN | tcp_mod.FLAG_ACK;
     p += helpers.doTest("SYN+ACK = 0x12", syn_ack == 0x12, &f);
 
-    helpers.printTestCategory(7, 9, "Socket API");
+    helpers.printTestCategory(7, 10, "Socket API");
     p += helpers.doTest("Socket initialized", socket_mod.isInitialized(), &f);
     p += helpers.doTest("MAX_SOCKETS >= 16", socket_mod.MAX_SOCKETS >= 16, &f);
     const udp_sock = socket_mod.create(.udp);
@@ -902,7 +903,7 @@ fn runB2TestsOnly() void {
     }
     p += helpers.doTest("getSocketCount()", socket_mod.getSocketCount() >= 0, &f);
 
-    helpers.printTestCategory(8, 9, "DHCP & DNS");
+    helpers.printTestCategory(8, 10, "DHCP & DNS");
     p += helpers.doTest("DHCP initialized", dhcp_mod.isInitialized(), &f);
     p += helpers.doTest("DHCP server port", dhcp_mod.DHCP_SERVER_PORT == 67, &f);
     p += helpers.doTest("DHCP client port", dhcp_mod.DHCP_CLIENT_PORT == 68, &f);
@@ -911,11 +912,102 @@ fn runB2TestsOnly() void {
     p += helpers.doTest("DNS TYPE_A = 1", dns_mod.TYPE_A == 1, &f);
     p += helpers.doTest("DNS TYPE_AAAA = 28", dns_mod.TYPE_AAAA == 28, &f);
 
+    // =========================================================================
+    // H.6: DHCP Security Tests (20 tests)
+    // =========================================================================
+    helpers.printTestCategory(9, 10, "DHCP Security (H.6)");
+
+    // Init
+    dhcp_security.init();
+    p += helpers.doTest("DHCP-SEC initialized", dhcp_security.isInitialized(), &f);
+    p += helpers.doTest("DHCP-SEC enabled", dhcp_security.isEnabled(), &f);
+
+    // Config defaults
+    const dhcp_cfg = dhcp_security.config;
+    p += helpers.doTest("Trust first server", dhcp_cfg.trust_first_server, &f);
+    p += helpers.doTest("Validate offers ON", dhcp_cfg.validate_offers, &f);
+    p += helpers.doTest("Detect rogue ON", dhcp_cfg.detect_rogue, &f);
+
+    // Server pinning
+    dhcp_security.init(); // Reset
+    dhcp_security.pinServer(net_driver.ipToU32(192, 168, 1, 1));
+    p += helpers.doTest("Pin server", dhcp_security.isServerTrusted(net_driver.ipToU32(192, 168, 1, 1)), &f);
+    p += helpers.doTest("Unknown untrusted", !dhcp_security.isServerTrusted(net_driver.ipToU32(10, 0, 0, 1)), &f);
+
+    // Rogue detection
+    dhcp_security.init();
+    _ = dhcp_security.checkServer(net_driver.ipToU32(192, 168, 1, 1)); // First = pin
+    const rogue_blocked = !dhcp_security.checkServer(net_driver.ipToU32(10, 0, 0, 99)); // Different = rogue
+    p += helpers.doTest("Rogue detected", rogue_blocked, &f);
+    p += helpers.doTest("Rogue counter > 0", dhcp_security.getStats().rogue_detections >= 1, &f);
+
+    // Offer validation
+    dhcp_security.init();
+    // Valid: 192.168.1.100, mask 255.255.255.0, gw 192.168.1.1, dns 8.8.8.8
+    const valid_offer = dhcp_security.validateOffer(
+        net_driver.ipToU32(192, 168, 1, 100),
+        net_driver.ipToU32(255, 255, 255, 0),
+        net_driver.ipToU32(192, 168, 1, 1),
+        net_driver.ipToU32(8, 8, 8, 8),
+    );
+    p += helpers.doTest("Valid offer OK", valid_offer, &f);
+
+    // Invalid: 0.0.0.0
+    const zero_rejected = !dhcp_security.validateOffer(0, net_driver.ipToU32(255, 255, 255, 0), 0, 0);
+    p += helpers.doTest("Zero IP rejected", zero_rejected, &f);
+
+    // Invalid: broadcast
+    const bcast_rejected = !dhcp_security.validateOffer(0xFFFFFFFF, net_driver.ipToU32(255, 255, 255, 0), 0, 0);
+    p += helpers.doTest("Broadcast rejected", bcast_rejected, &f);
+
+    // Invalid: zero subnet
+    const zero_mask = !dhcp_security.validateOffer(net_driver.ipToU32(192, 168, 1, 100), 0, 0, 0);
+    p += helpers.doTest("Zero mask rejected", zero_mask, &f);
+
+    // Rate limiting
+    dhcp_security.init();
+    dhcp_security.config.max_packets_per_window = 5;
+    var rate_ok = true;
+    var ri: u16 = 0;
+    while (ri < 5) : (ri += 1) {
+        if (!dhcp_security.checkRateLimit()) rate_ok = false;
+    }
+    p += helpers.doTest("Under limit OK", rate_ok, &f);
+
+    // Exceed limit
+    ri = 0;
+    while (ri < 3) : (ri += 1) {
+        _ = dhcp_security.checkRateLimit();
+    }
+    const over_limit = !dhcp_security.checkRateLimit();
+    p += helpers.doTest("Over limit blocked", over_limit, &f);
+
+    // Static fallback
+    dhcp_security.init();
+    dhcp_security.setStaticFallback(
+        net_driver.ipToU32(10, 0, 0, 50),
+        net_driver.ipToU32(255, 255, 255, 0),
+        net_driver.ipToU32(10, 0, 0, 1),
+        net_driver.ipToU32(10, 0, 0, 1),
+    );
+    const fb = dhcp_security.getStaticFallback();
+    p += helpers.doTest("Static config set", fb.configured, &f);
+    p += helpers.doTest("Fallback activate", dhcp_security.activateFallback(), &f);
+    p += helpers.doTest("Fallback active", dhcp_security.isFallbackActive(), &f);
+    dhcp_security.deactivateFallback();
+    p += helpers.doTest("Fallback deactivate", !dhcp_security.isFallbackActive(), &f);
+
+    // Reset for integration tests
+    dhcp_security.init();
+
+    // =========================================================================
+    // Integration Tests
+    // =========================================================================
     const virtio_net = @import("../../drivers/network/virtio_net.zig");
     const e1000 = @import("../../drivers/network/e1000.zig");
     const pci = @import("../../drivers/pci/pci.zig");
 
-    helpers.printTestCategory(9, 9, "Integration Tests");
+    helpers.printTestCategory(10, 10, "Integration Tests");
     p += helpers.doTest("Net stack ready", net_stack.isInitialized(), &f);
     p += helpers.doTest("Protocols ready", arp_mod.isInitialized() and icmp_mod.isInitialized(), &f);
     p += helpers.doTest("Transport ready", udp_mod.isInitialized() and tcp_mod.isInitialized(), &f);
@@ -952,10 +1044,10 @@ fn runB2TestsOnly() void {
     }
 
     p += helpers.doTest("Stack operational", true, &f);
+    p += helpers.doTest("DHCP-SEC integrated", dhcp_security.isInitialized(), &f);
 
     helpers.printTestResults(p, f);
 }
-
 // =============================================================================
 // Test Helpers
 // =============================================================================

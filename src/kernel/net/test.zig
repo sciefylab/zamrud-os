@@ -1,5 +1,5 @@
-//! Zamrud OS - Network Stack Tests (B1 + B2 + S.3)
-//! Comprehensive tests for Network Drivers, TCP/IP Stack, and ARP Defense
+//! Zamrud OS - Network Stack Tests (B1 + B2 + S.3 + H.6)
+//! Comprehensive tests for Network Drivers, TCP/IP Stack, ARP Defense, and DHCP Security
 
 const serial = @import("../drivers/serial/serial.zig");
 const terminal = @import("../drivers/display/terminal.zig");
@@ -20,6 +20,7 @@ const checksum = @import("checksum.zig");
 const socket = @import("socket.zig");
 const dhcp = @import("dhcp.zig");
 const dns = @import("dns.zig");
+const dhcp_security = @import("dhcp_security.zig"); // H.6
 
 // =============================================================================
 // Unified Output - Writes to BOTH terminal and serial
@@ -137,7 +138,7 @@ fn padString(s: []const u8, width: usize) void {
 pub fn runAllTests() TestResult {
     var result = TestResult.init();
 
-    printHeader("NETWORK TEST SUITE (B1 + B2 + S.3)");
+    printHeader("NETWORK TEST SUITE (B1 + B2 + S.3 + H.6)");
 
     // =========================================================================
     // B1: Network Infrastructure
@@ -179,6 +180,18 @@ pub fn runAllTests() TestResult {
     testArpDefenseSpoofDetection(&result);
     testArpDefenseRateLimit(&result);
     testArpDefenseEvents(&result);
+
+    // =========================================================================
+    // H.6: DHCP Security
+    // =========================================================================
+    printSection("H.6: DHCP SECURITY");
+
+    testDhcpSecurityInit(&result);
+    testDhcpSecurityPinning(&result);
+    testDhcpSecurityRogue(&result);
+    testDhcpSecurityValidation(&result);
+    testDhcpSecurityRateLimit(&result);
+    testDhcpSecurityFallback(&result);
 
     // Summary
     printSummary(&result);
@@ -848,6 +861,188 @@ fn testArpDefenseEvents(result: *TestResult) void {
 
     const sec_stats = arp.getSecurityStats();
     result.check(sec_stats.total_entries >= 0, "ARP security stats");
+}
+
+// =============================================================================
+// H.6: DHCP Security Tests
+// =============================================================================
+
+fn testDhcpSecurityInit(result: *TestResult) void {
+    printTest("1", "6", "DHCP Security Initialization");
+
+    // Initialize
+    dhcp_security.init();
+
+    result.check(dhcp_security.isInitialized(), "DHCP-SEC initialized");
+    result.check(dhcp_security.isEnabled(), "DHCP-SEC enabled");
+
+    // Check config defaults
+    const cfg = dhcp_security.config;
+    result.check(cfg.enabled, "Config: enabled");
+    result.check(cfg.trust_first_server, "Config: trust first");
+    result.check(cfg.validate_offers, "Config: validate offers");
+    result.check(cfg.detect_rogue, "Config: detect rogue");
+
+    // Stats should be zeroed
+    const stats = dhcp_security.getStats();
+    result.check(stats.rogue_detections == 0, "Stats zeroed");
+}
+
+fn testDhcpSecurityPinning(result: *TestResult) void {
+    printTest("2", "6", "Trusted Server Pinning");
+
+    dhcp_security.init();
+
+    // Pin a server
+    const server_ip: u32 = (192 << 24) | (168 << 16) | (1 << 8) | 1; // 192.168.1.1
+    dhcp_security.pinServer(server_ip);
+
+    result.check(dhcp_security.isServerTrusted(server_ip), "Server pinned");
+
+    // Different server should not be trusted
+    const other_ip: u32 = (10 << 24) | (0 << 16) | (0 << 8) | 1; // 10.0.0.1
+    result.check(!dhcp_security.isServerTrusted(other_ip), "Other not trusted");
+
+    // Get trusted server info
+    const trusted = dhcp_security.getTrustedServer();
+    result.check(trusted.pinned, "Trusted is pinned");
+    result.check(trusted.ip == server_ip, "Trusted IP correct");
+
+    // Clear and verify
+    dhcp_security.clearTrustedServer();
+    result.check(!dhcp_security.isServerTrusted(server_ip), "Clear works");
+}
+
+fn testDhcpSecurityRogue(result: *TestResult) void {
+    printTest("3", "6", "Rogue Server Detection");
+
+    dhcp_security.init();
+
+    // First server should be accepted and pinned
+    const legit_ip: u32 = (192 << 24) | (168 << 16) | (1 << 8) | 1; // 192.168.1.1
+    const first_ok = dhcp_security.checkServer(legit_ip);
+    result.check(first_ok, "First server OK");
+    result.check(dhcp_security.isServerTrusted(legit_ip), "First server pinned");
+
+    // Second different server should be detected as rogue
+    const rogue_ip: u32 = (10 << 24) | (0 << 16) | (0 << 8) | 99; // 10.0.0.99
+    const rogue_blocked = !dhcp_security.checkServer(rogue_ip);
+    result.check(rogue_blocked, "Rogue blocked");
+
+    // Stats should reflect detection
+    const stats = dhcp_security.getStats();
+    result.check(stats.rogue_detections >= 1, "Rogue counted");
+
+    // Events should be logged
+    result.check(dhcp_security.getEventCount() >= 1, "Event logged");
+}
+
+fn testDhcpSecurityValidation(result: *TestResult) void {
+    printTest("4", "6", "Offer Validation");
+
+    dhcp_security.init();
+
+    // Valid offer: 192.168.1.100, mask 255.255.255.0, gw 192.168.1.1, dns 8.8.8.8
+    const valid = dhcp_security.validateOffer(
+        (192 << 24) | (168 << 16) | (1 << 8) | 100,
+        (255 << 24) | (255 << 16) | (255 << 8) | 0,
+        (192 << 24) | (168 << 16) | (1 << 8) | 1,
+        (8 << 24) | (8 << 16) | (8 << 8) | 8,
+    );
+    result.check(valid, "Valid offer OK");
+
+    // Zero IP should be rejected
+    const zero_ip = dhcp_security.validateOffer(
+        0,
+        (255 << 24) | (255 << 16) | (255 << 8) | 0,
+        0,
+        0,
+    );
+    result.check(!zero_ip, "Zero IP rejected");
+
+    // Broadcast should be rejected
+    const broadcast = dhcp_security.validateOffer(
+        0xFFFFFFFF,
+        (255 << 24) | (255 << 16) | (255 << 8) | 0,
+        0,
+        0,
+    );
+    result.check(!broadcast, "Broadcast rejected");
+
+    // Zero subnet should be rejected
+    const zero_mask = dhcp_security.validateOffer(
+        (192 << 24) | (168 << 16) | (1 << 8) | 100,
+        0,
+        0,
+        0,
+    );
+    result.check(!zero_mask, "Zero mask rejected");
+
+    // Stats should reflect accepted/rejected
+    const stats = dhcp_security.getStats();
+    result.check(stats.offers_accepted >= 1, "Accepted counted");
+    result.check(stats.offers_rejected >= 3, "Rejected counted");
+}
+
+fn testDhcpSecurityRateLimit(result: *TestResult) void {
+    printTest("5", "6", "Rate Limiting");
+
+    dhcp_security.init();
+    dhcp_security.config.max_packets_per_window = 10;
+
+    // Send packets under limit
+    var under_ok = true;
+    var i: u16 = 0;
+    while (i < 10) : (i += 1) {
+        if (!dhcp_security.checkRateLimit()) {
+            under_ok = false;
+            break;
+        }
+    }
+    result.check(under_ok, "Under limit OK");
+
+    // Next packet should be blocked
+    const over_blocked = !dhcp_security.checkRateLimit();
+    result.check(over_blocked, "Over limit blocked");
+
+    // Stats should reflect
+    const stats = dhcp_security.getStats();
+    result.check(stats.rate_limit_hits >= 1, "Rate hits counted");
+    result.check(stats.packets_seen >= 11, "Packets counted");
+
+    // Reset window and verify
+    dhcp_security.resetRateWindow();
+    const after_reset = dhcp_security.checkRateLimit();
+    result.check(after_reset, "Reset works");
+}
+
+fn testDhcpSecurityFallback(result: *TestResult) void {
+    printTest("6", "6", "Static Fallback");
+
+    dhcp_security.init();
+
+    // Set static config: 10.0.0.50, mask 255.255.255.0, gw 10.0.0.1, dns 10.0.0.1
+    dhcp_security.setStaticFallback(
+        (10 << 24) | (0 << 16) | (0 << 8) | 50,
+        (255 << 24) | (255 << 16) | (255 << 8) | 0,
+        (10 << 24) | (0 << 16) | (0 << 8) | 1,
+        (10 << 24) | (0 << 16) | (0 << 8) | 1,
+    );
+
+    const fb = dhcp_security.getStaticFallback();
+    result.check(fb.configured, "Static configured");
+    result.check(fb.ip_addr == ((10 << 24) | (0 << 16) | (0 << 8) | 50), "Static IP correct");
+
+    // Activate fallback
+    result.check(dhcp_security.activateFallback(), "Activate OK");
+    result.check(dhcp_security.isFallbackActive(), "Fallback active");
+
+    // Deactivate
+    dhcp_security.deactivateFallback();
+    result.check(!dhcp_security.isFallbackActive(), "Deactivate OK");
+
+    // Event should be logged
+    result.check(dhcp_security.getEventCount() >= 1, "Fallback event logged");
 }
 
 // =============================================================================

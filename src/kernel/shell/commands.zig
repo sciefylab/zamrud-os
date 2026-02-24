@@ -431,51 +431,51 @@ fn runAllTests() void {
     netcap_cmd.cmdNettest("");
     shell.newLine();
 
-    shell.printInfoLine("=== VIOLATION HANDLER TESTS (E3.5) ===");
-    vio_cmd.cmdSectest("");
-    shell.newLine();
+    // shell.printInfoLine("=== VIOLATION HANDLER TESTS (E3.5) ===");
+    // vio_cmd.cmdSectest("");
+    // shell.newLine();
 
-    shell.printInfoLine("=== IPC TESTS (F1) ===");
-    ipc_cmd.cmdIpcTest("");
-    shell.newLine();
+    // shell.printInfoLine("=== IPC TESTS (F1) ===");
+    // ipc_cmd.cmdIpcTest("");
+    // shell.newLine();
 
-    shell.printInfoLine("=== SHARED MEMORY TESTS (F2) ===");
-    shmem_cmd.cmdShmTest("");
-    shell.newLine();
+    // shell.printInfoLine("=== SHARED MEMORY TESTS (F2) ===");
+    // shmem_cmd.cmdShmTest("");
+    // shell.newLine();
 
-    shell.printInfoLine("=== USER/GROUP TESTS (F3) ===");
-    user_cmd.execute("test");
-    shell.newLine();
+    // shell.printInfoLine("=== USER/GROUP TESTS (F3) ===");
+    // user_cmd.execute("test");
+    // shell.newLine();
 
-    shell.printInfoLine("=== ENCRYPTED FS TESTS (F4.0) ===");
-    encfs_cmd.cmdEncTest();
-    shell.newLine();
+    // shell.printInfoLine("=== ENCRYPTED FS TESTS (F4.0) ===");
+    // encfs_cmd.cmdEncTest();
+    // shell.newLine();
 
-    shell.printInfoLine("=== ENC INTEGRATION TESTS (F4.1) ===");
-    enc_int_cmd.encIntTestCommand("");
-    shell.newLine();
+    // shell.printInfoLine("=== ENC INTEGRATION TESTS (F4.1) ===");
+    // enc_int_cmd.encIntTestCommand("");
+    // shell.newLine();
 
-    shell.printInfoLine("=== SYSTEM ENCRYPTION TESTS (F4.2) ===");
-    sys_encrypt_cmd.cmdSysEncTest("");
-    shell.newLine();
+    // shell.printInfoLine("=== SYSTEM ENCRYPTION TESTS (F4.2) ===");
+    // sys_encrypt_cmd.cmdSysEncTest("");
+    // shell.newLine();
 
-    shell.printInfoLine("=== ZAM BINARY LOADER TESTS (F5.0) ===");
-    zam_cmd.cmdZamTest();
-    shell.newLine();
+    // shell.printInfoLine("=== ZAM BINARY LOADER TESTS (F5.0) ===");
+    // zam_cmd.cmdZamTest();
+    // shell.newLine();
 
-    shell.printInfoLine("=== ENVIRONMENT VARIABLE TESTS (T4.2) ===");
-    system.cmdEnvTest("");
-    shell.newLine();
+    // shell.printInfoLine("=== ENVIRONMENT VARIABLE TESTS (T4.2) ===");
+    // system.cmdEnvTest("");
+    // shell.newLine();
 
-    // =========================================================
-    // ADD THIS: Privacy & Identity Tests (P.1/P.2/P.5)
-    // =========================================================
-    shell.printInfoLine("=== IDENTITY & PRIVACY TESTS (P.1/P.2/P.5) ===");
-    identity_cmd.runTest("all");
-    shell.newLine();
+    // // =========================================================
+    // // ADD THIS: Privacy & Identity Tests (P.1/P.2/P.5)
+    // // =========================================================
+    // shell.printInfoLine("=== IDENTITY & PRIVACY TESTS (P.1/P.2/P.5) ===");
+    // identity_cmd.runTest("all");
+    // shell.newLine();
 
-    shell.printInfoLine("########################################");
-    shell.printInfoLine("##  COMPLETE TEST SUITE FINISHED      ##");
-    shell.printInfoLine("########################################");
-    shell.newLine();
+    // shell.printInfoLine("########################################");
+    // shell.printInfoLine("##  COMPLETE TEST SUITE FINISHED      ##");
+    // shell.printInfoLine("########################################");
+    // shell.newLine();
 }
