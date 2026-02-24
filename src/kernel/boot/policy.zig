@@ -1,5 +1,6 @@
-//! Zamrud OS - Boot Security Policy
+//! Zamrud OS - Boot Security Policy (H.5 Enhanced)
 //! Defines and enforces security requirements at boot
+//! H.5: Added require_boot_chain flag
 
 const serial = @import("../drivers/serial/serial.zig");
 
@@ -21,6 +22,7 @@ pub const PolicyFlags = struct {
     require_memory_isolation: bool,
     require_stack_protection: bool,
     require_nx: bool,
+    require_boot_chain: bool, // H.5: require PCR measurement chain
     allow_debug: bool,
     allow_serial_output: bool,
     allow_unsigned: bool,
@@ -39,6 +41,7 @@ var current_flags: PolicyFlags = .{
     .require_memory_isolation = true,
     .require_stack_protection = true,
     .require_nx = true,
+    .require_boot_chain = true,
     .allow_debug = true,
     .allow_serial_output = true,
     .allow_unsigned = true,
@@ -57,7 +60,6 @@ pub fn init() void {
 
     violation_count = 0;
     current_level = .standard;
-
     applyLevel(.standard);
 
     initialized = true;
@@ -123,6 +125,15 @@ pub fn isInitialized() bool {
     return initialized;
 }
 
+pub fn getLevelName(level: SecurityLevel) []const u8 {
+    return switch (level) {
+        .permissive => "permissive",
+        .standard => "standard",
+        .strict => "strict",
+        .paranoid => "paranoid",
+    };
+}
+
 // =============================================================================
 // Internal Functions
 // =============================================================================
@@ -137,6 +148,7 @@ fn applyLevel(level: SecurityLevel) void {
                 .require_memory_isolation = false,
                 .require_stack_protection = false,
                 .require_nx = false,
+                .require_boot_chain = false,
                 .allow_debug = true,
                 .allow_serial_output = true,
                 .allow_unsigned = true,
@@ -151,6 +163,7 @@ fn applyLevel(level: SecurityLevel) void {
                 .require_memory_isolation = true,
                 .require_stack_protection = true,
                 .require_nx = true,
+                .require_boot_chain = true,
                 .allow_debug = true,
                 .allow_serial_output = true,
                 .allow_unsigned = true,
@@ -165,6 +178,7 @@ fn applyLevel(level: SecurityLevel) void {
                 .require_memory_isolation = true,
                 .require_stack_protection = true,
                 .require_nx = true,
+                .require_boot_chain = true,
                 .allow_debug = false,
                 .allow_serial_output = true,
                 .allow_unsigned = false,
@@ -179,6 +193,7 @@ fn applyLevel(level: SecurityLevel) void {
                 .require_memory_isolation = true,
                 .require_stack_protection = true,
                 .require_nx = true,
+                .require_boot_chain = true,
                 .allow_debug = false,
                 .allow_serial_output = false,
                 .allow_unsigned = false,
@@ -186,15 +201,6 @@ fn applyLevel(level: SecurityLevel) void {
             };
         },
     }
-}
-
-fn getLevelName(level: SecurityLevel) []const u8 {
-    return switch (level) {
-        .permissive => "permissive",
-        .standard => "standard",
-        .strict => "strict",
-        .paranoid => "paranoid",
-    };
 }
 
 fn logViolation(msg: []const u8) void {
@@ -254,7 +260,15 @@ pub fn test_policy() bool {
         failed += 1;
     }
 
+    // Test 5: Boot chain flag (H.5)
+    serial.writeString("  Test 5: Boot chain flag\n");
     setLevel(.standard);
+    if (current_flags.require_boot_chain) {
+        passed += 1;
+    } else {
+        failed += 1;
+    }
 
+    setLevel(.standard);
     return failed == 0;
 }

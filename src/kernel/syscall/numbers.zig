@@ -262,6 +262,12 @@ pub const SYS_GET_UPTIME: u64 = 402;
 pub const SYS_SYSCALL_COUNT: u64 = 403;
 pub const SYS_SYSCALL_TEST: u64 = 410;
 
+// H.5: Boot Integrity Chain syscalls
+pub const SYS_BOOT_GET_PCR: u64 = 0xB005;
+pub const SYS_BOOT_REMEASURE: u64 = 0xB006;
+pub const SYS_BOOT_EVENT_COUNT: u64 = 0xB007;
+pub const SYS_BOOT_CHAIN_STATUS: u64 = 0xB008;
+
 // =============================================================================
 // Error Codes (unified, i64 for handler return)
 // =============================================================================

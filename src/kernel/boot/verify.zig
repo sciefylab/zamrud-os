@@ -1,8 +1,10 @@
-//! Zamrud OS - Boot Verification
+//! Zamrud OS - Boot Verification (H.5 Enhanced)
 //! Verifies system integrity at boot time
+//! H.5: PCR chain verification, CT comparison, runtime re-measurement
 
 const serial = @import("../drivers/serial/serial.zig");
 const hash = @import("../crypto/hash.zig");
+const ct = @import("../crypto/constant_time.zig");
 const measure = @import("measure.zig");
 const policy = @import("policy.zig");
 
@@ -17,6 +19,8 @@ pub const VerifyError = enum {
     boot_params_invalid,
     critical_module_tampered,
     policy_violation,
+    chain_incomplete,
+    runtime_tamper_detected,
 };
 
 pub const VerifyResult = struct {
@@ -31,6 +35,14 @@ pub const VerifyResult = struct {
     memory_ok: bool,
     cpu_ok: bool,
     security_ok: bool,
+    chain_ok: bool, // H.5: boot chain measured
+    chain_verified: bool, // H.5: chain integrity verified
+};
+
+pub const TamperStatus = struct {
+    text_ok: bool,
+    rodata_ok: bool,
+    checked: bool,
 };
 
 // =============================================================================
@@ -38,22 +50,37 @@ pub const VerifyResult = struct {
 // =============================================================================
 
 var initialized: bool = false;
-var last_result: VerifyResult = .{
-    .success = false,
-    .error_code = .none,
-    .kernel_hash = [_]u8{0} ** 32,
-    .boot_time = 0,
-    .verified_at = 0,
-    .checks_passed = 0,
-    .checks_total = 0,
-    .kernel_hash_ok = false,
-    .memory_ok = false,
-    .cpu_ok = false,
-    .security_ok = false,
-};
-
+var last_result: VerifyResult = makeEmptyResult();
 var trusted_kernel_hash: [32]u8 = [_]u8{0} ** 32;
 var trust_on_first_boot: bool = true;
+
+// H.5: Tamper detection state
+var last_tamper: TamperStatus = .{
+    .text_ok = false,
+    .rodata_ok = false,
+    .checked = false,
+};
+
+// Temporary hash buffers for verification
+var verify_tmp_hash: [32]u8 = [_]u8{0} ** 32;
+
+fn makeEmptyResult() VerifyResult {
+    return VerifyResult{
+        .success = false,
+        .error_code = .none,
+        .kernel_hash = [_]u8{0} ** 32,
+        .boot_time = 0,
+        .verified_at = 0,
+        .checks_passed = 0,
+        .checks_total = 0,
+        .kernel_hash_ok = false,
+        .memory_ok = false,
+        .cpu_ok = false,
+        .security_ok = false,
+        .chain_ok = false,
+        .chain_verified = false,
+    };
+}
 
 // =============================================================================
 // Public API
@@ -65,21 +92,9 @@ pub fn init() void {
     initialized = false;
     trust_on_first_boot = true;
 
-    var i: usize = 0;
-    while (i < 32) : (i += 1) {
-        trusted_kernel_hash[i] = 0;
-        last_result.kernel_hash[i] = 0;
-    }
-
-    last_result.success = false;
-    last_result.error_code = .none;
-    last_result.verified_at = 0;
-    last_result.checks_passed = 0;
-    last_result.checks_total = 0;
-    last_result.kernel_hash_ok = false;
-    last_result.memory_ok = false;
-    last_result.cpu_ok = false;
-    last_result.security_ok = false;
+    ct.secureZero32(&trusted_kernel_hash);
+    last_result = makeEmptyResult();
+    last_tamper = .{ .text_ok = false, .rodata_ok = false, .checked = false };
 
     initialized = true;
     serial.writeString("[BOOT_VERIFY] Initialized\n");
@@ -88,22 +103,12 @@ pub fn init() void {
 pub fn verify() VerifyResult {
     serial.writeString("[BOOT_VERIFY] Starting verification...\n");
 
-    var result = VerifyResult{
-        .success = true,
-        .error_code = .none,
-        .kernel_hash = [_]u8{0} ** 32,
-        .boot_time = 0,
-        .verified_at = 0,
-        .checks_passed = 0,
-        .checks_total = 5,
-        .kernel_hash_ok = false,
-        .memory_ok = false,
-        .cpu_ok = false,
-        .security_ok = false,
-    };
+    var result = makeEmptyResult();
+    result.success = true;
+    result.checks_total = 7; // H.5: 5 original + 2 new
 
     // Check 1: Measure kernel
-    serial.writeString("[BOOT_VERIFY] Check 1/5: Measuring kernel...\n");
+    serial.writeString("[BOOT_VERIFY] Check 1/7: Measuring kernel...\n");
     if (measure.measureKernel(&result.kernel_hash)) {
         result.checks_passed += 1;
         result.kernel_hash_ok = true;
@@ -113,13 +118,14 @@ pub fn verify() VerifyResult {
         result.kernel_hash_ok = false;
     }
 
-    // Check 2: Verify kernel hash
-    serial.writeString("[BOOT_VERIFY] Check 2/5: Verifying kernel hash...\n");
+    // Check 2: Verify kernel hash (using constant-time comparison)
+    serial.writeString("[BOOT_VERIFY] Check 2/7: Verifying kernel hash...\n");
     if (verifyKernelHash(&result.kernel_hash)) {
         result.checks_passed += 1;
     } else if (trust_on_first_boot) {
         result.checks_passed += 1;
         storeKernelHash(&result.kernel_hash);
+        serial.writeString("[BOOT_VERIFY] First boot — trusted hash stored\n");
     } else {
         result.success = false;
         result.error_code = .kernel_hash_mismatch;
@@ -127,7 +133,7 @@ pub fn verify() VerifyResult {
     }
 
     // Check 3: Validate memory layout
-    serial.writeString("[BOOT_VERIFY] Check 3/5: Validating memory layout...\n");
+    serial.writeString("[BOOT_VERIFY] Check 3/7: Validating memory layout...\n");
     if (measure.validateMemoryLayout()) {
         result.checks_passed += 1;
         result.memory_ok = true;
@@ -137,8 +143,8 @@ pub fn verify() VerifyResult {
         result.memory_ok = false;
     }
 
-    // Check 4: Check boot parameters (CPU)
-    serial.writeString("[BOOT_VERIFY] Check 4/5: Checking boot parameters...\n");
+    // Check 4: Check boot parameters
+    serial.writeString("[BOOT_VERIFY] Check 4/7: Checking boot parameters...\n");
     if (measure.validateBootParams()) {
         result.checks_passed += 1;
         result.cpu_ok = true;
@@ -149,7 +155,7 @@ pub fn verify() VerifyResult {
     }
 
     // Check 5: Verify security policy
-    serial.writeString("[BOOT_VERIFY] Check 5/5: Checking security policy...\n");
+    serial.writeString("[BOOT_VERIFY] Check 5/7: Checking security policy...\n");
     if (policy.check()) {
         result.checks_passed += 1;
         result.security_ok = true;
@@ -159,13 +165,43 @@ pub fn verify() VerifyResult {
         result.security_ok = false;
     }
 
-    // Set verified_at (simple counter for now)
-    result.verified_at = result.checks_passed;
+    // Check 6 (H.5): Run boot measurement chain
+    serial.writeString("[BOOT_VERIFY] Check 6/7: Boot measurement chain...\n");
+    if (measure.runBootChain()) {
+        result.checks_passed += 1;
+        result.chain_ok = true;
+    } else {
+        // Chain failure is a warning in standard mode, error in strict+
+        const level = policy.getLevel();
+        if (level == .strict or level == .paranoid) {
+            result.success = false;
+            result.error_code = .chain_incomplete;
+        }
+        result.chain_ok = false;
+    }
 
+    // Check 7 (H.5): Verify chain integrity
+    serial.writeString("[BOOT_VERIFY] Check 7/7: Chain integrity verification...\n");
+    if (verifyChainIntegrity()) {
+        result.checks_passed += 1;
+        result.chain_verified = true;
+    } else {
+        const level = policy.getLevel();
+        if (level == .strict or level == .paranoid) {
+            result.success = false;
+        }
+        result.chain_verified = false;
+    }
+
+    result.verified_at = result.checks_passed;
     last_result = result;
 
     if (result.success) {
-        serial.writeString("[BOOT_VERIFY] Verification PASSED\n");
+        serial.writeString("[BOOT_VERIFY] Verification PASSED (");
+        printDecSerial(result.checks_passed);
+        serial.writeString("/");
+        printDecSerial(result.checks_total);
+        serial.writeString(")\n");
     } else {
         serial.writeString("[BOOT_VERIFY] Verification FAILED!\n");
     }
@@ -173,14 +209,77 @@ pub fn verify() VerifyResult {
     return result;
 }
 
+/// Quick verification (kernel hash only, using CT compare)
 pub fn quickVerify() bool {
     if (!initialized) return false;
 
-    var current_hash: [32]u8 = [_]u8{0} ** 32;
-    if (!measure.measureKernel(&current_hash)) return false;
-
-    return verifyKernelHash(&current_hash);
+    if (!measure.measureKernel(&verify_tmp_hash)) return false;
+    const result = ct.constantTimeCompare32(&verify_tmp_hash, &trusted_kernel_hash);
+    ct.secureZero32(&verify_tmp_hash);
+    return result;
 }
+
+// =============================================================================
+// Runtime Re-measurement (H.5 — detect runtime tampering)
+// =============================================================================
+
+/// Re-measure .text and .rodata sections, compare with boot-time values
+/// These sections should be IMMUTABLE — any change = tampering
+pub fn runtimeVerify() TamperStatus {
+    var status = TamperStatus{
+        .text_ok = false,
+        .rodata_ok = false,
+        .checked = true,
+    };
+
+    if (!measure.hasBootHashes()) {
+        serial.writeString("[VERIFY] No boot hashes stored — skipping\n");
+        status.checked = false;
+        last_tamper = status;
+        return status;
+    }
+
+    // Re-measure .text
+    if (measure.measureTextSection(&verify_tmp_hash)) {
+        status.text_ok = ct.constantTimeCompare32(
+            &verify_tmp_hash,
+            measure.getBootTextHash(),
+        );
+        if (!status.text_ok) {
+            serial.writeString("[VERIFY] TAMPER: .text section MODIFIED!\n");
+        }
+    }
+
+    // Re-measure .rodata
+    if (measure.measureRodataSection(&verify_tmp_hash)) {
+        status.rodata_ok = ct.constantTimeCompare32(
+            &verify_tmp_hash,
+            measure.getBootRodataHash(),
+        );
+        if (!status.rodata_ok) {
+            serial.writeString("[VERIFY] TAMPER: .rodata section MODIFIED!\n");
+        }
+    }
+
+    ct.secureZero32(&verify_tmp_hash);
+    last_tamper = status;
+    return status;
+}
+
+/// Check if tampering has been detected
+pub fn isTampered() bool {
+    if (!last_tamper.checked) return false;
+    return !last_tamper.text_ok or !last_tamper.rodata_ok;
+}
+
+/// Get last tamper check status
+pub fn getTamperStatus() TamperStatus {
+    return last_tamper;
+}
+
+// =============================================================================
+// Accessors
+// =============================================================================
 
 pub fn getLastResult() *const VerifyResult {
     return &last_result;
@@ -206,21 +305,14 @@ pub fn getTrustedHash() *const [32]u8 {
 // Internal Functions
 // =============================================================================
 
+/// Constant-time kernel hash verification (H.5: uses CT module)
 fn verifyKernelHash(current: *const [32]u8) bool {
-    var has_trusted = false;
-    var i: usize = 0;
-    while (i < 32) : (i += 1) {
-        if (trusted_kernel_hash[i] != 0) {
-            has_trusted = true;
-            break;
-        }
+    // Check if we have a trusted hash stored
+    if (ct.constantTimeIsZero32(&trusted_kernel_hash)) {
+        return false; // No trusted hash yet
     }
 
-    if (!has_trusted) {
-        return false;
-    }
-
-    return hash.hashEqual(&trusted_kernel_hash, current);
+    return ct.constantTimeCompare32(&trusted_kernel_hash, current);
 }
 
 fn storeKernelHash(h: *const [32]u8) void {
@@ -229,6 +321,31 @@ fn storeKernelHash(h: *const [32]u8) void {
         trusted_kernel_hash[i] = h[i];
     }
     trust_on_first_boot = false;
+}
+
+/// Verify boot chain integrity
+fn verifyChainIntegrity() bool {
+    // Check 1: Chain must be complete
+    if (!measure.isChainComplete()) return false;
+
+    // Check 2: Critical PCRs must be extended
+    if (!measure.isPcrExtended(measure.PCR_TEXT)) return false;
+    if (!measure.isPcrExtended(measure.PCR_RODATA)) return false;
+    if (!measure.isPcrExtended(measure.PCR_KERNEL)) return false;
+    if (!measure.isPcrExtended(measure.PCR_AGGREGATE)) return false;
+
+    // Check 3: PCR values must not be zero (would indicate failed measurement)
+    const agg = measure.getPcr(measure.PCR_AGGREGATE);
+    if (agg) |pcr_val| {
+        if (ct.constantTimeIsZero32(pcr_val)) return false;
+    } else {
+        return false;
+    }
+
+    // Check 4: Event log should have entries
+    if (measure.getEventCount() == 0) return false;
+
+    return true;
 }
 
 // =============================================================================
@@ -265,4 +382,22 @@ pub fn test_verify() bool {
     }
 
     return failed == 0;
+}
+
+fn printDecSerial(val: u64) void {
+    if (val == 0) {
+        serial.writeChar('0');
+        return;
+    }
+    var buf: [20]u8 = undefined;
+    var i: usize = 0;
+    var v = val;
+    while (v > 0) : (i += 1) {
+        buf[i] = @intCast((v % 10) + '0');
+        v /= 10;
+    }
+    while (i > 0) {
+        i -= 1;
+        serial.writeChar(buf[i]);
+    }
 }
