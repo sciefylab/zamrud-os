@@ -1,5 +1,5 @@
-//! Zamrud OS - P2P Peer Management (H.3 HARDENED)
-//! Manages connected peers with Sybil defense integration
+//! Zamrud OS - P2P Peer Management (H.3+H.4 HARDENED)
+//! Manages connected peers with Sybil + Eclipse defense integration
 //!
 //! H.3 CHANGES:
 //! ✅ Added proof_of_work field to Peer struct
@@ -8,6 +8,12 @@
 //! ✅ New addWithVerification() with full Sybil checks
 //! ✅ Reputation delegates to reputation module
 //! ✅ Disconnect removes from subnet tracking
+//!
+//! H.4 CHANGES:
+//! ✅ Added conn_type field (inbound/outbound/anchor)
+//! ✅ Eclipse defense integration
+//! ✅ Connection type tracking
+//! ✅ Anchor peer support
 
 const serial = @import("../drivers/serial/serial.zig");
 const socket = @import("../net/socket.zig");
@@ -15,6 +21,7 @@ const crypto = @import("../crypto/crypto.zig");
 const ct = @import("../crypto/constant_time.zig");
 const reputation_mod = @import("reputation.zig");
 const sybil = @import("sybil_defense.zig");
+const eclipse = @import("eclipse_defense.zig");
 
 // =============================================================================
 // Constants
@@ -56,12 +63,23 @@ pub const Peer = struct {
 
     // H.3: Enhanced reputation
     reputation: i32,
-    proof_of_work: u64, // PoW nonce (verified)
-    first_seen: u64, // For age tracking
-    trust_level: reputation_mod.TrustLevel, // From reputation system
+    proof_of_work: u64,
+    first_seen: u64,
+    trust_level: reputation_mod.TrustLevel,
+
+    // H.4: Eclipse defense
+    conn_type: eclipse.ConnectionType,
 
     pub fn isActive(self: *const Peer) bool {
         return self.status == .connected;
+    }
+
+    pub fn isAnchor(self: *const Peer) bool {
+        return self.conn_type == .anchor;
+    }
+
+    pub fn isOutbound(self: *const Peer) bool {
+        return self.conn_type == .outbound or self.conn_type == .anchor;
     }
 };
 
@@ -97,8 +115,11 @@ pub fn init() void {
     reputation_mod.init();
     sybil.init();
 
+    // Initialize H.4 subsystem
+    eclipse.init();
+
     initialized = true;
-    serial.writeString("[PEER] Peer manager initialized (H.3 hardened)\n");
+    serial.writeString("[PEER] Peer manager initialized (H.3+H.4 hardened)\n");
 }
 
 pub fn isInitialized() bool {
@@ -125,6 +146,7 @@ fn emptyPeer() Peer {
         .proof_of_work = 0,
         .first_seen = 0,
         .trust_level = .untrusted,
+        .conn_type = .inbound,
     };
 }
 
@@ -133,11 +155,22 @@ fn emptyPeer() Peer {
 // =============================================================================
 
 /// Original add function — backward compatible (no PoW required)
-/// Used for internal/trusted connections
+/// Used for internal/trusted connections (treated as outbound)
 pub fn add(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket) ?*Peer {
+    return addWithType(id, ip, port, sock, .outbound);
+}
+
+/// Add peer with specific connection type
+pub fn addWithType(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket, conn_type: eclipse.ConnectionType) ?*Peer {
     // Check if banned
     if (isBanned(id)) {
         serial.writeString("[PEER] Rejecting banned peer\n");
+        return null;
+    }
+
+    // H.4: Check eclipse defense
+    if (!eclipse.allowConnection(ip, conn_type)) {
+        serial.writeString("[PEER] Rejected by eclipse defense\n");
         return null;
     }
 
@@ -151,7 +184,17 @@ pub fn add(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket) ?*Peer {
         return existing;
     }
 
-    return addToSlot(id, ip, port, sock, 0, .provisional);
+    return addToSlot(id, ip, port, sock, 0, .provisional, conn_type);
+}
+
+/// Add inbound connection (peer connected to us)
+pub fn addInbound(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket) ?*Peer {
+    return addWithType(id, ip, port, sock, .inbound);
+}
+
+/// Add outbound connection (we connected to peer)
+pub fn addOutbound(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket) ?*Peer {
+    return addWithType(id, ip, port, sock, .outbound);
 }
 
 /// H.3: Add peer with full Sybil defense verification
@@ -163,10 +206,17 @@ pub fn addWithVerification(
     sock: *socket.Socket,
     pow_nonce: u64,
     pow_difficulty: u8,
+    conn_type: eclipse.ConnectionType,
 ) ?*Peer {
     // Check if banned
     if (isBanned(id)) {
         serial.writeString("[PEER] Rejecting banned peer\n");
+        return null;
+    }
+
+    // H.4: Check eclipse defense first
+    if (!eclipse.allowConnection(ip, conn_type)) {
+        serial.writeString("[PEER] Rejected by eclipse defense\n");
         return null;
     }
 
@@ -212,7 +262,7 @@ pub fn addWithVerification(
     const rep = reputation_mod.registerPeer(&id, pow_nonce, pow_difficulty);
     const trust = if (rep) |r| r.trust_level else reputation_mod.TrustLevel.provisional;
 
-    return addToSlot(id, ip, port, sock, pow_nonce, trust);
+    return addToSlot(id, ip, port, sock, pow_nonce, trust, conn_type);
 }
 
 /// Internal: add peer to a slot
@@ -223,6 +273,7 @@ fn addToSlot(
     sock: *socket.Socket,
     pow_nonce: u64,
     trust: reputation_mod.TrustLevel,
+    conn_type: eclipse.ConnectionType,
 ) ?*Peer {
     for (&peers) |*p| {
         if (p.status == .disconnected) {
@@ -246,10 +297,20 @@ fn addToSlot(
                 .proof_of_work = pow_nonce,
                 .first_seen = now,
                 .trust_level = trust,
+                .conn_type = conn_type,
             };
             peer_count += 1;
 
-            serial.writeString("[PEER] Added peer (trust=");
+            // H.4: Register with eclipse defense
+            _ = eclipse.registerConnection(&id, ip, conn_type);
+
+            serial.writeString("[PEER] Added peer (");
+            switch (conn_type) {
+                .inbound => serial.writeString("inbound"),
+                .outbound => serial.writeString("outbound"),
+                .anchor => serial.writeString("anchor"),
+            }
+            serial.writeString(", trust=");
             switch (trust) {
                 .untrusted => serial.writeString("untrusted"),
                 .provisional => serial.writeString("provisional"),
@@ -278,6 +339,9 @@ pub fn remove(id: [32]u8) void {
             sybil.removeSubnetPeer(p.ip);
             // H.3: Remove from reputation
             reputation_mod.removePeer(&p.id);
+            // H.4: Remove from eclipse tracking
+            eclipse.removeConnection(&p.id);
+
             p.* = emptyPeer();
             if (peer_count > 0) peer_count -= 1;
             serial.writeString("[PEER] Removed peer\n");
@@ -293,6 +357,9 @@ pub fn disconnect(p: *Peer) void {
     }
     // H.3: Remove from subnet tracking on disconnect
     sybil.removeSubnetPeer(p.ip);
+    // H.4: Remove from eclipse tracking
+    eclipse.removeConnection(&p.id);
+
     p.status = .disconnected;
 }
 
@@ -355,6 +422,80 @@ pub fn getConnectedCount() usize {
 
 pub fn getTotalCount() usize {
     return peer_count;
+}
+
+// =============================================================================
+// H.4: Connection Type Queries
+// =============================================================================
+
+/// Get all outbound peers (including anchors)
+pub fn getOutbound() []*Peer {
+    var result: [MAX_PEERS]*Peer = undefined;
+    var count: usize = 0;
+
+    for (&peers) |*p| {
+        if (p.status == .connected and p.isOutbound()) {
+            result[count] = p;
+            count += 1;
+        }
+    }
+
+    return result[0..count];
+}
+
+/// Get all inbound peers
+pub fn getInbound() []*Peer {
+    var result: [MAX_PEERS]*Peer = undefined;
+    var count: usize = 0;
+
+    for (&peers) |*p| {
+        if (p.status == .connected and p.conn_type == .inbound) {
+            result[count] = p;
+            count += 1;
+        }
+    }
+
+    return result[0..count];
+}
+
+/// Get anchor peers
+pub fn getAnchors() []*Peer {
+    var result: [MAX_PEERS]*Peer = undefined;
+    var count: usize = 0;
+
+    for (&peers) |*p| {
+        if (p.status == .connected and p.conn_type == .anchor) {
+            result[count] = p;
+            count += 1;
+        }
+    }
+
+    return result[0..count];
+}
+
+/// Get outbound count
+pub fn getOutboundCount() usize {
+    return eclipse.getOutboundCount();
+}
+
+/// Get inbound count
+pub fn getInboundCount() usize {
+    return eclipse.getInboundCount();
+}
+
+/// Get anchor count
+pub fn getAnchorCount() usize {
+    return eclipse.getAnchorCount();
+}
+
+/// Promote peer to anchor
+pub fn promoteToAnchor(p: *Peer) bool {
+    if (eclipse.promoteToAnchor(&p.id)) {
+        p.conn_type = .anchor;
+        serial.writeString("[PEER] Promoted to anchor\n");
+        return true;
+    }
+    return false;
 }
 
 // =============================================================================
@@ -445,6 +586,30 @@ pub fn getDeniedCount() u64 {
 }
 
 // =============================================================================
+// H.4: Eclipse Defense Accessors
+// =============================================================================
+
+/// Get eclipse defense status
+pub fn getEclipseStatus() eclipse.EclipseStatus {
+    return eclipse.getStatus();
+}
+
+/// Get eclipse alert count
+pub fn getEclipseAlertCount() usize {
+    return eclipse.getAlertCount();
+}
+
+/// Check if node is safe from eclipse
+pub fn isEclipseSafe() bool {
+    return eclipse.getStatus().is_safe;
+}
+
+/// Get eclipse risk level (0-100)
+pub fn getEclipseRisk() u8 {
+    return eclipse.getStatus().risk_level;
+}
+
+// =============================================================================
 // Maintenance
 // =============================================================================
 
@@ -459,6 +624,11 @@ pub fn checkTimeouts() void {
             }
         }
     }
+
+    // H.4: Check eclipse health and rotate connections
+    eclipse.checkHealth();
+    eclipse.rotateConnections();
+    eclipse.autoPromoteAnchors();
 }
 
 pub fn updateLastSeen(p: *Peer) void {
