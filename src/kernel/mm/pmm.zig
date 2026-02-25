@@ -3,6 +3,7 @@
 
 const serial = @import("../drivers/serial/serial.zig");
 const limine = @import("../core/limine.zig");
+const sanitize = @import("sanitize.zig");
 
 // Page size: 4 KB
 pub const PAGE_SIZE: u64 = 4096;
@@ -312,12 +313,19 @@ pub fn freePage(phys_addr: u64) void {
         return;
     }
 
+    // H.9b: Secure wipe page BEFORE returning to free pool
+    if (sanitize.isInitialized()) {
+        sanitize.secureWipePage(phys_addr);
+    } else {
+        // Fallback volatile zero
+        zeroPage(phys_addr);
+    }
+
     clearBit(page);
     if (used_pages > 0) {
         used_pages -= 1;
     }
 }
-
 /// Free multiple contiguous pages
 pub fn freePages(phys_addr: u64, count: u64) void {
     if (phys_addr % PAGE_SIZE != 0) {
@@ -339,6 +347,12 @@ pub fn freePages(phys_addr: u64, count: u64) void {
         if (!testBit(page)) {
             serial.writeString("[PMM] WARNING: Double free in range\n");
         } else {
+            // H.9b: Wipe before free
+            if (sanitize.isInitialized()) {
+                sanitize.secureWipePage(phys_addr + i * PAGE_SIZE);
+            } else {
+                zeroPage(phys_addr + i * PAGE_SIZE);
+            }
             clearBit(page);
             if (used_pages > 0) {
                 used_pages -= 1;

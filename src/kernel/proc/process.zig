@@ -6,6 +6,7 @@ const heap = @import("../mm/heap.zig");
 const switch_ctx = @import("../arch/x86_64/switch.zig");
 const capability = @import("../security/capability.zig");
 const unveil = @import("../security/unveil.zig");
+const sanitize = @import("../mm/sanitize.zig");
 
 // ============================================================================
 // Constants
@@ -234,6 +235,7 @@ pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
 // Terminate
 // ============================================================================
 
+// === GANTI terminate() ===
 pub fn terminate(pid: u32) bool {
     if (!initialized) return false;
 
@@ -251,9 +253,31 @@ pub fn terminate(pid: u32) bool {
         unveil.destroyTable(pid);
     }
 
+    // H.9e: Wipe all mlocked pages for this process
+    if (sanitize.isInitialized()) {
+        sanitize.munlockAll(pid);
+    }
+
+    // H.9d: Secure wipe process memory BEFORE freeing
+    if (sanitize.isInitialized()) {
+        sanitize.secureWipeProcess(
+            process_table[slot].kernel_stack,
+            KERNEL_STACK_SIZE,
+            pid,
+        );
+    }
+
     if (process_table[slot].kernel_stack != 0) {
         const stack_ptr: [*]u8 = @ptrFromInt(process_table[slot].kernel_stack);
         heap.kfree(stack_ptr);
+    }
+
+    // H.9d: Secure wipe process struct using volatile writes
+    if (sanitize.isInitialized()) {
+        sanitize.secureWipeStruct(
+            @intFromPtr(&process_table[slot]),
+            @sizeOf(Process),
+        );
     }
 
     process_used[slot] = false;

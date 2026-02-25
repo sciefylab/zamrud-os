@@ -19,6 +19,7 @@ const pmm = @import("mm/pmm.zig");
 const vmm = @import("mm/vmm.zig");
 const memory = @import("mm/memory.zig");
 const heap = @import("mm/heap.zig");
+const sanitize = @import("mm/sanitize.zig"); // ADD THIS
 
 const process = @import("proc/process.zig");
 const scheduler = @import("proc/scheduler.zig");
@@ -184,6 +185,10 @@ export fn kernel_main() noreturn {
 
     heap.init();
     serial.writeString("[OK]   Heap initialized\n");
+
+    // H.9: Secure Memory Sanitization
+    sanitize.init();
+    serial.writeString("[OK]   Memory sanitization ready (H.9)\n");
 
     printLine();
     serial.writeString("[SECURITY]\n");
@@ -643,6 +648,20 @@ fn printSystemSummary() void {
         serial.writeString(", dec=");
         printDecSerial(sys_encrypt.getStats().decrypts);
         serial.writeString(")\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+
+    serial.writeString("  MemSan(H.9):");
+    if (sanitize.isInitialized()) {
+        const san_stats = sanitize.getStats();
+        serial.writeString("OK (");
+        printDecSerial(san_stats.heap_wipes);
+        serial.writeString(" heap, ");
+        printDecSerial(san_stats.page_wipes);
+        serial.writeString(" page, ");
+        printDecSerial(san_stats.mlock_count);
+        serial.writeString(" locked)\n");
     } else {
         serial.writeString("Not initialized\n");
     }

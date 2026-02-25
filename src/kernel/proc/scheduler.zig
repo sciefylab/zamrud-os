@@ -5,6 +5,7 @@ const process = @import("process.zig");
 const switch_ctx = @import("../arch/x86_64/switch.zig");
 const gdt = @import("../arch/x86_64/gdt.zig");
 const cpu = @import("../core/cpu.zig");
+const sanitize = @import("../mm/sanitize.zig");
 
 var scheduler_enabled: bool = false;
 var current_slot: usize = 0;
@@ -245,6 +246,7 @@ export fn schedulerComplete() noreturn {
     }
 }
 
+// === UPDATE killProcess() ===
 pub fn killProcess(pid: u32) bool {
     if (pid == 0) return false;
     const slot = process.getSlotByPid(pid) orelse return false;
@@ -252,6 +254,16 @@ pub fn killProcess(pid: u32) bool {
         exitCurrentProcess();
         return true;
     }
+
+    // H.9d: Wipe process memory before marking dead
+    if (sanitize.isInitialized()) {
+        sanitize.secureWipeProcess(
+            process.process_table[slot].kernel_stack,
+            process.KERNEL_STACK_SIZE,
+            pid,
+        );
+    }
+
     process.process_table[slot].state = .Terminated;
     process.process_used[slot] = false;
     return true;

@@ -33,6 +33,7 @@ const enc_int_cmd = @import("commands/enc_int.zig");
 const sys_encrypt_cmd = @import("commands/sys_encrypt.zig");
 const zam_cmd = @import("commands/zam.zig");
 const mouse_cmd = @import("commands/mouse.zig");
+const sanitize_cmd = @import("commands/sanitize.zig");
 
 // =============================================================================
 // Command Execution
@@ -354,6 +355,18 @@ pub fn execute(input: []const u8) void {
     else if (helpers.strEql(command, "mouse")) {
         mouse_cmd.execute(args);
     }
+
+    // H.9: Memory Sanitization
+    else if (helpers.strEql(command, "sanitize")) {
+        sanitize_cmd.execute(args);
+    } else if (helpers.strEql(command, "santest")) {
+        sanitize_cmd.runTests();
+    } else if (helpers.strEql(command, "mlock")) {
+        sanitize_cmd.cmdMlock(args);
+    } else if (helpers.strEql(command, "munlock")) {
+        sanitize_cmd.cmdMunlock(args);
+    }
+
     // Test all
     else if (helpers.strEql(command, "testall")) {
         runAllTests();
@@ -431,51 +444,64 @@ fn runAllTests() void {
     netcap_cmd.cmdNettest("");
     shell.newLine();
 
-    // shell.printInfoLine("=== VIOLATION HANDLER TESTS (E3.5) ===");
-    // vio_cmd.cmdSectest("");
-    // shell.newLine();
+    shell.printInfoLine("=== VIOLATION HANDLER TESTS (E3.5) ===");
+    vio_cmd.cmdSectest("");
+    shell.newLine();
 
-    // shell.printInfoLine("=== IPC TESTS (F1) ===");
-    // ipc_cmd.cmdIpcTest("");
-    // shell.newLine();
+    shell.printInfoLine("=== IPC TESTS (F1) ===");
+    ipc_cmd.cmdIpcTest("");
+    shell.newLine();
 
-    // shell.printInfoLine("=== SHARED MEMORY TESTS (F2) ===");
-    // shmem_cmd.cmdShmTest("");
-    // shell.newLine();
+    shell.printInfoLine("=== SHARED MEMORY TESTS (F2) ===");
+    shmem_cmd.cmdShmTest("");
+    shell.newLine();
 
-    // shell.printInfoLine("=== USER/GROUP TESTS (F3) ===");
-    // user_cmd.execute("test");
-    // shell.newLine();
+    shell.printInfoLine("=== USER/GROUP TESTS (F3) ===");
+    user_cmd.execute("test");
+    shell.newLine();
 
-    // shell.printInfoLine("=== ENCRYPTED FS TESTS (F4.0) ===");
-    // encfs_cmd.cmdEncTest();
-    // shell.newLine();
+    shell.printInfoLine("=== ENCRYPTED FS TESTS (F4.0) ===");
+    encfs_cmd.cmdEncTest();
+    shell.newLine();
 
-    // shell.printInfoLine("=== ENC INTEGRATION TESTS (F4.1) ===");
-    // enc_int_cmd.encIntTestCommand("");
-    // shell.newLine();
+    shell.printInfoLine("=== ENC INTEGRATION TESTS (F4.1) ===");
+    enc_int_cmd.encIntTestCommand("");
+    shell.newLine();
 
-    // shell.printInfoLine("=== SYSTEM ENCRYPTION TESTS (F4.2) ===");
-    // sys_encrypt_cmd.cmdSysEncTest("");
-    // shell.newLine();
+    shell.printInfoLine("=== SYSTEM ENCRYPTION TESTS (F4.2) ===");
+    sys_encrypt_cmd.cmdSysEncTest("");
+    shell.newLine();
 
-    // shell.printInfoLine("=== ZAM BINARY LOADER TESTS (F5.0) ===");
-    // zam_cmd.cmdZamTest();
-    // shell.newLine();
+    shell.printInfoLine("=== ZAM BINARY LOADER TESTS (F5.0) ===");
+    zam_cmd.cmdZamTest();
+    shell.newLine();
 
-    // shell.printInfoLine("=== ENVIRONMENT VARIABLE TESTS (T4.2) ===");
-    // system.cmdEnvTest("");
-    // shell.newLine();
+    shell.printInfoLine("=== ENVIRONMENT VARIABLE TESTS (T4.2) ===");
+    system.cmdEnvTest("");
+    shell.newLine();
 
-    // // =========================================================
-    // // ADD THIS: Privacy & Identity Tests (P.1/P.2/P.5)
-    // // =========================================================
-    // shell.printInfoLine("=== IDENTITY & PRIVACY TESTS (P.1/P.2/P.5) ===");
-    // identity_cmd.runTest("all");
-    // shell.newLine();
+    // =========================================================
+    // ADD THIS: Privacy & Identity Tests (P.1/P.2/P.5)
+    // =========================================================
+    shell.printInfoLine("=== IDENTITY & PRIVACY TESTS (P.1/P.2/P.5) ===");
+    identity_cmd.runTest("all");
+    shell.newLine();
 
-    // shell.printInfoLine("########################################");
-    // shell.printInfoLine("##  COMPLETE TEST SUITE FINISHED      ##");
-    // shell.printInfoLine("########################################");
-    // shell.newLine();
+    // ADD THIS BLOCK:
+    shell.printInfoLine("=== CONSTANT-TIME CRYPTO TESTS (H.1) ===");
+    crypto_cmd.execute("cttest");
+    shell.newLine();
+
+    shell.printInfoLine("=== ENTROPY/CSPRNG TESTS (H.2) ===");
+    crypto_cmd.execute("entropy test");
+    shell.newLine();
+
+    shell.printInfoLine("=== MEMORY SANITIZATION TESTS (H.9) ===");
+    sanitize_cmd.runTests();
+    shell.newLine();
+
+    shell.printInfoLine("########################################");
+    shell.printInfoLine("##  COMPLETE TEST SUITE FINISHED      ##");
+    shell.printInfoLine("########################################");
+    shell.newLine();
 }

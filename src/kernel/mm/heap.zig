@@ -4,6 +4,7 @@
 const serial = @import("../drivers/serial/serial.zig");
 const pmm = @import("pmm.zig");
 const vmm = @import("vmm.zig");
+const sanitize = @import("sanitize.zig");
 
 // Heap configuration
 const HEAP_START: u64 = 0xFFFF_C000_0000_0000;
@@ -517,10 +518,15 @@ pub fn kfree(ptr: ?[*]u8) void {
     // Zero memory
     if (ENABLE_ZERO_ON_FREE) {
         const zero_size = block_size - CANARY_SIZE;
-        var i: u64 = 0;
-        while (i < zero_size) : (i += 1) {
-            const byte_ptr: *u8 = @ptrFromInt(data_addr + i);
-            byte_ptr.* = 0;
+        if (sanitize.isInitialized()) {
+            sanitize.secureWipeHeap(data_addr, zero_size);
+        } else {
+            // Fallback: volatile wipe before sanitize is ready
+            var i: u64 = 0;
+            while (i < zero_size) : (i += 1) {
+                const byte_ptr: *volatile u8 = @ptrFromInt(data_addr + i);
+                byte_ptr.* = 0;
+            }
         }
     }
 
