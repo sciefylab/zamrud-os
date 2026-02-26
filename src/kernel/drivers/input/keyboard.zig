@@ -1,6 +1,7 @@
 //! Zamrud OS - Keyboard Driver (T3 Enhanced)
 //! PS/2 Keyboard Driver with full extended key support
-//! FIXED: Properly filter mouse data and invalid scancodes
+//! FIXED: Boot grace period now properly filters phantom bytes
+//! FIXED: 0xAA (Shift release) no longer discarded after grace period ends
 
 const cpu = @import("../../core/cpu.zig");
 const serial = @import("../serial/serial.zig");
@@ -16,11 +17,10 @@ var ctrl_pressed: bool = false;
 var alt_pressed: bool = false;
 var caps_lock: bool = false;
 var e0_prefix: bool = false;
+var boot_grace_active: bool = true;
+var boot_grace_ticks: u32 = 0;
 
-// Boot grace period — ignore spurious data during first few ticks after init
-var init_complete: bool = false;
-var grace_ticks: u32 = 0;
-const GRACE_PERIOD: u32 = 100; // Ignore first 100 interrupts after boot
+const GRACE_PERIOD_TICKS: u32 = 50;
 
 // Key buffer for shell to read
 const KEY_BUFFER_SIZE: usize = 64;
@@ -71,33 +71,25 @@ const SC_E0_DELETE: u8 = 0x53;
 const SC_E0_RCTRL: u8 = 0x1D;
 
 const SCANCODE_NORMAL = [_]u8{
-    0, 0x1B, '1', '2', '3', '4', '5', '6', // 0x00-0x07
-    '7', '8', '9', '0', '-', '=', 0x08, '\t', // 0x08-0x0F
-    'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', // 0x10-0x17
-    'o', 'p', '[', ']', '\n', 0, 'a', 's', // 0x18-0x1F
-    'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', // 0x20-0x27
-    '\'', '`', 0, '\\', 'z', 'x', 'c', 'v', // 0x28-0x2F
-    'b', 'n', 'm', ',', '.', '/', 0, '*', // 0x30-0x37
-    0, ' ', 0, 0, 0, 0, 0, 0, // 0x38-0x3F
-    0, 0, 0, 0, 0, 0, 0, 0, // 0x40-0x47
-    0, 0, 0, 0, 0, 0, 0, 0, // 0x48-0x4F
-    0, 0, 0, 0, 0, 0, 0, 0, // 0x50-0x57
-    0, 0, 0, 0, 0, 0, 0, 0, // 0x58-0x5F
+    0,    0x1B, '1', '2',  '3',  '4', '5',  '6',
+    '7',  '8',  '9', '0',  '-',  '=', 0x08, '\t',
+    'q',  'w',  'e', 'r',  't',  'y', 'u',  'i',
+    'o',  'p',  '[', ']',  '\n', 0,   'a',  's',
+    'd',  'f',  'g', 'h',  'j',  'k', 'l',  ';',
+    '\'', '`',  0,   '\\', 'z',  'x', 'c',  'v',
+    'b',  'n',  'm', ',',  '.',  '/', 0,    '*',
+    0,    ' ',  0,   0,    0,    0,   0,    0,
 };
 
 const SCANCODE_SHIFT = [_]u8{
-    0, 0x1B, '!', '@', '#', '$', '%', '^', // 0x00-0x07
-    '&', '*', '(', ')', '_', '+', 0x08, '\t', // 0x08-0x0F
-    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', // 0x10-0x17
-    'O', 'P', '{', '}', '\n', 0, 'A', 'S', // 0x18-0x1F
-    'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', // 0x20-0x27
-    '"', '~', 0, '|', 'Z', 'X', 'C', 'V', // 0x28-0x2F
-    'B', 'N', 'M', '<', '>', '?', 0, '*', // 0x30-0x37
-    0, ' ', 0, 0, 0, 0, 0, 0, // 0x38-0x3F
-    0, 0, 0, 0, 0, 0, 0, 0, // 0x40-0x47
-    0, 0, 0, 0, 0, 0, 0, 0, // 0x48-0x4F
-    0, 0, 0, 0, 0, 0, 0, 0, // 0x50-0x57
-    0, 0, 0, 0, 0, 0, 0, 0, // 0x58-0x5F
+    0,   0x1B, '!', '@', '#',  '$', '%',  '^',
+    '&', '*',  '(', ')', '_',  '+', 0x08, '\t',
+    'Q', 'W',  'E', 'R', 'T',  'Y', 'U',  'I',
+    'O', 'P',  '{', '}', '\n', 0,   'A',  'S',
+    'D', 'F',  'G', 'H', 'J',  'K', 'L',  ':',
+    '"', '~',  0,   '|', 'Z',  'X', 'C',  'V',
+    'B', 'N',  'M', '<', '>',  '?', 0,    '*',
+    0,   ' ',  0,   0,   0,    0,   0,    0,
 };
 
 // Extended Key Codes
@@ -159,13 +151,6 @@ pub const KEY_CTRL_RIGHT: u8 = 0xB1;
 
 pub fn init() void {
     serial.writeString("  KB: Starting init sequence...\n");
-
-    // Reset state
-    init_complete = false;
-    grace_ticks = 0;
-    e0_prefix = false;
-    buffer_head = 0;
-    buffer_tail = 0;
 
     waitWrite();
     cpu.outb(COMMAND_PORT, 0xAD);
@@ -307,26 +292,53 @@ pub fn init() void {
 
     flushBuffer();
 
+    // Reset all state
+    buffer_head = 0;
+    buffer_tail = 0;
+    e0_prefix = false;
+    shift_pressed = false;
+    ctrl_pressed = false;
+    alt_pressed = false;
+    caps_lock = false;
+
+    // Reset grace period
+    boot_grace_ticks = 0;
+    boot_grace_active = true;
+
     const final_status = cpu.inb(STATUS_PORT);
     serial.writeString("  KB: Final status: 0x");
     printHex(final_status);
     serial.writeString("\n");
 
-    // Mark init complete — but still use grace period
-    init_complete = true;
-    grace_ticks = 0;
-
-    serial.writeString("  KB: Init complete (T3 enhanced + grace period)\n");
+    serial.writeString("  KB: Init complete (T3 enhanced)\n");
 }
 
-/// Called by shell when ready to accept input — ends grace period immediately
+// ============================================================================
+// Timer tick handler
+// ============================================================================
+
+pub fn timerTick() void {
+    if (boot_grace_active) {
+        boot_grace_ticks += 1;
+        if (boot_grace_ticks >= GRACE_PERIOD_TICKS) {
+            boot_grace_active = false;
+            // Clear buffer when grace period ends
+            buffer_head = 0;
+            buffer_tail = 0;
+            serial.writeString("[KB] Grace period ended, buffer cleared\n");
+        }
+    }
+}
+
 pub fn endGracePeriod() void {
-    grace_ticks = GRACE_PERIOD;
+    boot_grace_active = false;
+    // Clear buffer when manually ending grace period
+    buffer_head = 0;
+    buffer_tail = 0;
 }
 
-/// Check if grace period is still active
 pub fn isGracePeriodActive() bool {
-    return grace_ticks < GRACE_PERIOD;
+    return boot_grace_active;
 }
 
 // ============================================================================
@@ -412,73 +424,30 @@ pub fn isCapsLock() bool {
 }
 
 // ============================================================================
-// Interrupt Handler — FIXED with multiple filters
+// Interrupt Handler — FIXED grace period logic
 // ============================================================================
 
 pub fn handleInterrupt() void {
     const status = cpu.inb(STATUS_PORT);
 
-    // No data available
     if ((status & 0x01) == 0) {
         return;
     }
 
-    // =========================================================================
-    // FILTER 1: Check bit 5 — if set, this is AUX (mouse) data, not keyboard
-    // =========================================================================
     if ((status & 0x20) != 0) {
-        // Read and discard mouse data
         _ = cpu.inb(DATA_PORT);
         return;
     }
 
     const scancode = cpu.inb(DATA_PORT);
 
-    // =========================================================================
-    // FILTER 2: Grace period — discard early interrupts during mouse init
-    // =========================================================================
-    if (grace_ticks < GRACE_PERIOD) {
-        grace_ticks += 1;
-        // During grace period, only log to serial, don't process
-        serial.writeString("[KB-GRACE] discard 0x");
-        printHex(scancode);
-        serial.writeString("\n");
+    // FIX: Grace period - discard ALL bytes during boot grace period
+    // This prevents phantom keypresses from appearing after boot
+    if (boot_grace_active) {
+        // Discard everything during grace period
+        // Don't even process modifier keys
         return;
     }
-
-    // =========================================================================
-    // FILTER 3: Skip known PS/2 response bytes that might leak through
-    // =========================================================================
-    if (scancode == 0xFA or // ACK
-        scancode == 0xAA or // Self-test passed
-        scancode == 0x00 or // Null byte
-        scancode == 0xFE or // Resend request
-        scancode == 0xFF or // Error / reset response
-        scancode == 0xFC or // Self-test failed
-        scancode == 0xFD) // Self-test failed
-    {
-        return;
-    }
-
-    // =========================================================================
-    // FILTER 4: Validate scancode is in expected range for Set 1
-    // Valid press: 0x01-0x58, 0xE0 (extended prefix)
-    // Valid release: 0x81-0xD8
-    // =========================================================================
-    if (scancode != 0xE0) {
-        const base = scancode & 0x7F; // Remove release bit
-        if (base == 0 or base > 0x58) {
-            // Invalid scancode — likely garbage
-            serial.writeString("[KB] invalid sc 0x");
-            printHex(scancode);
-            serial.writeString("\n");
-            return;
-        }
-    }
-
-    // =========================================================================
-    // Process valid scancode
-    // =========================================================================
 
     if (scancode == 0xE0) {
         e0_prefix = true;
@@ -491,7 +460,7 @@ pub fn handleInterrupt() void {
         return;
     }
 
-    // Key release
+    // Handle key release (bit 7 set)
     if ((scancode & 0x80) != 0) {
         const released = scancode & 0x7F;
         if (released == SC_LSHIFT or released == SC_RSHIFT) {
@@ -504,7 +473,7 @@ pub fn handleInterrupt() void {
         return;
     }
 
-    // Modifier keys
+    // Handle key press
     if (scancode == SC_LSHIFT or scancode == SC_RSHIFT) {
         shift_pressed = true;
         return;
@@ -525,7 +494,6 @@ pub fn handleInterrupt() void {
         return;
     }
 
-    // Arrow keys (non-extended)
     if (scancode == SC_UP) {
         if (shift_pressed) {
             bufferKey(KEY_SHIFT_UP);
@@ -559,7 +527,6 @@ pub fn handleInterrupt() void {
         return;
     }
 
-    // Function keys
     switch (scancode) {
         SC_F1 => {
             bufferKey(KEY_F1);
@@ -612,7 +579,6 @@ pub fn handleInterrupt() void {
         else => {},
     }
 
-    // Regular character
     var ascii: u8 = 0;
     if (scancode < SCANCODE_NORMAL.len) {
         if (shift_pressed) {
@@ -630,7 +596,6 @@ pub fn handleInterrupt() void {
         }
     }
 
-    // Ctrl combinations
     if (ctrl_pressed and ascii != 0) {
         if (ascii >= 'a' and ascii <= 'z') {
             bufferKey(ascii - 'a' + 1);
