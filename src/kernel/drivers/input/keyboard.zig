@@ -1,6 +1,6 @@
 //! Zamrud OS - Keyboard Driver (T3 Enhanced)
 //! PS/2 Keyboard Driver with full extended key support
-//! Supports: arrows, Home/End, PgUp/PgDn, Delete, Ctrl+letter, Shift+arrows
+//! FIXED: Properly filter mouse data and invalid scancodes
 
 const cpu = @import("../../core/cpu.zig");
 const serial = @import("../serial/serial.zig");
@@ -15,9 +15,12 @@ var shift_pressed: bool = false;
 var ctrl_pressed: bool = false;
 var alt_pressed: bool = false;
 var caps_lock: bool = false;
-var e0_prefix: bool = false; // T3: Extended scancode prefix
-var boot_grace_count: u32 = 0; // Count early IRQs to discard phantoms
-var boot_grace_active: bool = true; // Ignore phantom keys from mouse init
+var e0_prefix: bool = false;
+
+// Boot grace period — ignore spurious data during first few ticks after init
+var init_complete: bool = false;
+var grace_ticks: u32 = 0;
+const GRACE_PERIOD: u32 = 100; // Ignore first 100 interrupts after boot
 
 // Key buffer for shell to read
 const KEY_BUFFER_SIZE: usize = 64;
@@ -37,13 +40,11 @@ const SC_ESCAPE: u8 = 0x01;
 const SC_TAB: u8 = 0x0F;
 const SC_SPACE: u8 = 0x39;
 
-// Non-E0 arrow scancodes (numpad without numlock)
 const SC_UP: u8 = 0x48;
 const SC_DOWN: u8 = 0x50;
 const SC_LEFT: u8 = 0x4B;
 const SC_RIGHT: u8 = 0x4D;
 
-// Function keys
 const SC_F1: u8 = 0x3B;
 const SC_F2: u8 = 0x3C;
 const SC_F3: u8 = 0x3D;
@@ -57,7 +58,6 @@ const SC_F10: u8 = 0x44;
 const SC_F11: u8 = 0x57;
 const SC_F12: u8 = 0x58;
 
-// E0 prefix scancodes
 const SC_E0_UP: u8 = 0x48;
 const SC_E0_DOWN: u8 = 0x50;
 const SC_E0_LEFT: u8 = 0x4B;
@@ -70,7 +70,6 @@ const SC_E0_INSERT: u8 = 0x52;
 const SC_E0_DELETE: u8 = 0x53;
 const SC_E0_RCTRL: u8 = 0x1D;
 
-// Scancode tables
 const SCANCODE_NORMAL = [_]u8{
     0, 0x1B, '1', '2', '3', '4', '5', '6', // 0x00-0x07
     '7', '8', '9', '0', '-', '=', 0x08, '\t', // 0x08-0x0F
@@ -80,6 +79,10 @@ const SCANCODE_NORMAL = [_]u8{
     '\'', '`', 0, '\\', 'z', 'x', 'c', 'v', // 0x28-0x2F
     'b', 'n', 'm', ',', '.', '/', 0, '*', // 0x30-0x37
     0, ' ', 0, 0, 0, 0, 0, 0, // 0x38-0x3F
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x40-0x47
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x48-0x4F
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x50-0x57
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x58-0x5F
 };
 
 const SCANCODE_SHIFT = [_]u8{
@@ -91,12 +94,13 @@ const SCANCODE_SHIFT = [_]u8{
     '"', '~', 0, '|', 'Z', 'X', 'C', 'V', // 0x28-0x2F
     'B', 'N', 'M', '<', '>', '?', 0, '*', // 0x30-0x37
     0, ' ', 0, 0, 0, 0, 0, 0, // 0x38-0x3F
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x40-0x47
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x48-0x4F
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x50-0x57
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x58-0x5F
 };
 
-// =============================================================================
-// T3: Extended Key Codes (values > 0x80 for shell to detect)
-// =============================================================================
-
+// Extended Key Codes
 pub const KEY_UP: u8 = 0x80;
 pub const KEY_DOWN: u8 = 0x81;
 pub const KEY_LEFT: u8 = 0x82;
@@ -110,7 +114,6 @@ pub const KEY_BACKSPACE: u8 = 0x08;
 pub const KEY_TAB: u8 = '\t';
 pub const KEY_ENTER: u8 = '\n';
 
-// T3: New extended keys
 pub const KEY_HOME: u8 = 0x88;
 pub const KEY_END: u8 = 0x89;
 pub const KEY_PGUP: u8 = 0x8A;
@@ -126,7 +129,6 @@ pub const KEY_F10: u8 = 0x93;
 pub const KEY_F11: u8 = 0x94;
 pub const KEY_F12: u8 = 0x95;
 
-// T3: Ctrl+key codes (0xC0 range)
 pub const KEY_CTRL_A: u8 = 0x01;
 pub const KEY_CTRL_B: u8 = 0x02;
 pub const KEY_CTRL_C: u8 = 0x03;
@@ -141,7 +143,6 @@ pub const KEY_CTRL_R: u8 = 0x12;
 pub const KEY_CTRL_U: u8 = 0x15;
 pub const KEY_CTRL_W: u8 = 0x17;
 
-// T3: Shift+special combos
 pub const KEY_SHIFT_UP: u8 = 0xA0;
 pub const KEY_SHIFT_DOWN: u8 = 0xA1;
 pub const KEY_SHIFT_PGUP: u8 = 0xA2;
@@ -149,7 +150,6 @@ pub const KEY_SHIFT_PGDN: u8 = 0xA3;
 pub const KEY_SHIFT_HOME: u8 = 0xA4;
 pub const KEY_SHIFT_END: u8 = 0xA5;
 
-// T3: Ctrl+arrow combos
 pub const KEY_CTRL_LEFT: u8 = 0xB0;
 pub const KEY_CTRL_RIGHT: u8 = 0xB1;
 
@@ -158,105 +158,101 @@ pub const KEY_CTRL_RIGHT: u8 = 0xB1;
 // ============================================================================
 
 pub fn init() void {
-    serial.writeString(" KB: Starting init sequence...\n");
+    serial.writeString("  KB: Starting init sequence...\n");
 
-    // 1. Disable devices during configuration
+    // Reset state
+    init_complete = false;
+    grace_ticks = 0;
+    e0_prefix = false;
+    buffer_head = 0;
+    buffer_tail = 0;
+
     waitWrite();
     cpu.outb(COMMAND_PORT, 0xAD);
     waitWrite();
     cpu.outb(COMMAND_PORT, 0xA7);
 
-    // 2. Flush output buffer
     flushBuffer();
 
-    // 3. Controller self-test (MUST be before config write!)
     waitWrite();
     cpu.outb(COMMAND_PORT, 0xAA);
     waitRead();
     const ctrl_test = cpu.inb(DATA_PORT);
     if (ctrl_test == 0x55) {
-        serial.writeString(" KB: Controller self-test passed\n");
+        serial.writeString("  KB: Controller self-test passed\n");
     } else {
-        serial.writeString(" KB: Controller self-test failed: 0x");
+        serial.writeString("  KB: Controller self-test failed: 0x");
         printHex(ctrl_test);
         serial.writeString("\n");
     }
 
-    // 4. Get configuration byte (AFTER self-test reset)
     waitWrite();
     cpu.outb(COMMAND_PORT, 0x20);
     waitRead();
     var config = cpu.inb(DATA_PORT);
-    serial.writeString(" KB: Current config: 0x");
+    serial.writeString("  KB: Current config: 0x");
     printHex(config);
     serial.writeString("\n");
 
-    // 5. Modify configuration — preserve mouse settings
-    config |= 0x01; // Enable keyboard IRQ (bit 0)
-    config |= 0x02; // Enable aux/mouse IRQ (bit 1) — B2.1
-    config &= ~@as(u8, 0x20); // Bit 5: Clear = enable aux clock
-    config &= ~@as(u8, 0x10); // Bit 4: Clear = enable keyboard clock
-    config &= ~@as(u8, 0x40); // Disable translation (bit 6)
+    config |= 0x01;
+    config |= 0x02;
+    config &= ~@as(u8, 0x20);
+    config &= ~@as(u8, 0x10);
+    config &= ~@as(u8, 0x40);
 
-    // 6. Write configuration back
     waitWrite();
     cpu.outb(COMMAND_PORT, 0x60);
     waitWrite();
     cpu.outb(DATA_PORT, config);
-    serial.writeString(" KB: New config: 0x");
+    serial.writeString("  KB: New config: 0x");
     printHex(config);
     serial.writeString("\n");
 
-    // 7. Check if keyboard exists
     waitWrite();
     cpu.outb(COMMAND_PORT, 0xAB);
     waitRead();
     const kb_test = cpu.inb(DATA_PORT);
     if (kb_test == 0x00) {
-        serial.writeString(" KB: Keyboard port test passed\n");
+        serial.writeString("  KB: Keyboard port test passed\n");
     } else {
-        serial.writeString(" KB: Keyboard port test result: 0x");
+        serial.writeString("  KB: Keyboard port test result: 0x");
         printHex(kb_test);
         serial.writeString("\n");
     }
 
-    // 8. Enable keyboard port
     waitWrite();
     cpu.outb(COMMAND_PORT, 0xAE);
-    serial.writeString(" KB: Keyboard port enabled\n");
+    serial.writeString("  KB: Keyboard port enabled\n");
 
-    // 8b. Re-enable aux port (self-test 0xAA may have disabled it)
     waitWrite();
     cpu.outb(COMMAND_PORT, 0xA8);
-    serial.writeString(" KB: Aux port re-enabled\n");
+    serial.writeString("  KB: Aux port re-enabled\n");
 
-    // 9. Reset keyboard device
-    serial.writeString(" KB: Resetting keyboard device...\n");
+    serial.writeString("  KB: Resetting keyboard device...\n");
     waitWrite();
     cpu.outb(DATA_PORT, 0xFF);
 
     if (waitReadTimeout()) {
         const resp = cpu.inb(DATA_PORT);
         if (resp == 0xFA) {
-            serial.writeString(" KB: Reset ACK received\n");
+            serial.writeString("  KB: Reset ACK received\n");
             if (waitReadTimeout()) {
                 const result = cpu.inb(DATA_PORT);
                 if (result == 0xAA) {
-                    serial.writeString(" KB: Keyboard self-test passed\n");
+                    serial.writeString("  KB: Keyboard self-test passed\n");
                 } else {
-                    serial.writeString(" KB: Keyboard self-test: 0x");
+                    serial.writeString("  KB: Keyboard self-test: 0x");
                     printHex(result);
                     serial.writeString("\n");
                 }
             }
         } else {
-            serial.writeString(" KB: Reset response: 0x");
+            serial.writeString("  KB: Reset response: 0x");
             printHex(resp);
             serial.writeString("\n");
         }
     }
 
-    // 10. Set scancode set 1
     waitWrite();
     cpu.outb(DATA_PORT, 0xF0);
     if (waitReadTimeout()) {
@@ -268,19 +264,17 @@ pub fn init() void {
     if (waitReadTimeout()) {
         _ = cpu.inb(DATA_PORT);
     }
-    serial.writeString(" KB: Using scancode set 1\n");
+    serial.writeString("  KB: Using scancode set 1\n");
 
-    // 11. Enable scanning
     waitWrite();
     cpu.outb(DATA_PORT, 0xF4);
     if (waitReadTimeout()) {
         const ack = cpu.inb(DATA_PORT);
         if (ack == 0xFA) {
-            serial.writeString(" KB: Scanning enabled\n");
+            serial.writeString("  KB: Scanning enabled\n");
         }
     }
 
-    // 12. Clear LEDs
     waitWrite();
     cpu.outb(DATA_PORT, 0xED);
     if (waitReadTimeout()) {
@@ -292,50 +286,47 @@ pub fn init() void {
         _ = cpu.inb(DATA_PORT);
     }
 
-    // 13. Re-write controller config to ensure mouse bits survive
-    //     (keyboard reset and self-test can clear aux bits)
     waitWrite();
-    cpu.outb(COMMAND_PORT, 0x20); // Read current config
+    cpu.outb(COMMAND_PORT, 0x20);
     waitRead();
     var final_config = cpu.inb(DATA_PORT);
 
-    final_config |= 0x01; // Bit 0: keyboard IRQ
-    final_config |= 0x02; // Bit 1: aux/mouse IRQ
-    final_config &= ~@as(u8, 0x20); // Bit 5: enable aux clock
-    final_config &= ~@as(u8, 0x10); // Bit 4: enable keyboard clock
+    final_config |= 0x01;
+    final_config |= 0x02;
+    final_config &= ~@as(u8, 0x20);
+    final_config &= ~@as(u8, 0x10);
 
     waitWrite();
     cpu.outb(COMMAND_PORT, 0x60);
     waitWrite();
     cpu.outb(DATA_PORT, final_config);
 
-    serial.writeString(" KB: Final config: 0x");
+    serial.writeString("  KB: Final config: 0x");
     printHex(final_config);
     serial.writeString("\n");
 
-    // 14. Final flush — clear any pending data from all init operations
     flushBuffer();
 
-    // 15. Clear key buffer and reset state
-    buffer_head = 0;
-    buffer_tail = 0;
-    e0_prefix = false;
-
-    // 16. Enable boot grace period
-    // After interrupts are enabled (sti), mouse init response bytes
-    // (0xFA, 0xAA, 0x00 etc.) may still arrive and trigger IRQ1.
-    // We discard the first few scancodes that arrive before any
-    // real human keypress could possibly occur.
-    boot_grace_count = 0;
-    boot_grace_active = true;
-
-    // 17. Check final status
     const final_status = cpu.inb(STATUS_PORT);
-    serial.writeString(" KB: Final status: 0x");
+    serial.writeString("  KB: Final status: 0x");
     printHex(final_status);
     serial.writeString("\n");
 
-    serial.writeString(" KB: Init complete (T3 enhanced)\n");
+    // Mark init complete — but still use grace period
+    init_complete = true;
+    grace_ticks = 0;
+
+    serial.writeString("  KB: Init complete (T3 enhanced + grace period)\n");
+}
+
+/// Called by shell when ready to accept input — ends grace period immediately
+pub fn endGracePeriod() void {
+    grace_ticks = GRACE_PERIOD;
+}
+
+/// Check if grace period is still active
+pub fn isGracePeriodActive() bool {
+    return grace_ticks < GRACE_PERIOD;
 }
 
 // ============================================================================
@@ -390,7 +381,6 @@ fn bufferKey(key: u8) void {
     }
 }
 
-/// Get next key from buffer (called by shell)
 pub fn getKey() ?u8 {
     if (buffer_head == buffer_tail) {
         return null;
@@ -401,12 +391,10 @@ pub fn getKey() ?u8 {
     return key;
 }
 
-/// Check if key is available
 pub fn hasKey() bool {
     return buffer_head != buffer_tail;
 }
 
-/// Get modifier state
 pub fn isShiftPressed() bool {
     return shift_pressed;
 }
@@ -424,68 +412,86 @@ pub fn isCapsLock() bool {
 }
 
 // ============================================================================
-// T3: Enhanced Interrupt Handler with E0 prefix support
+// Interrupt Handler — FIXED with multiple filters
 // ============================================================================
 
 pub fn handleInterrupt() void {
-    // CRITICAL: Check status register BEFORE reading data port
-    // Bit 5 (0x20) of status indicates data is from aux (mouse) device
-    // If set, this is mouse data — do NOT process as keyboard
     const status = cpu.inb(STATUS_PORT);
 
+    // No data available
     if ((status & 0x01) == 0) {
-        // No data available at all — spurious IRQ
         return;
     }
 
+    // =========================================================================
+    // FILTER 1: Check bit 5 — if set, this is AUX (mouse) data, not keyboard
+    // =========================================================================
     if ((status & 0x20) != 0) {
-        // Data is from aux (mouse) port — read and discard
-        // This prevents mouse bytes from being interpreted as keypresses
+        // Read and discard mouse data
         _ = cpu.inb(DATA_PORT);
         return;
     }
 
     const scancode = cpu.inb(DATA_PORT);
 
-    // Boot grace period: discard phantom scancodes that arrive shortly
-    // after interrupts are enabled. During boot, mouse init sends many
-    // PS/2 commands whose response bytes can be misrouted to keyboard IRQ.
-    // These phantom bytes produce garbage characters like "22".
-    // We discard first few non-release scancodes until a real keypress
-    // (which will have a matching key release) is detected.
-    if (boot_grace_active) {
-        boot_grace_count += 1;
+    // =========================================================================
+    // FILTER 2: Grace period — discard early interrupts during mouse init
+    // =========================================================================
+    if (grace_ticks < GRACE_PERIOD) {
+        grace_ticks += 1;
+        // During grace period, only log to serial, don't process
+        serial.writeString("[KB-GRACE] discard 0x");
+        printHex(scancode);
+        serial.writeString("\n");
+        return;
+    }
 
-        // Discard up to 8 phantom scancodes during grace period.
-        // Real human keypresses cannot arrive this fast after boot.
-        if (boot_grace_count <= 8) {
-            // Still allow modifier key releases through (they're harmless)
-            // but discard anything that would produce a character
-            if ((scancode & 0x80) == 0) {
-                // Key press (not release) — likely phantom, discard
-                return;
-            }
-            // Key release — let it through (just clears modifier state)
-        } else {
-            // Grace period over — all subsequent scancodes are real
-            boot_grace_active = false;
+    // =========================================================================
+    // FILTER 3: Skip known PS/2 response bytes that might leak through
+    // =========================================================================
+    if (scancode == 0xFA or // ACK
+        scancode == 0xAA or // Self-test passed
+        scancode == 0x00 or // Null byte
+        scancode == 0xFE or // Resend request
+        scancode == 0xFF or // Error / reset response
+        scancode == 0xFC or // Self-test failed
+        scancode == 0xFD) // Self-test failed
+    {
+        return;
+    }
+
+    // =========================================================================
+    // FILTER 4: Validate scancode is in expected range for Set 1
+    // Valid press: 0x01-0x58, 0xE0 (extended prefix)
+    // Valid release: 0x81-0xD8
+    // =========================================================================
+    if (scancode != 0xE0) {
+        const base = scancode & 0x7F; // Remove release bit
+        if (base == 0 or base > 0x58) {
+            // Invalid scancode — likely garbage
+            serial.writeString("[KB] invalid sc 0x");
+            printHex(scancode);
+            serial.writeString("\n");
+            return;
         }
     }
 
-    // Handle E0 prefix — next scancode is an extended key
+    // =========================================================================
+    // Process valid scancode
+    // =========================================================================
+
     if (scancode == 0xE0) {
         e0_prefix = true;
         return;
     }
 
-    // Handle E0-prefixed scancodes
     if (e0_prefix) {
         e0_prefix = false;
         handleE0Scancode(scancode);
         return;
     }
 
-    // Handle key release (bit 7 set)
+    // Key release
     if ((scancode & 0x80) != 0) {
         const released = scancode & 0x7F;
         if (released == SC_LSHIFT or released == SC_RSHIFT) {
@@ -498,7 +504,7 @@ pub fn handleInterrupt() void {
         return;
     }
 
-    // Handle modifier key press
+    // Modifier keys
     if (scancode == SC_LSHIFT or scancode == SC_RSHIFT) {
         shift_pressed = true;
         return;
@@ -519,7 +525,7 @@ pub fn handleInterrupt() void {
         return;
     }
 
-    // Handle arrow keys (non-E0, numpad arrows)
+    // Arrow keys (non-extended)
     if (scancode == SC_UP) {
         if (shift_pressed) {
             bufferKey(KEY_SHIFT_UP);
@@ -606,7 +612,7 @@ pub fn handleInterrupt() void {
         else => {},
     }
 
-    // Convert scancode to ASCII
+    // Regular character
     var ascii: u8 = 0;
     if (scancode < SCANCODE_NORMAL.len) {
         if (shift_pressed) {
@@ -615,7 +621,6 @@ pub fn handleInterrupt() void {
             ascii = SCANCODE_NORMAL[scancode];
         }
 
-        // Apply caps lock to letters only
         if (caps_lock) {
             if (ascii >= 'a' and ascii <= 'z') {
                 ascii -= 32;
@@ -625,10 +630,9 @@ pub fn handleInterrupt() void {
         }
     }
 
-    // T3: Handle Ctrl+letter combinations
+    // Ctrl combinations
     if (ctrl_pressed and ascii != 0) {
         if (ascii >= 'a' and ascii <= 'z') {
-            // Ctrl+A = 0x01, Ctrl+B = 0x02, ..., Ctrl+Z = 0x1A
             bufferKey(ascii - 'a' + 1);
             return;
         } else if (ascii >= 'A' and ascii <= 'Z') {
@@ -637,18 +641,16 @@ pub fn handleInterrupt() void {
         }
     }
 
-    // Buffer the key if valid
     if (ascii != 0) {
         bufferKey(ascii);
     }
 }
 
 // ============================================================================
-// T3: E0 Extended Scancode Handler
+// E0 Extended Scancode Handler
 // ============================================================================
 
 fn handleE0Scancode(scancode: u8) void {
-    // E0 key release
     if ((scancode & 0x80) != 0) {
         const released = scancode & 0x7F;
         if (released == SC_E0_RCTRL) {
@@ -657,13 +659,11 @@ fn handleE0Scancode(scancode: u8) void {
         return;
     }
 
-    // E0 modifier press
     if (scancode == SC_E0_RCTRL) {
         ctrl_pressed = true;
         return;
     }
 
-    // E0 arrow keys
     switch (scancode) {
         SC_E0_UP => {
             if (shift_pressed) {

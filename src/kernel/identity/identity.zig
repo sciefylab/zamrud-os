@@ -1,5 +1,5 @@
 //! Zamrud OS - Identity Module
-//! User identity management with cryptographic keypairs
+//! H.7 FIXED: Unified credential handling, trust anchor support
 
 const serial = @import("../drivers/serial/serial.zig");
 
@@ -13,6 +13,7 @@ pub const Identity = keyring.Identity;
 pub const KeyPair = keyring.KeyPair;
 pub const AuthType = auth.AuthType;
 pub const PrivacyMode = privacy.PrivacyMode;
+pub const CredentialType = keyring.CredentialType;
 
 // =============================================================================
 // Module State
@@ -20,7 +21,6 @@ pub const PrivacyMode = privacy.PrivacyMode;
 
 var initialized: bool = false;
 
-/// Initialize identity subsystem
 pub fn init() void {
     serial.writeString("[IDENTITY] Initializing...\n");
 
@@ -44,21 +44,26 @@ pub fn init() void {
     serial.writeString("[IDENTITY] Ready\n");
 }
 
-/// Check if initialized
 pub fn isInitialized() bool {
     return initialized;
 }
 
 // =============================================================================
-// Identity Management
+// Identity Management — H.7 UNIFIED
 // =============================================================================
 
-pub fn createIdentity(name: []const u8, pin: []const u8) ?*Identity {
-    return keyring.createIdentity(name, pin);
+/// Create identity with credential (auto-detects PIN vs password)
+pub fn createIdentity(name: []const u8, credential: []const u8) ?*Identity {
+    return keyring.createIdentity(name, credential);
 }
 
-pub fn createAnonymousIdentity(pin: []const u8) ?*Identity {
-    return keyring.createAnonymousIdentity(pin);
+/// Create identity with enforced password strength
+pub fn createIdentityWithPassword(name: []const u8, password: []const u8) ?*Identity {
+    return keyring.createIdentityWithPassword(name, password);
+}
+
+pub fn createAnonymousIdentity(credential: []const u8) ?*Identity {
+    return keyring.createAnonymousIdentity(credential);
 }
 
 pub fn getIdentity(name: []const u8) ?*Identity {
@@ -82,11 +87,31 @@ pub fn getIdentityCount() usize {
 }
 
 // =============================================================================
-// Authentication
+// H.7: Trust Anchor Support
 // =============================================================================
 
-pub fn unlock(name: []const u8, pin: []const u8) bool {
-    return auth.unlock(name, pin);
+/// Get system owner identity
+pub fn getSystemOwner() ?*Identity {
+    return keyring.getSystemOwner();
+}
+
+/// Verify identity trust hash (blockchain binding)
+pub fn verifyTrust(id: *const Identity) bool {
+    return keyring.verifyTrustHash(id);
+}
+
+/// Check if identity is system owner
+pub fn isOwner(id: *const Identity) bool {
+    return keyring.isSystemOwner(id);
+}
+
+// =============================================================================
+// Authentication — H.7 UNIFIED
+// =============================================================================
+
+/// Unlock with credential (PIN or password)
+pub fn unlock(name: []const u8, credential: []const u8) bool {
+    return auth.unlock(name, credential);
 }
 
 pub fn lock() void {
@@ -97,6 +122,12 @@ pub fn isUnlocked() bool {
     return auth.isUnlocked();
 }
 
+/// Change credential (old → new)
+pub fn changeCredential(old_credential: []const u8, new_credential: []const u8) bool {
+    return auth.changeCredential(old_credential, new_credential);
+}
+
+/// Legacy alias
 pub fn changePin(old_pin: []const u8, new_pin: []const u8) bool {
     return auth.changePin(old_pin, new_pin);
 }
@@ -135,7 +166,7 @@ pub fn lookupName(name: []const u8) ?*const [50]u8 {
 
 pub fn runAllTests() bool {
     serial.writeString("\n========================================\n");
-    serial.writeString("  IDENTITY MODULE TESTS\n");
+    serial.writeString("  IDENTITY MODULE TESTS (H.7 HARDENED)\n");
     serial.writeString("========================================\n\n");
 
     var passed: u32 = 0;
@@ -203,16 +234,13 @@ fn printU32(val: u32) void {
         serial.writeChar('0');
         return;
     }
-
     var buf: [10]u8 = [_]u8{0} ** 10;
     var i: usize = 0;
     var v = val;
-
     while (v > 0) : (i += 1) {
         buf[i] = @intCast((v % 10) + '0');
         v = v / 10;
     }
-
     while (i > 0) {
         i -= 1;
         serial.writeChar(buf[i]);

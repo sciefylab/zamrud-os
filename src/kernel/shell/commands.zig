@@ -34,6 +34,7 @@ const sys_encrypt_cmd = @import("commands/sys_encrypt.zig");
 const zam_cmd = @import("commands/zam.zig");
 const mouse_cmd = @import("commands/mouse.zig");
 const sanitize_cmd = @import("commands/sanitize.zig");
+const ceremony_cmd = @import("commands/ceremony.zig");
 
 // =============================================================================
 // Command Execution
@@ -367,6 +368,13 @@ pub fn execute(input: []const u8) void {
         sanitize_cmd.cmdMunlock(args);
     }
 
+    // H.7: Trust Ceremony  <-- TAMBAHKAN INI
+    else if (helpers.strEql(command, "ceremony")) {
+        _ = ceremony_cmd.execute(args);
+    } else if (helpers.strEql(command, "trustsetup")) {
+        _ = ceremony_cmd.execute("run");
+    }
+
     // Test all
     else if (helpers.strEql(command, "testall")) {
         runAllTests();
@@ -498,6 +506,10 @@ fn runAllTests() void {
 
     shell.printInfoLine("=== MEMORY SANITIZATION TESTS (H.9) ===");
     sanitize_cmd.runTests();
+    shell.newLine();
+
+    shell.printInfoLine("=== TRUST CEREMONY TESTS (H.7) ===");
+    _ = ceremony_cmd.execute("test");
     shell.newLine();
 
     shell.printInfoLine("########################################");

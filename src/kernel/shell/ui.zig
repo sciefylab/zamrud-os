@@ -747,6 +747,28 @@ pub fn getLastCommandSuccess() bool {
     return last_command_success;
 }
 
+/// H.7: Draw prompt for recovery mode (red indicator)
+pub fn drawPromptRecovery(path: []const u8) void {
+    if (!terminal.isInitialized()) return;
+
+    const theme = getTheme();
+
+    // Red [RECOVERY] prefix
+    terminal.setFgColor(theme.text_error);
+    terminal.setBold(true);
+    writeStr("[RECOVERY]");
+    terminal.setBold(false);
+
+    terminal.setFgColor(theme.text_warning);
+    writeStr(" ");
+    writeStr(path);
+
+    terminal.setFgColor(theme.text_dim);
+    writeStr(" # ");
+
+    terminal.setFgColor(theme.text_normal);
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================

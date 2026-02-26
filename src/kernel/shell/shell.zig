@@ -1,5 +1,6 @@
-//! Zamrud OS - Enhanced Professional Shell (T3 + T4.2 + T4.3 + T5.1)
+//! Zamrud OS - Enhanced Professional Shell (T3 + T4.2 + T4.3 + T5.1 + H.7)
 //! Full readline-style line editing with login, env vars, I/O redirection
+//! H.7 FIX: Proper login gate, identity loading, system key management
 
 const serial = @import("../drivers/serial/serial.zig");
 const terminal = @import("../drivers/display/terminal.zig");
@@ -10,8 +11,15 @@ const commands = @import("commands.zig");
 const ui = @import("ui.zig");
 const users = @import("../security/users.zig");
 const identity = @import("../identity/identity.zig");
-const env = @import("env.zig"); // T4.2
-const redir = @import("redir.zig"); // T4.3
+const env = @import("env.zig");
+const redir = @import("redir.zig");
+
+// H.7: Additional imports for login gate
+const identity_store = @import("../persist/identity_store.zig");
+const config_store = @import("../persist/config_store.zig");
+const trust_ceremony = @import("../boot/trust_ceremony.zig");
+const sys_encrypt = @import("../crypto/sys_encrypt.zig");
+const auth = @import("../identity/auth.zig");
 
 // =============================================================================
 // Constants
@@ -68,6 +76,9 @@ var last_exit_success: bool = true;
 // Track if login is required
 var login_required: bool = false;
 
+// H.7: Recovery mode flag
+var recovery_mode: bool = false;
+
 // =============================================================================
 // Initialization
 // =============================================================================
@@ -83,6 +94,7 @@ pub fn init() void {
     home_dir_len = 0;
     last_exit_success = true;
     login_required = false;
+    recovery_mode = false;
 
     ui.init();
 
@@ -90,8 +102,67 @@ pub fn init() void {
     env.init();
 
     initialized = true;
-    serial.writeString("[SHELL] Initialized (T3+T4.2+T4.3+T5.1)\n");
+    serial.writeString("[SHELL] Initialized (T3+T4.2+T4.3+T5.1+H.7)\n");
 }
+
+// =============================================================================
+// H.7: Login Requirement Detection
+// =============================================================================
+
+fn hasAnyUsers() bool {
+    // Check users system
+    if (users.isInitialized() and users.getUserCount() > 0) {
+        return true;
+    }
+
+    // Check identity system
+    if (identity.isInitialized() and identity.getIdentityCount() > 0) {
+        return true;
+    }
+
+    return false;
+}
+
+/// H.7: Determine if login MUST be required
+/// This is smarter than just checking "has users" - it considers disk state
+fn mustRequireLogin() bool {
+    // Always require login if ceremony just completed
+    if (trust_ceremony.ceremonyJustCompleted()) {
+        serial.writeString("[SHELL] Login required: ceremony just completed\n");
+        return true;
+    }
+
+    // Always require login for returning users
+    if (trust_ceremony.isReturningUser()) {
+        serial.writeString("[SHELL] Login required: returning user\n");
+        return true;
+    }
+
+    // Check if identity file exists on disk (even if not loaded yet)
+    if (identity_store.hasIdentityFile()) {
+        serial.writeString("[SHELL] Login required: identity file exists\n");
+        return true;
+    }
+
+    // Check if ceremony was ever completed (config flag)
+    if (trust_ceremony.isCeremonyComplete()) {
+        serial.writeString("[SHELL] Login required: ceremony was completed\n");
+        return true;
+    }
+
+    // Fallback: check memory
+    if (hasAnyUsers()) {
+        serial.writeString("[SHELL] Login required: users in memory\n");
+        return true;
+    }
+
+    serial.writeString("[SHELL] No login required: first boot, no ceremony\n");
+    return false;
+}
+
+// =============================================================================
+// Main Entry Point
+// =============================================================================
 
 pub fn run() void {
     running = true;
@@ -102,24 +173,71 @@ pub fn run() void {
         terminal.setCursor(0, @intCast(ui.getContentStartRow()));
     }
 
-    // Determine if login is actually needed
-    login_required = hasAnyUsers();
+    // End keyboard grace period — shell is ready for input
+    keyboard.endGracePeriod();
+    // H.7 FIX: Use mustRequireLogin() instead of hasAnyUsers()
+    login_required = mustRequireLogin();
 
     if (login_required) {
         // Login loop
         while (running) {
             drawWelcome();
+
+            // H.7: Load identities NOW (before login prompt)
+            // This is when we actually deserialize the file
+            if (!hasAnyUsers()) {
+                if (identity_store.hasIdentityFile()) {
+                    serial.writeString("[SHELL] Loading identities from disk...\n");
+                    if (!identity_store.loadFromDisk()) {
+                        // Load failed - show recovery options
+                        showRecoveryPrompt();
+                        if (recovery_mode) {
+                            // Enter recovery shell
+                            autoLoginRecovery();
+                            shellLoop();
+                            recovery_mode = false;
+                            continue;
+                        }
+                        continue;
+                    }
+                    serial.writeString("[SHELL] Loaded ");
+                    printNumberSerial(identity.getIdentityCount());
+                    serial.writeString(" identities\n");
+                }
+            }
+
+            // Check again after loading
+            if (!hasAnyUsers()) {
+                serial.writeString("[SHELL] No users after load - auto-login\n");
+                autoLoginDefault();
+                shellLoop();
+                continue;
+            }
+
             loginPrompt();
 
             if (!logged_in) continue;
 
+            // H.7: Set system master key after successful login
+            setSystemKeyFromCurrentIdentity();
+
+            // H.7: Load encrypted config now that we have the key
+            loadEncryptedConfigIfNeeded();
+
             shellLoop();
 
+            // Logout cleanup
             logged_in = false;
             current_user_len = 0;
             home_dir_len = 0;
 
             env.clearLoginVars();
+
+            // H.7: Clear system key on logout
+            clearSystemKey();
+
+            // H.7: Lock identity
+            auth.lock();
 
             if (terminal.isInitialized()) {
                 terminal.clear();
@@ -138,43 +256,190 @@ pub fn stop() void {
     running = false;
 }
 
-fn hasAnyUsers() bool {
-    if (users.isInitialized() and users.getUserCount() > 0) {
-        return true;
+// =============================================================================
+// H.7: System Key Management
+// =============================================================================
+
+/// Set system encryption key from current identity
+fn setSystemKeyFromCurrentIdentity() void {
+    if (identity.getCurrentIdentity()) |id| {
+        if (id.keypair.valid) {
+            sys_encrypt.setMasterKeyFromIdentity(&id.keypair.public_key);
+            serial.writeString("[SHELL] System key set from identity: ");
+            serial.writeString(id.getName());
+            serial.writeString("\n");
+        }
     }
-    if (identity.isInitialized() and identity.getIdentityCount() > 0) {
-        return true;
-    }
-    return false;
 }
 
-/// Called by logout command
-pub fn logout() void {
-    if (users.isInitialized() and users.isLoggedIn()) {
-        users.logout();
+/// Load encrypted config after login
+fn loadEncryptedConfigIfNeeded() void {
+    // Only if we have the key and config wasn't loaded yet
+    if (sys_encrypt.isMasterKeySet() and !config_store.wasLoadedFromDisk()) {
+        if (config_store.hasSavedConfig()) {
+            if (config_store.loadFromDisk()) {
+                serial.writeString("[SHELL] Encrypted config loaded (");
+                printNumberSerial(config_store.getEntryCount());
+                serial.writeString(" entries)\n");
+            } else {
+                serial.writeString("[SHELL] Config load failed (may need re-save)\n");
+            }
+        }
     }
-    logged_in = false;
-
-    if (!login_required) {
-        autoLoginDefault();
-        return;
-    }
-
-    vfs.setCwd("/");
 }
 
-/// T4.2: Get last command exit status
-pub fn getLastExitSuccess() bool {
-    return last_exit_success;
-}
-
-/// T4.2: Set last command exit status
-pub fn setLastExitSuccess(success: bool) void {
-    last_exit_success = success;
+/// Clear system key on logout
+fn clearSystemKey() void {
+    sys_encrypt.clearMasterKey();
+    serial.writeString("[SHELL] System key cleared\n");
 }
 
 // =============================================================================
-// Auto-login (no users configured)
+// H.7: Recovery Mode
+// =============================================================================
+
+/// Show recovery options when identity load fails
+fn showRecoveryPrompt() void {
+    const theme = ui.getTheme();
+
+    newLine();
+
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_error);
+        terminal.setBold(true);
+    }
+    println("  ════════════════════════════════════════");
+    println("   IDENTITY DATA ERROR");
+    println("  ════════════════════════════════════════");
+    if (terminal.isInitialized()) {
+        terminal.setBold(false);
+    }
+
+    newLine();
+
+    // Show specific error
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_warning);
+    }
+    printDirect("  Error: ");
+
+    const err = identity_store.getLastLoadError();
+    switch (err) {
+        .invalid_magic => println("Invalid file format (corrupted header)"),
+        .unsupported_version => println("Unsupported file version"),
+        .checksum_mismatch => println("Data integrity check failed"),
+        .file_too_small => println("File is truncated or incomplete"),
+        .read_error => println("Disk read error"),
+        else => println("Unknown error"),
+    }
+
+    newLine();
+
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_normal);
+    }
+    println("  Recovery options:");
+    newLine();
+
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_info);
+    }
+    println("    [1] If you have your 24-word seed phrase:");
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_dim);
+    }
+    println("        Enter recovery shell, then run:");
+    println("          ceremony reset");
+    println("          ceremony start");
+    newLine();
+
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_info);
+    }
+    println("    [2] If you have a backup of IDENTITY.DAT:");
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_dim);
+    }
+    println("        Restore the file and reboot");
+    newLine();
+
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_warning);
+    }
+    println("  ════════════════════════════════════════");
+    newLine();
+
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_normal);
+    }
+    printDirect("  Press ");
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_success);
+    }
+    printDirect("R");
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_normal);
+    }
+    printDirect(" for recovery shell, ");
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_warning);
+    }
+    printDirect("ESC");
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_normal);
+    }
+    println(" to retry...");
+
+    while (true) {
+        if (keyboard.getKey()) |key| {
+            if (key == 'r' or key == 'R') {
+                recovery_mode = true;
+                return;
+            }
+            if (key == 0x1B) {
+                recovery_mode = false;
+                return;
+            }
+        }
+        asm volatile ("pause");
+    }
+}
+
+/// Auto-login for recovery mode (limited shell)
+fn autoLoginRecovery() void {
+    const recovery_name = "recovery";
+
+    var i: usize = 0;
+    while (i < recovery_name.len) : (i += 1) {
+        current_user[i] = recovery_name[i];
+    }
+    current_user_len = recovery_name.len;
+
+    logged_in = true;
+    home_dir[0] = '/';
+    home_dir_len = 1;
+    vfs.setCwd("/");
+
+    env.setLoginVars(recovery_name, "/");
+
+    const theme = ui.getTheme();
+    if (terminal.isInitialized()) {
+        newLine();
+        terminal.setFgColor(theme.text_warning);
+        terminal.setBold(true);
+        println("  RECOVERY SHELL");
+        terminal.setBold(false);
+        terminal.setFgColor(theme.text_dim);
+        println("  Limited functionality - run 'ceremony' to restore");
+        terminal.setFgColor(theme.text_normal);
+        newLine();
+    }
+
+    serial.writeString("[SHELL] Entered recovery mode\n");
+}
+
+// =============================================================================
+// Auto-login (no users configured / first boot)
 // =============================================================================
 
 fn autoLoginDefault() void {
@@ -226,14 +491,39 @@ fn setupHomeDir(username: []const u8) void {
 }
 
 // =============================================================================
-// T5.1: Login Prompt
+// T5.1 + H.7: Login Prompt with Password Authentication
 // =============================================================================
 
 fn loginPrompt() void {
     const theme = ui.getTheme();
 
     var attempts: u32 = 0;
-    while (attempts < 3 and running) : (attempts += 1) {
+    const max_attempts: u32 = 5;
+
+    while (attempts < max_attempts and running) : (attempts += 1) {
+        // Check lockout status
+        if (auth.isLockedOut()) {
+            if (terminal.isInitialized()) {
+                terminal.setFgColor(theme.text_error);
+            }
+            if (auth.getLockoutState() == .hard_lock) {
+                println("Account locked. Use seed phrase to recover.");
+                println("Run 'ceremony reset' then 'ceremony start' to reset.");
+            } else {
+                println("Too many failed attempts. Please wait...");
+            }
+            if (terminal.isInitialized()) {
+                terminal.setFgColor(theme.text_normal);
+            }
+            // Wait a bit before allowing retry
+            var wait: u32 = 0;
+            while (wait < 10000000) : (wait += 1) {
+                asm volatile ("pause");
+            }
+            continue;
+        }
+
+        // Username prompt
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_normal);
         }
@@ -243,47 +533,276 @@ fn loginPrompt() void {
 
         if (input_len == 0) continue;
 
+        // Copy username
         var i: usize = 0;
         while (i < input_len and i < 31) : (i += 1) {
             current_user[i] = input_buffer[i];
         }
         current_user_len = i;
-        const username = current_user[0..current_user_len];
+
+        // Handle @ prefix
+        var username_start: usize = 0;
+        if (current_user_len > 0 and current_user[0] == '@') {
+            username_start = 1;
+        }
+        const username = current_user[username_start..current_user_len];
 
         newLine();
 
-        if (users.isInitialized() and users.getUserCount() > 0) {
-            if (users.findUserByName(username) != null) {
-                if (users.login(username, "")) {
-                    loginSuccess(username);
-                    return;
-                }
-            }
-        }
+        // Check if user exists
+        var user_exists = false;
+        var needs_password = false;
 
+        // Check identity system first (H.7 ceremony users)
         if (identity.isInitialized() and identity.getIdentityCount() > 0) {
-            if (identity.getCurrentIdentity()) |id| {
-                const id_name = id.getName();
-                if (strEql(username, id_name)) {
-                    loginSuccess(username);
-                    return;
-                }
+            if (identity.getIdentity(username)) |id| {
+                user_exists = true;
+                // H.7: Check if this identity uses password
+                needs_password = (id.credential_type == .password);
             }
         }
 
+        // Fallback to legacy users system
+        if (!user_exists and users.isInitialized() and users.getUserCount() > 0) {
+            if (users.findUserByName(username) != null) {
+                user_exists = true;
+                needs_password = false;
+            }
+        }
+
+        if (!user_exists) {
+            if (terminal.isInitialized()) {
+                terminal.setFgColor(theme.text_error);
+            }
+            println("Login incorrect");
+            if (terminal.isInitialized()) {
+                terminal.setFgColor(theme.text_normal);
+            }
+            newLine();
+            continue;
+        }
+
+        // Password prompt (if needed)
+        if (needs_password) {
+            printDirect("Password: ");
+
+            var password_buf: [64]u8 = [_]u8{0} ** 64;
+            var password_len: usize = 0;
+
+            // Read password (hidden input)
+            while (true) {
+                if (keyboard.hasKey()) {
+                    const key = keyboard.getKey() orelse continue;
+                    if (key == 0) continue;
+
+                    if (key == '\n' or key == '\r') {
+                        break;
+                    }
+
+                    if (key == keyboard.KEY_BACKSPACE or key == 127) {
+                        if (password_len > 0) {
+                            password_len -= 1;
+                            password_buf[password_len] = 0;
+                            if (terminal.isInitialized()) {
+                                terminal.writeChar(0x08);
+                                terminal.writeChar(' ');
+                                terminal.writeChar(0x08);
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (key == keyboard.KEY_CTRL_C) {
+                        newLine();
+                        // Wipe password buffer
+                        i = 0;
+                        while (i < 64) : (i += 1) {
+                            password_buf[i] = 0;
+                        }
+                        return;
+                    }
+
+                    if (key >= 32 and key < 127 and password_len < 63) {
+                        password_buf[password_len] = key;
+                        password_len += 1;
+                        if (terminal.isInitialized()) {
+                            terminal.writeChar('*');
+                        }
+                    }
+                }
+                asm volatile ("pause");
+            }
+
+            newLine();
+
+            // Verify password using auth system
+            const password = password_buf[0..password_len];
+
+            if (auth.unlock(username, password)) {
+                // Wipe password from memory
+                i = 0;
+                while (i < 64) : (i += 1) {
+                    password_buf[i] = 0;
+                }
+
+                loginSuccess(current_user[0..current_user_len]);
+                return;
+            } else {
+                // Wipe password from memory
+                i = 0;
+                while (i < 64) : (i += 1) {
+                    password_buf[i] = 0;
+                }
+
+                if (terminal.isInitialized()) {
+                    terminal.setFgColor(theme.text_error);
+                }
+
+                const remaining = max_attempts - attempts - 1;
+                if (remaining > 0) {
+                    printDirect("Authentication failed (");
+                    printNumber(remaining);
+                    println(" attempts remaining)");
+                } else {
+                    println("Authentication failed");
+                }
+
+                if (terminal.isInitialized()) {
+                    terminal.setFgColor(theme.text_normal);
+                }
+                newLine();
+                continue;
+            }
+        } else {
+            // No password needed (legacy user or PIN identity)
+            // For PIN identity, still need to verify
+            if (identity.getIdentity(username)) |id| {
+                if (id.credential_type == .pin) {
+                    // Prompt for PIN
+                    printDirect("PIN: ");
+
+                    var pin_buf: [16]u8 = [_]u8{0} ** 16;
+                    var pin_len: usize = 0;
+
+                    while (true) {
+                        if (keyboard.hasKey()) {
+                            const key = keyboard.getKey() orelse continue;
+                            if (key == 0) continue;
+
+                            if (key == '\n' or key == '\r') break;
+
+                            if (key == keyboard.KEY_BACKSPACE or key == 127) {
+                                if (pin_len > 0) {
+                                    pin_len -= 1;
+                                    pin_buf[pin_len] = 0;
+                                    if (terminal.isInitialized()) {
+                                        terminal.writeChar(0x08);
+                                        terminal.writeChar(' ');
+                                        terminal.writeChar(0x08);
+                                    }
+                                }
+                                continue;
+                            }
+
+                            if (key == keyboard.KEY_CTRL_C) {
+                                newLine();
+                                i = 0;
+                                while (i < 16) : (i += 1) pin_buf[i] = 0;
+                                return;
+                            }
+
+                            if (key >= '0' and key <= '9' and pin_len < 8) {
+                                pin_buf[pin_len] = key;
+                                pin_len += 1;
+                                if (terminal.isInitialized()) {
+                                    terminal.writeChar('*');
+                                }
+                            }
+                        }
+                        asm volatile ("pause");
+                    }
+
+                    newLine();
+
+                    if (auth.unlock(username, pin_buf[0..pin_len])) {
+                        i = 0;
+                        while (i < 16) : (i += 1) pin_buf[i] = 0;
+                        loginSuccess(current_user[0..current_user_len]);
+                        return;
+                    } else {
+                        i = 0;
+                        while (i < 16) : (i += 1) pin_buf[i] = 0;
+
+                        if (terminal.isInitialized()) {
+                            terminal.setFgColor(theme.text_error);
+                        }
+                        println("Invalid PIN");
+                        if (terminal.isInitialized()) {
+                            terminal.setFgColor(theme.text_normal);
+                        }
+                        newLine();
+                        continue;
+                    }
+                }
+            }
+
+            // Legacy user without authentication
+            if (users.isInitialized()) {
+                _ = users.login(username, "");
+            }
+            loginSuccess(current_user[0..current_user_len]);
+            return;
+        }
+    }
+
+    if (attempts >= max_attempts) {
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_error);
         }
-        println("Login incorrect");
+        println("Too many failed login attempts.");
+        println("System locked. Please wait or use seed phrase recovery.");
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_normal);
         }
         newLine();
     }
+}
 
-    if (attempts >= 3) {
-        println("Too many failed login attempts.");
-        newLine();
+fn printNumber(val: u32) void {
+    if (val == 0) {
+        printDirect("0");
+        return;
+    }
+    var buf: [10]u8 = undefined;
+    var i: usize = 0;
+    var v = val;
+    while (v > 0) : (i += 1) {
+        buf[i] = @intCast((v % 10) + '0');
+        v /= 10;
+    }
+    while (i > 0) {
+        i -= 1;
+        if (terminal.isInitialized()) {
+            terminal.writeChar(buf[i]);
+        }
+    }
+}
+
+fn printNumberSerial(val: usize) void {
+    if (val == 0) {
+        serial.writeChar('0');
+        return;
+    }
+    var buf: [20]u8 = undefined;
+    var i: usize = 0;
+    var v = val;
+    while (v > 0) : (i += 1) {
+        buf[i] = @intCast((v % 10) + '0');
+        v /= 10;
+    }
+    while (i > 0) {
+        i -= 1;
+        serial.writeChar(buf[i]);
     }
 }
 
@@ -342,6 +861,8 @@ fn readLoginInput() void {
                     input_buffer[input_len] = 0;
                     if (terminal.isInitialized()) {
                         terminal.writeChar(0x08);
+                        terminal.writeChar(' ');
+                        terminal.writeChar(0x08);
                     }
                 }
                 continue;
@@ -365,6 +886,36 @@ fn readLoginInput() void {
     }
 }
 
+/// Called by logout command
+pub fn logout() void {
+    if (users.isInitialized() and users.isLoggedIn()) {
+        users.logout();
+    }
+
+    // H.7: Lock identity and clear key
+    auth.lock();
+    clearSystemKey();
+
+    logged_in = false;
+
+    if (!login_required) {
+        autoLoginDefault();
+        return;
+    }
+
+    vfs.setCwd("/");
+}
+
+/// T4.2: Get last command exit status
+pub fn getLastExitSuccess() bool {
+    return last_exit_success;
+}
+
+/// T4.2: Set last command exit status
+pub fn setLastExitSuccess(success: bool) void {
+    last_exit_success = success;
+}
+
 // =============================================================================
 // Main Shell Loop (T4.3: redirection support)
 // =============================================================================
@@ -380,6 +931,19 @@ fn shellLoop() void {
         if (input_len > 0) {
             // Check logout
             if (strEql(input_buffer[0..input_len], "logout")) {
+                if (login_required) {
+                    println("Logging out...");
+                    logout();
+                    return;
+                } else {
+                    println("No login session — use 'shutdown' or 'reboot'");
+                    clearInputBuffer();
+                    continue;
+                }
+            }
+
+            // Check exit (same as logout)
+            if (strEql(input_buffer[0..input_len], "exit")) {
                 if (login_required) {
                     println("Logging out...");
                     logout();
@@ -458,7 +1022,12 @@ fn drawPrompt() void {
         var display_path_buf: [128]u8 = undefined;
         const display_path = getDisplayPath(&display_path_buf);
 
-        ui.drawPromptWithPath(display_path);
+        // H.7: Show recovery indicator
+        if (recovery_mode) {
+            ui.drawPromptRecovery(display_path);
+        } else {
+            ui.drawPromptWithPath(display_path);
+        }
 
         prompt_len = terminal.getCursorCol() - col_before;
         prompt_col = terminal.getCursorCol();
@@ -889,7 +1458,13 @@ fn redrawInput() void {
     terminal.setCursor(0, prompt_row);
     var display_path_buf: [128]u8 = undefined;
     const display_path = getDisplayPath(&display_path_buf);
-    ui.drawPromptWithPath(display_path);
+
+    if (recovery_mode) {
+        ui.drawPromptRecovery(display_path);
+    } else {
+        ui.drawPromptWithPath(display_path);
+    }
+
     prompt_col = terminal.getCursorCol();
     var i: usize = 0;
     while (i < input_len) : (i += 1) {
@@ -961,7 +1536,7 @@ fn findCommandCompletions(prefix: []const u8) void {
         "reboot",   "shutdown",     "exit",    "logout",   "test-all",
         "test-fs",  "test-syscall", "login",   "id",       "su",
         "sudo",     "sudoend",      "user",    "usertest", "set",
-        "unset",    "env",          "export",  "printenv",
+        "unset",    "env",          "export",  "printenv", "ceremony",
     };
     for (cmds) |cmd| {
         if (startsWith(cmd, prefix) and completion_count < TAB_COMPLETE_MAX) {
@@ -1209,7 +1784,6 @@ pub fn printSuccessLine(text: []const u8) void {
 }
 
 pub fn printError(text: []const u8) void {
-    // Errors always go to terminal (not captured) — like stderr
     if (terminal.isInitialized()) {
         terminal.setFgColor(ui.getTheme().text_error);
         for (text) |c| terminal.writeChar(c);
@@ -1219,7 +1793,6 @@ pub fn printError(text: []const u8) void {
 }
 
 pub fn printErrorLine(text: []const u8) void {
-    // Errors always go to terminal (stderr behavior)
     ui.showError(text);
 }
 
@@ -1293,4 +1866,20 @@ fn strEql(a: []const u8, b: []const u8) bool {
         if (la != lb) return false;
     }
     return true;
+}
+
+// =============================================================================
+// H.7: Public State Accessors
+// =============================================================================
+
+pub fn isRecoveryMode() bool {
+    return recovery_mode;
+}
+
+pub fn isLoginRequired() bool {
+    return login_required;
+}
+
+pub fn isLoggedIn() bool {
+    return logged_in;
 }

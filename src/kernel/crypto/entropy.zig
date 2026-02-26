@@ -270,6 +270,23 @@ fn mixPool() void {
     pool.mix_count += 1;
 }
 
+/// Check if RDRAND is available (alias for H.7)
+pub fn hasRdrand() bool {
+    return pool.hw_rng_available;
+}
+
+/// Add entropy from a single byte (H.7 compatibility)
+/// Original addEventEntropy() uses TSC timing
+/// This version accepts explicit byte value
+pub fn addEventEntropyByte(value: u8) void {
+    // Add the explicit value
+    var byte_arr = [_]u8{value};
+    addEntropyRaw(&byte_arr, 1);
+
+    // Also add TSC timing
+    addEventEntropy();
+}
+
 // =============================================================================
 // CSPRNG Output
 // =============================================================================

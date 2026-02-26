@@ -1,5 +1,6 @@
 //! Zamrud OS - Main Kernel with Security Integration
-//! Phases A-F4.2 + SC1 Complete
+//! Phases A-F4.2 + SC1 + H.7 Complete
+//! FIXED: Terminal init BEFORE ceremony so UI renders on screen
 
 const cpu = @import("core/cpu.zig");
 const limine = @import("core/limine.zig");
@@ -19,7 +20,7 @@ const pmm = @import("mm/pmm.zig");
 const vmm = @import("mm/vmm.zig");
 const memory = @import("mm/memory.zig");
 const heap = @import("mm/heap.zig");
-const sanitize = @import("mm/sanitize.zig"); // ADD THIS
+const sanitize = @import("mm/sanitize.zig");
 
 const process = @import("proc/process.zig");
 const scheduler = @import("proc/scheduler.zig");
@@ -30,7 +31,6 @@ const ramfs = @import("fs/ramfs.zig");
 const devfs = @import("fs/devfs.zig");
 const fat32 = @import("fs/fat32.zig");
 
-// SC1: syscall.zig deprecated → table.zig is the unified entry point
 const syscall_mod = @import("syscall/table.zig");
 const shell = @import("shell/shell.zig");
 
@@ -86,6 +86,9 @@ const sys_encrypt = @import("crypto/sys_encrypt.zig");
 
 // F5.0: ZAM Binary Loader
 const loader = @import("loader/loader.zig");
+
+// H.7: Trust Ceremony
+const trust_ceremony = @import("boot/trust_ceremony.zig");
 
 // ============================================================================
 // Limine Requests
@@ -146,8 +149,6 @@ export fn kernel_main() noreturn {
 
     // =====================================================================
     // INPUT DRIVERS: Keyboard FIRST, then Mouse LAST
-    // Keyboard init does controller self-test (0xAA) which resets config.
-    // Mouse init AFTER keyboard ensures aux bits survive.
     // =====================================================================
 
     serial.writeString("[INIT] Keyboard...\n");
@@ -162,9 +163,6 @@ export fn kernel_main() noreturn {
     timer.init();
     serial.writeString("[OK]   Timer ready\n");
 
-    // Final PS/2 controller config fixup AFTER all PS/2 drivers are done
-    // This guarantees bits 0,1 set and bits 4,5 clear regardless of
-    // what keyboard/mouse reset sequences may have done
     fixupPS2Config();
 
     serial.writeString("[INIT] Interrupts...\n");
@@ -186,40 +184,32 @@ export fn kernel_main() noreturn {
     heap.init();
     serial.writeString("[OK]   Heap initialized\n");
 
-    // H.9: Secure Memory Sanitization
     sanitize.init();
     serial.writeString("[OK]   Memory sanitization ready (H.9)\n");
 
     printLine();
     serial.writeString("[SECURITY]\n");
 
-    // E3.1: Capability system MUST init before process system
     capability.init();
     serial.writeString("[OK]   Capabilities ready (E3.1)\n");
 
-    // E3.2: Filesystem sandbox
     unveil.init();
     serial.writeString("[OK]   Unveil sandbox ready (E3.2)\n");
 
-    // E3.3: Binary verification
     binaryverify.init();
     serial.writeString("[OK]   Binary verify ready (E3.3)\n");
 
-    // E3.5: Unified violation handler
     violation.init();
     serial.writeString("[OK]   Violation handler ready (E3.5)\n");
 
     crypto.init();
     serial.writeString("[OK]   Crypto ready\n");
 
-    // F4.2: System data encryption — AFTER crypto, BEFORE persistence
     sys_encrypt.init();
     serial.writeString("[OK]   System encryption ready (F4.2)\n");
 
     integrity.init();
     serial.writeString("[OK]   Integrity ready\n");
-
-    // NOTE: Blockchain init moved AFTER storage for disk persistence
 
     identity.init();
     serial.writeString("[OK]   Identity ready\n");
@@ -234,15 +224,12 @@ export fn kernel_main() noreturn {
     scheduler.init();
     serial.writeString("[OK]   Scheduler ready\n");
 
-    // F1: IPC subsystem
     ipc.init();
     serial.writeString("[OK]   IPC ready (F1)\n");
 
-    // F4: Encrypted Filesystem
     encryptfs.init();
     serial.writeString("[OK]   EncryptFS ready (F4.0)\n");
 
-    // F4.1: Encryption Integration
     enc_integration.init();
     serial.writeString("[OK]   EncFS Integration ready (F4.1)\n");
 
@@ -258,7 +245,6 @@ export fn kernel_main() noreturn {
         serial.writeString("[WARN] RAMFS failed\n");
     }
 
-    // T5.1: Create default directories
     if (vfs.ensureDir("/home")) {
         serial.writeString("[OK]   /home created\n");
     }
@@ -301,46 +287,102 @@ export fn kernel_main() noreturn {
         serial.writeString("[WARN] Blockchain failed\n");
     }
 
-    // === D3: Config & Identity Persistence ===
+    // =====================================================================
+    // DISPLAY: Framebuffer & Terminal — MUST be before ceremony!
+    // =====================================================================
     printLine();
-    serial.writeString("[PERSISTENCE]\n");
+    serial.writeString("[DISPLAY]\n");
 
-    config_store.init();
+    framebuffer.init(&framebuffer_request);
+    if (framebuffer.isInitialized()) {
+        serial.writeString("[OK]   Framebuffer ready\n");
 
-    if (config_store.hasSavedConfig()) {
-        if (config_store.loadFromDisk()) {
-            serial.writeString("[OK]   Config restored from disk\n");
-        } else {
-            serial.writeString("[WARN] Config load failed, using defaults\n");
-        }
-    } else {
-        serial.writeString("[OK]   Config initialized (defaults)\n");
+        terminal.init(
+            framebuffer.getAddress(),
+            framebuffer.getWidth(),
+            framebuffer.getHeight(),
+            framebuffer.getPitch(),
+        );
+        serial.writeString("[OK]   Terminal ready\n");
+
+        mouse.setScreenSize(framebuffer.getWidth(), framebuffer.getHeight());
+        serial.writeString("[OK]   Mouse screen size set\n");
     }
 
+    // =========================================================================
+    // H.7: Persistence & Ceremony (terminal is now available for UI!)
+    // =========================================================================
+    printLine();
+    serial.writeString("[PERSISTENCE & CEREMONY]\n");
+
+    // Step 1: Initialize stores
+    config_store.init();
     identity_store.init();
 
-    if (identity_store.hasSavedIdentities()) {
-        if (identity_store.loadFromDisk()) {
-            serial.writeString("[OK]   Identities restored from disk (");
-            printDecSerial(identity.getIdentityCount());
-            serial.writeString(" identities, locked)\n");
-        } else {
-            serial.writeString("[WARN] Identity load failed\n");
-        }
-    } else {
-        serial.writeString("[OK]   Identity store ready (no saved identities)\n");
-    }
+    // Step 2: Initialize ceremony (before checking files)
+    trust_ceremony.init();
 
-    // F4.2: Auto-set master key from first identity if available
-    if (identity.getIdentityCount() > 0) {
-        if (identity.getCurrentIdentity()) |id| {
-            sys_encrypt.setMasterKeyFromIdentity(&id.keypair.public_key);
-            serial.writeString("[OK]   System encryption key derived from identity\n");
+    // Step 3: Check if valid saved data exists
+    const has_valid_identities = identity_store.hasSavedIdentities();
+    const has_config_file = config_store.hasSavedConfig();
+    const has_identity_file = identity_store.hasIdentityFile();
+
+    serial.writeString("[DEBUG] Valid identities on disk: ");
+    serial.writeString(if (has_valid_identities) "YES\n" else "NO\n");
+    serial.writeString("[DEBUG] Config file exists: ");
+    serial.writeString(if (has_config_file) "YES\n" else "NO\n");
+
+    // Step 4: Determine boot mode
+    if (!has_valid_identities and !has_identity_file) {
+        // FIRST BOOT: No identity file at all
+        serial.writeString("\n[CEREMONY] First boot detected!\n");
+
+        if (trust_ceremony.runCeremony()) {
+            serial.writeString("[CEREMONY] Completed successfully\n");
+            trust_ceremony.setJustCompleted(true);
+        } else {
+            serial.writeString("[CEREMONY] Cancelled or failed\n");
+        }
+    } else if (!has_valid_identities and has_identity_file) {
+        // CORRUPTED: File exists but invalid
+        serial.writeString("\n[BOOT] Identity file exists but invalid!\n");
+        serial.writeString("[BOOT] Load error: ");
+
+        const err = identity_store.getLastLoadError();
+        switch (err) {
+            .invalid_magic => serial.writeString("invalid magic\n"),
+            .unsupported_version => serial.writeString("unsupported version\n"),
+            .checksum_mismatch => serial.writeString("checksum mismatch\n"),
+            else => serial.writeString("unknown\n"),
+        }
+
+        serial.writeString("[BOOT] Options:\n");
+        serial.writeString("  1. Run 'ceremony reset' then 'ceremony start'\n");
+        serial.writeString("  2. Or restore from backup\n");
+
+        // Mark as needing login (will fail, but triggers recovery prompt)
+        trust_ceremony.setJustCompleted(false);
+    } else {
+        // RETURNING USER: Valid identity file
+        serial.writeString("[BOOT] Returning user detected\n");
+
+        // DON'T load identities here - shell login will do it!
+        // Just mark that we're a returning user
+        trust_ceremony.setReturningUser(true);
+
+        // Load config (might be encrypted, will try)
+        if (has_config_file) {
+            if (config_store.loadFromDisk()) {
+                serial.writeString("[OK]   Config: ");
+                printDecSerial(config_store.getEntryCount());
+                serial.writeString(" entries\n");
+            } else {
+                serial.writeString("[INFO] Config encrypted - will load after login\n");
+            }
         }
     }
 
     // === F3: User/Group System ===
-    // MUST be after: identity, capability, violation, crypto
     printLine();
     serial.writeString("[USER SYSTEM]\n");
 
@@ -384,7 +426,6 @@ export fn kernel_main() noreturn {
     configureSecurityForEnvironment();
     serial.writeString("[OK]   Firewall configured\n");
 
-    // E3.4: Network capability — AFTER firewall, AFTER process system
     net_capability.init();
     serial.writeString("[OK]   Network capability ready (E3.4)\n");
 
@@ -394,31 +435,15 @@ export fn kernel_main() noreturn {
     gateway.init();
     serial.writeString("[OK]   Gateway ready\n");
 
+    // === USERSPACE (framebuffer/terminal already initialized above) ===
     printLine();
     serial.writeString("[USERSPACE]\n");
 
-    // SC1: table.zig is the unified syscall entry point
     syscall_mod.init();
     serial.writeString("[OK]   Syscall ready (SC1 unified)\n");
 
     user.init();
     serial.writeString("[OK]   User mode ready\n");
-
-    framebuffer.init(&framebuffer_request);
-    if (framebuffer.isInitialized()) {
-        serial.writeString("[OK]   Framebuffer ready\n");
-
-        terminal.init(
-            framebuffer.getAddress(),
-            framebuffer.getWidth(),
-            framebuffer.getHeight(),
-            framebuffer.getPitch(),
-        );
-        serial.writeString("[OK]   Terminal ready\n");
-
-        mouse.setScreenSize(framebuffer.getWidth(), framebuffer.getHeight());
-        serial.writeString("[OK]   Mouse screen size set\n");
-    }
 
     // === F5.0: ZAM Binary Loader ===
     printLine();
@@ -448,30 +473,24 @@ export fn kernel_main() noreturn {
 
 // ============================================================================
 // PS/2 Controller Config Fixup
-// Called AFTER all PS/2 drivers (keyboard + mouse) are initialized
-// Ensures controller config byte has correct bits regardless of
-// what reset sequences may have done during individual driver init
 // ============================================================================
 
 fn fixupPS2Config() void {
-    // Read current config
     ps2WaitWrite();
-    cpu.outb(0x64, 0x20); // Read config byte
+    cpu.outb(0x64, 0x20);
     ps2WaitRead();
     var cfg = cpu.inb(0x60);
 
     const old_cfg = cfg;
 
-    // Set required bits
-    cfg |= 0x01; // Bit 0: Keyboard interrupt enable (IRQ1)
-    cfg |= 0x02; // Bit 1: Aux/mouse interrupt enable (IRQ12)
-    cfg &= ~@as(u8, 0x10); // Bit 4: Clear = keyboard clock enabled
-    cfg &= ~@as(u8, 0x20); // Bit 5: Clear = aux clock enabled
+    cfg |= 0x01;
+    cfg |= 0x02;
+    cfg &= ~@as(u8, 0x10);
+    cfg &= ~@as(u8, 0x20);
 
-    // Only write if changed
     if (cfg != old_cfg) {
         ps2WaitWrite();
-        cpu.outb(0x64, 0x60); // Write config byte
+        cpu.outb(0x64, 0x60);
         ps2WaitWrite();
         cpu.outb(0x60, cfg);
 
@@ -486,7 +505,6 @@ fn fixupPS2Config() void {
         serial.writeString("\n");
     }
 
-    // Verify
     ps2WaitWrite();
     cpu.outb(0x64, 0x20);
     ps2WaitRead();
@@ -666,6 +684,19 @@ fn printSystemSummary() void {
         serial.writeString("Not initialized\n");
     }
 
+    serial.writeString("  Ceremony:   ");
+    if (trust_ceremony.isInitialized()) {
+        if (trust_ceremony.isCeremonyComplete()) {
+            serial.writeString("COMPLETE (v");
+            printDecSerial(trust_ceremony.getCeremonyVersion());
+            serial.writeString(")\n");
+        } else {
+            serial.writeString("INCOMPLETE\n");
+        }
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+
     serial.writeString("  Syscall(SC1):");
     if (syscall_mod.isInitialized()) {
         serial.writeString("OK (");
@@ -708,7 +739,7 @@ fn printSystemSummary() void {
     if (identity.isInitialized()) {
         printDecSerial(identity.getIdentityCount());
         if (identity_store.wasLoadedFromDisk()) {
-            serial.writeString(" (from disk, locked)");
+            serial.writeString(" (from disk)");
         }
         if (identity_store.isEncryptionActive()) {
             serial.writeString(" [ENCRYPTED]");
