@@ -1,6 +1,8 @@
 //! Zamrud OS - First-Boot Trust Ceremony (H.7)
 //! H.7 FIXED: Proper password auth, blockchain trust anchors,
 //!            master key → identity binding, newline-based UI
+//! H.7.2: Integrated backup option at completion
+//! H.7.3: Fixed keyboard grace period issue
 
 const serial = @import("../drivers/serial/serial.zig");
 const terminal = @import("../drivers/display/terminal.zig");
@@ -15,8 +17,9 @@ const identity = @import("../identity/identity.zig");
 const keyring = @import("../identity/keyring.zig");
 const config_store = @import("../persist/config_store.zig");
 const identity_store = @import("../persist/identity_store.zig");
-const boot_verify = @import("verify.zig");
 const sys_encrypt = @import("../crypto/sys_encrypt.zig");
+const identity_export = @import("../identity/export.zig");
+const crypto = @import("../crypto/crypto.zig");
 
 // =============================================================================
 // Constants
@@ -43,7 +46,7 @@ const KEY_TRUST_ANCHOR = "trust.anchor";
 var initialized: bool = false;
 var ceremony_in_progress: bool = false;
 var ceremony_step: u8 = 0;
-const total_steps: u8 = 6;
+const total_steps: u8 = 7;
 
 var master_seed: [32]u8 = [_]u8{0} ** 32;
 var derived_key: [32]u8 = [_]u8{0} ** 32;
@@ -106,6 +109,15 @@ pub fn runCeremony() bool {
 
     serial.writeString("[TRUST_CEREMONY] Starting first-boot trust ceremony v2\n");
 
+    // H.7.3 FIX: End keyboard grace period so we can receive input
+    // The grace period blocks all keyboard input during early boot
+    // to prevent phantom keypresses. We need to end it for the ceremony.
+    keyboard.endGracePeriod();
+    serial.writeString("[TRUST_CEREMONY] Keyboard grace period ended\n");
+
+    // Also clear any buffered keys from boot
+    while (keyboard.getKey() != null) {}
+
     if (!stepWelcome()) {
         abortCeremony("User cancelled");
         return false;
@@ -147,11 +159,15 @@ pub fn runCeremony() bool {
         return false;
     }
 
+    ceremony_step = 7;
     ceremony_in_progress = false;
     ceremony_just_completed_flag = true;
-    wipeAllBuffers();
 
+    // Show completion with backup option
     showCompletionScreen();
+
+    // Wipe sensitive buffers AFTER backup option (password needed for export)
+    wipeAllBuffers();
 
     serial.writeString("[TRUST_CEREMONY] Ceremony completed successfully\n");
     return true;
@@ -165,9 +181,9 @@ fn stepWelcome() bool {
     clearScreen();
 
     writeLine("");
-    writeLine("================================================================");
-    writeLine("       ZAMRUD OS - FIRST BOOT TRUST CEREMONY");
-    writeLine("================================================================");
+    writeLine("╔══════════════════════════════════════════════════════════════╗");
+    writeLine("║       ZAMRUD OS - FIRST BOOT TRUST CEREMONY                  ║");
+    writeLine("╚══════════════════════════════════════════════════════════════╝");
     writeLine("");
 
     setColor(.bright);
@@ -189,8 +205,10 @@ fn stepWelcome() bool {
     writeLine("");
 
     setColor(.warning);
-    writeLine("  IMPORTANT: You will need to write down the recovery phrase.");
-    writeLine("  Have pen and paper ready before continuing.");
+    writeLine("  ┌────────────────────────────────────────────────────────────┐");
+    writeLine("  │  IMPORTANT: You will need to write down the recovery      │");
+    writeLine("  │  phrase. Have pen and paper ready before continuing.      │");
+    writeLine("  └────────────────────────────────────────────────────────────┘");
     setColor(.normal);
     writeLine("");
     writeLine("");
@@ -216,9 +234,9 @@ fn stepGatherEntropy() bool {
     clearScreen();
 
     writeLine("");
-    writeLine("================================================================");
-    writeLine("       STEP 1/6: GATHERING ENTROPY");
-    writeLine("================================================================");
+    writeLine("╔══════════════════════════════════════════════════════════════╗");
+    writeLine("║       STEP 1/6: GATHERING ENTROPY                            ║");
+    writeLine("╚══════════════════════════════════════════════════════════════╝");
     writeLine("");
 
     setColor(.normal);
@@ -229,7 +247,7 @@ fn stepGatherEntropy() bool {
 
     if (entropy.hasHardwareRng()) {
         setColor(.success);
-        writeStr("    [+] ");
+        writeStr("    [✓] ");
     } else {
         setColor(.warning);
         writeStr("    [-] ");
@@ -238,12 +256,12 @@ fn stepGatherEntropy() bool {
     writeLine("CPU RDRAND/RDSEED");
 
     setColor(.success);
-    writeStr("    [+] ");
+    writeStr("    [✓] ");
     setColor(.normal);
     writeLine("Timestamp entropy (RDTSC)");
 
     setColor(.success);
-    writeStr("    [+] ");
+    writeStr("    [✓] ");
     setColor(.normal);
     writeLine("Interrupt timing jitter");
     writeLine("");
@@ -323,9 +341,9 @@ fn stepGenerateMasterKey() bool {
     clearScreen();
 
     writeLine("");
-    writeLine("================================================================");
-    writeLine("       STEP 2/6: GENERATING MASTER KEY");
-    writeLine("================================================================");
+    writeLine("╔══════════════════════════════════════════════════════════════╗");
+    writeLine("║       STEP 2/6: GENERATING MASTER KEY                        ║");
+    writeLine("╚══════════════════════════════════════════════════════════════╝");
     writeLine("");
 
     setColor(.normal);
@@ -411,15 +429,16 @@ fn stepShowRecoveryPhrase() bool {
     clearScreen();
 
     writeLine("");
-    writeLine("================================================================");
-    writeLine("       STEP 3/6: RECOVERY PHRASE");
-    writeLine("================================================================");
+    writeLine("╔══════════════════════════════════════════════════════════════╗");
+    writeLine("║       STEP 3/6: RECOVERY PHRASE                              ║");
+    writeLine("╚══════════════════════════════════════════════════════════════╝");
     writeLine("");
 
     setColor(.error_color);
-    writeLine("  +--------------------------------------------------------------------+");
-    writeLine("  | WARNING: Write these words down NOW. They will NOT be shown again!|");
-    writeLine("  +--------------------------------------------------------------------+");
+    writeLine("  ┌────────────────────────────────────────────────────────────┐");
+    writeLine("  │ ⚠ WARNING: Write these words down NOW!                    │");
+    writeLine("  │   They will NOT be shown again after verification!        │");
+    writeLine("  └────────────────────────────────────────────────────────────┘");
     setColor(.normal);
     writeLine("");
 
@@ -499,9 +518,9 @@ fn stepVerifyRecoveryPhrase() bool {
     clearScreen();
 
     writeLine("");
-    writeLine("================================================================");
-    writeLine("       STEP 4/6: VERIFY RECOVERY PHRASE");
-    writeLine("================================================================");
+    writeLine("╔══════════════════════════════════════════════════════════════╗");
+    writeLine("║       STEP 4/6: VERIFY RECOVERY PHRASE                       ║");
+    writeLine("╚══════════════════════════════════════════════════════════════╝");
     writeLine("");
 
     setColor(.normal);
@@ -569,10 +588,10 @@ fn stepVerifyRecoveryPhrase() bool {
             if (!strEql(input[0..input_len], expected)) {
                 all_correct = false;
                 setColor(.error_color);
-                writeLine(" X");
+                writeLine(" ✗");
             } else {
                 setColor(.success);
-                writeLine(" OK");
+                writeLine(" ✓");
             }
         }
 
@@ -660,9 +679,9 @@ fn stepCreateFirstIdentity() bool {
     clearScreen();
 
     writeLine("");
-    writeLine("================================================================");
-    writeLine("       STEP 5/6: CREATE YOUR IDENTITY");
-    writeLine("================================================================");
+    writeLine("╔══════════════════════════════════════════════════════════════╗");
+    writeLine("║       STEP 5/6: CREATE YOUR IDENTITY                         ║");
+    writeLine("╚══════════════════════════════════════════════════════════════╝");
     writeLine("");
 
     setColor(.normal);
@@ -906,9 +925,9 @@ fn stepPinBootAndComplete() bool {
     clearScreen();
 
     writeLine("");
-    writeLine("================================================================");
-    writeLine("       STEP 6/6: FINALIZING SETUP");
-    writeLine("================================================================");
+    writeLine("╔══════════════════════════════════════════════════════════════╗");
+    writeLine("║       STEP 6/6: FINALIZING SETUP                             ║");
+    writeLine("╚══════════════════════════════════════════════════════════════╝");
     writeLine("");
 
     setColor(.normal);
@@ -936,11 +955,11 @@ fn stepPinBootAndComplete() bool {
     _ = config_store.set(KEY_BOOT_PCR_BASELINE, hex_buf[0..64]);
 
     setColor(.success);
-    writeLine("    [+] Boot baseline pinned");
+    writeLine("    [✓] Boot baseline pinned");
 
     // Save trust anchor
     setColor(.normal);
-    writeStr("    [+] Recording blockchain trust anchor...");
+    writeStr("    [✓] Recording blockchain trust anchor...");
 
     var anchor_hex: [64]u8 = undefined;
     bytesToHex(&trust_anchor_hash, &anchor_hex);
@@ -968,7 +987,7 @@ fn stepPinBootAndComplete() bool {
 
     if (config_store.saveToDisk()) {
         setColor(.success);
-        writeLine("    [+] Configuration saved");
+        writeLine("    [✓] Configuration saved");
     } else {
         setColor(.warning);
         writeLine("    [-] Save to disk failed (in-memory only)");
@@ -977,16 +996,16 @@ fn stepPinBootAndComplete() bool {
     writeLine("");
 
     setColor(.success);
-    writeLine("  ================================================================");
-    writeLine("  [OK] Trust ceremony v2 completed successfully!");
-    writeLine("  ================================================================");
+    writeLine("  ════════════════════════════════════════════════════════════");
+    writeLine("  [OK] Trust ceremony completed successfully!");
+    writeLine("  ════════════════════════════════════════════════════════════");
 
     delay(1000);
     return true;
 }
 
 // =============================================================================
-// Completion Screen
+// Completion Screen with Backup Option (H.7.2)
 // =============================================================================
 
 fn showCompletionScreen() void {
@@ -994,33 +1013,357 @@ fn showCompletionScreen() void {
 
     writeLine("");
     writeLine("");
-    writeLine("");
-    writeLine("    +============================================================+");
-    writeLine("    |                                                            |");
-    writeLine("    |                    SETUP COMPLETE                          |");
-    writeLine("    |                                                            |");
-    writeLine("    +============================================================+");
+    writeLine("    ╔════════════════════════════════════════════════════════╗");
+    writeLine("    ║                                                        ║");
+    writeLine("    ║                   SETUP COMPLETE                       ║");
+    writeLine("    ║                                                        ║");
+    writeLine("    ╚════════════════════════════════════════════════════════╝");
     writeLine("");
 
     setColor(.success);
-    writeLine("              Zamrud OS is now configured!");
+    writeStr("                   Welcome, @");
+    writeLine(name_buf[0..name_len]);
     setColor(.normal);
     writeLine("");
+
     writeLine("    Your system is protected by:");
     writeLine("");
     setColor(.info);
-    writeLine("      * 256-bit master encryption key");
-    writeLine("      * 24-word recovery phrase backup");
-    writeLine("      * Password-protected owner identity");
-    writeLine("      * Blockchain trust anchor pinned");
+    writeLine("      ✓ 256-bit master encryption key");
+    writeLine("      ✓ 24-word recovery phrase (written down)");
+    writeLine("      ✓ Password-protected owner identity");
+    writeLine("      ✓ Blockchain trust anchor");
     setColor(.normal);
     writeLine("");
+
+    // Backup option section
+    writeLine("    ────────────────────────────────────────────────────────");
     writeLine("");
+    setColor(.warning);
+    writeLine("    BACKUP RECOMMENDATION:");
+    setColor(.normal);
+    writeLine("");
+    writeLine("    You have your 24-word recovery phrase written down.");
+    writeLine("    For additional security, you can also create an");
+    writeLine("    encrypted backup file (.zib) to store on USB or cloud.");
+    writeLine("");
+
+    setColor(.bright);
+    writeLine("    [1] Create encrypted backup now");
     setColor(.dim);
-    writeLine("    Press any key to continue...");
+    writeLine("    [2] Skip - I'll do it later");
+    setColor(.normal);
+    writeLine("");
+
+    writeStr("    Your choice (1/2): ");
+
+    // Wait for choice
+    while (true) {
+        if (keyboard.getKey()) |key| {
+            if (key == '1') {
+                writeLine("1");
+                writeLine("");
+                runInlineExportWizard();
+                return;
+            } else if (key == '2' or key == '\n' or key == '\r' or key == 0x1B) {
+                if (key == '2') {
+                    writeLine("2");
+                } else {
+                    writeLine("");
+                }
+                writeLine("");
+                showBackupReminder();
+                return;
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Inline Export Wizard (H.7.2)
+// =============================================================================
+
+fn runInlineExportWizard() void {
+    writeLine("    ────────────────────────────────────────────────────────");
+    writeLine("");
+    setColor(.info);
+    writeLine("    CREATE ENCRYPTED BACKUP");
+    setColor(.normal);
+    writeLine("");
+
+    writeLine("    Choose a SEPARATE password for your backup file.");
+    setColor(.dim);
+    writeLine("    (Use a different password than your login password)");
+    setColor(.normal);
+    writeLine("");
+
+    // Get backup password
+    writeStr("    Backup password (min 8 chars): ");
+    var backup_pass: [64]u8 = [_]u8{0} ** 64;
+    const bp_len = readPasswordInline(&backup_pass);
+
+    if (bp_len == 0) {
+        writeLine("");
+        writeLine("");
+        setColor(.dim);
+        writeLine("    Cancelled.");
+        setColor(.normal);
+        showBackupReminder();
+        constant_time.secureZero(&backup_pass);
+        return;
+    }
+
+    writeLine("");
+
+    if (bp_len < 8) {
+        setColor(.error_color);
+        writeLine("    Password too short (minimum 8 characters).");
+        setColor(.normal);
+        writeLine("");
+        showBackupReminder();
+        constant_time.secureZero(&backup_pass);
+        return;
+    }
+
+    // Confirm password
+    writeStr("    Confirm backup password: ");
+    var confirm_pass: [64]u8 = [_]u8{0} ** 64;
+    const cp_len = readPasswordInline(&confirm_pass);
+
+    writeLine("");
+
+    if (cp_len == 0) {
+        writeLine("");
+        setColor(.dim);
+        writeLine("    Cancelled.");
+        setColor(.normal);
+        showBackupReminder();
+        constant_time.secureZero(&backup_pass);
+        return;
+    }
+
+    // Check match
+    if (bp_len != cp_len or !passwordsMatch(backup_pass[0..bp_len], confirm_pass[0..cp_len])) {
+        setColor(.error_color);
+        writeLine("");
+        writeLine("    Passwords don't match.");
+        setColor(.normal);
+        showBackupReminder();
+        constant_time.secureZero(&backup_pass);
+        constant_time.secureZero(&confirm_pass);
+        return;
+    }
+
+    constant_time.secureZero(&confirm_pass);
+
+    // Create backup
+    writeLine("");
+    writeStr("    Creating encrypted backup...");
+
+    // Initialize export module if needed
+    identity_export.init();
+
+    const result = identity_export.exportFull(
+        name_buf[0..name_len],
+        password_buf[0..password_len],
+        backup_pass[0..bp_len],
+    );
+
+    constant_time.secureZero(&backup_pass);
+
+    if (!result.success) {
+        setColor(.error_color);
+        writeLine(" FAILED");
+        if (result.error_msg) |msg| {
+            writeStr("    Error: ");
+            writeLine(msg);
+        }
+        setColor(.normal);
+        writeLine("");
+        showBackupReminder();
+        return;
+    }
+
+    setColor(.success);
+    writeLine(" OK");
+    setColor(.normal);
+    writeLine("");
+
+    // Generate filename
+    var filename: [16]u8 = [_]u8{0} ** 16;
+    const fname_len = generateBackupFilename(&filename);
+
+    // Save to disk
+    const saved = identity_export.saveToFile(filename[0..fname_len], result.getData());
+
+    if (saved) {
+        setColor(.success);
+        writeStr("    ✓ Backup saved: ");
+        setColor(.bright);
+        writeLine(filename[0..fname_len]);
+        setColor(.normal);
+    } else {
+        setColor(.warning);
+        writeLine("    ⚠ Could not save to disk");
+        setColor(.normal);
+    }
+
+    writeStr("    Size: ");
+    writeNumber(result.len);
+    writeLine(" bytes");
+
+    writeLine("");
+    writeLine("    ────────────────────────────────────────────────────────");
+    writeLine("");
+    setColor(.warning);
+    writeLine("    IMPORTANT:");
+    setColor(.normal);
+    writeLine("    Copy this file to USB drive or external storage.");
+    writeLine("    Keep it separate from this computer for safety.");
+    writeLine("");
+    writeLine("    ────────────────────────────────────────────────────────");
+
+    showFinalMessage();
+}
+
+fn generateBackupFilename(buf: *[16]u8) usize {
+    var pos: usize = 0;
+    var i: usize = 0;
+
+    // Skip @ if present
+    var name_start: usize = 0;
+    if (name_len > 0 and name_buf[0] == '@') {
+        name_start = 1;
+    }
+
+    // Copy name (uppercase, max 8 chars)
+    while (i < 8 and name_start + i < name_len and pos < 12) : (i += 1) {
+        var c = name_buf[name_start + i];
+        if (c >= 'a' and c <= 'z') {
+            c = c - 32; // Uppercase
+        }
+        if ((c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9')) {
+            buf[pos] = c;
+            pos += 1;
+        }
+    }
+
+    // Add .ZIB extension
+    const ext = ".ZIB";
+    i = 0;
+    while (i < ext.len and pos < 16) : (i += 1) {
+        buf[pos] = ext[i];
+        pos += 1;
+    }
+
+    return pos;
+}
+
+fn readPasswordInline(buf: *[64]u8) usize {
+    var len: usize = 0;
+
+    while (len < 63) {
+        if (keyboard.getKey()) |key| {
+            if (key == '\n' or key == '\r') {
+                return len;
+            }
+
+            if (key == 0x1B) { // ESC - cancel
+                return 0;
+            }
+
+            if (key == 0x08 or key == 0x7F) { // Backspace
+                if (len > 0) {
+                    len -= 1;
+                    buf[len] = 0;
+                    if (terminal.isInitialized()) {
+                        terminal.writeChar(0x08);
+                        terminal.writeChar(' ');
+                        terminal.writeChar(0x08);
+                    }
+                }
+                continue;
+            }
+
+            if (key >= 0x20 and key < 0x7F) {
+                buf[len] = key;
+                len += 1;
+                if (terminal.isInitialized()) {
+                    terminal.writeChar('*');
+                }
+            }
+        }
+    }
+
+    return len;
+}
+
+// =============================================================================
+// Backup Reminder (H.7.2)
+// =============================================================================
+
+fn showBackupReminder() void {
+    writeLine("    ────────────────────────────────────────────────────────");
+    writeLine("");
+    setColor(.info);
+    writeLine("    BACKUP COMMANDS - Available Anytime");
+    setColor(.normal);
+    writeLine("");
+
+    setColor(.dim);
+    writeLine("    Create encrypted backup file:");
+    setColor(.bright);
+    writeStr("      identity export full @");
+    writeLine(name_buf[0..name_len]);
+    setColor(.normal);
+    writeLine("");
+
+    setColor(.dim);
+    writeLine("    Show recovery phrase again:");
+    setColor(.bright);
+    writeStr("      identity export mnemonic @");
+    writeLine(name_buf[0..name_len]);
+    setColor(.normal);
+    writeLine("");
+
+    setColor(.dim);
+    writeLine("    Export public key (safe to share):");
+    setColor(.bright);
+    writeStr("      identity export public @");
+    writeLine(name_buf[0..name_len]);
+    setColor(.normal);
+    writeLine("");
+
+    setColor(.dim);
+    writeLine("    Recover from backup:");
+    setColor(.bright);
+    writeLine("      identity import bundle <file.zib>");
+    writeLine("      identity recover");
+    setColor(.normal);
+    writeLine("");
+
+    writeLine("    ────────────────────────────────────────────────────────");
+
+    showFinalMessage();
+}
+
+fn showFinalMessage() void {
+    writeLine("");
+    setColor(.success);
+    writeLine("    ════════════════════════════════════════════════════════");
+    writeLine("    ║       Zamrud OS is ready. Enjoy your privacy!        ║");
+    writeLine("    ════════════════════════════════════════════════════════");
+    setColor(.normal);
+    writeLine("");
+
+    setColor(.dim);
+    writeStr("    Press any key to continue...");
     setColor(.normal);
 
+    // Wait for any key
     while (keyboard.getKey() == null) {}
+
+    writeLine("");
 }
 
 // =============================================================================
@@ -1095,7 +1438,6 @@ fn clearScreen() void {
     if (terminal.isInitialized()) {
         terminal.clear();
         terminal.setCursor(0, 0);
-        // Force refresh
         terminal.writeChar(' ');
         terminal.setCursor(0, 0);
     }
@@ -1151,16 +1493,16 @@ fn waitForConfirm() bool {
     serial.writeString("[CEREMONY] Waiting for ENTER or ESC...\n");
     while (true) {
         if (keyboard.getKey()) |key| {
-            serial.writeString("[CEREMONY] Key received: ");
-            serial.writeChar(if (key >= 32 and key < 127) key else '?');
+            serial.writeString("[CEREMONY] Key received: 0x");
+            printHexSerial(key);
             serial.writeString("\n");
 
             if (key == '\n' or key == '\r') {
-                serial.writeString("[CEREMONY] ENTER pressed, continuing...\n");
+                serial.writeString("[CEREMONY] ENTER pressed\n");
                 return true;
             }
             if (key == 0x1B) {
-                serial.writeString("[CEREMONY] ESC pressed, cancelling...\n");
+                serial.writeString("[CEREMONY] ESC pressed\n");
                 return false;
             }
         }
@@ -1401,6 +1743,12 @@ fn bytesToHex(bytes: []const u8, out: []u8) void {
         out[i * 2] = hex[bytes[i] >> 4];
         out[i * 2 + 1] = hex[bytes[i] & 0x0F];
     }
+}
+
+fn printHexSerial(value: u8) void {
+    const hex = "0123456789ABCDEF";
+    serial.writeChar(hex[(value >> 4) & 0x0F]);
+    serial.writeChar(hex[value & 0x0F]);
 }
 
 // =============================================================================
@@ -1782,8 +2130,8 @@ pub fn runTests() bool {
         }
     }
 
-    serial.writeString("    - getTotalSteps() = 6........... ");
-    if (getTotalSteps() == 6) {
+    serial.writeString("    - getTotalSteps() = 7........... ");
+    if (getTotalSteps() == 7) {
         serial.writeString("PASS\n");
         passed += 1;
     } else {

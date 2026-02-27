@@ -1,5 +1,6 @@
 //! Zamrud OS - Identity Commands
-//! H.7.1: Added PIN management subcommands
+//! H.7.1: PIN management subcommands
+//! H.7.2: Export/Import subcommands (delegated to export.zig)
 
 const helpers = @import("helpers.zig");
 const shell = @import("../shell.zig");
@@ -11,6 +12,9 @@ const identity_store = @import("../../persist/identity_store.zig");
 const keyring = @import("../../identity/keyring.zig");
 const auth = @import("../../identity/auth.zig");
 const constant_time = @import("../../crypto/constant_time.zig");
+
+// H.7.2: Import export module for delegation
+const export_cmd = @import("export.zig");
 
 pub fn execute(args: []const u8) void {
     const parsed = helpers.parseArgs(args);
@@ -31,10 +35,15 @@ pub fn execute(args: []const u8) void {
         lockSession();
     } else if (helpers.strEql(parsed.cmd, "privacy")) {
         showPrivacy();
-    } else if (helpers.strEql(parsed.cmd, "export")) {
-        exportIdentities();
-    } else if (helpers.strEql(parsed.cmd, "import")) {
-        importIdentities();
+    } else if (helpers.strEql(parsed.cmd, "export") or helpers.strEql(parsed.cmd, "backup")) {
+        // H.7.2: Delegate to export module
+        export_cmd.handleExportCommand(parsed.rest);
+    } else if (helpers.strEql(parsed.cmd, "import") or helpers.strEql(parsed.cmd, "restore")) {
+        // H.7.2: Delegate to export module
+        export_cmd.handleImportCommand(parsed.rest);
+    } else if (helpers.strEql(parsed.cmd, "recover")) {
+        // Quick alias for mnemonic recovery
+        export_cmd.cmdImportMnemonic();
     } else if (helpers.strEql(parsed.cmd, "status")) {
         showPersistStatus();
     } else if (helpers.strEql(parsed.cmd, "pin")) {
@@ -112,12 +121,37 @@ fn showHelp() void {
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_success);
     }
+    shell.println("  Export/Backup (H.7.2):");
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_normal);
+    }
+    shell.println("    export full <n>      Encrypted backup (.zib)");
+    shell.println("    export mnemonic <n>  Show 24-word recovery phrase");
+    shell.println("    export public <n>    Export public key only");
+    shell.println("    export verify <file> Verify backup integrity");
+    shell.println("    export help          Export detailed help");
+    shell.newLine();
+
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_success);
+    }
+    shell.println("  Import/Restore (H.7.2):");
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_normal);
+    }
+    shell.println("    import bundle <file> Restore from .zib file");
+    shell.println("    import mnemonic      Recover from 24 words");
+    shell.println("    recover              Alias for import mnemonic");
+    shell.println("    import help          Import detailed help");
+    shell.newLine();
+
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_success);
+    }
     shell.println("  Persistence:");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("    export            Save identities to disk");
-    shell.println("    import            Load identities from disk");
     shell.println("    status            Show persistence status");
     shell.newLine();
 
@@ -130,8 +164,7 @@ fn showHelp() void {
     }
     shell.println("    test              Run all identity tests");
     shell.println("    test quick        Quick health check");
-    shell.println("    test keyring      Test keyring module");
-    shell.println("    test auth         Test auth module");
+    shell.println("    test export       Test export/import (H.7.2)");
     shell.newLine();
 
     if (terminal.isInitialized()) {
@@ -252,7 +285,6 @@ fn cmdPinSet() void {
         return;
     }
 
-    // Check if already has PIN
     if (auth.hasPinConfigured()) {
         shell.printWarningLine("PIN already configured. Use 'identity pin change' to update.");
         return;
@@ -282,7 +314,6 @@ fn cmdPinSet() void {
 
     shell.newLine();
 
-    // Verify password works
     const current = keyring.getCurrentIdentity();
     if (current == null) {
         wipeBuffer(&password_buf);
@@ -352,7 +383,6 @@ fn cmdPinSet() void {
             terminal.setFgColor(theme.text_normal);
         }
 
-        // Auto-save to disk
         if (identity_store.isInitialized()) {
             if (identity_store.saveToDisk()) {
                 shell.printSuccessLine("  Changes saved to disk.");
@@ -362,10 +392,8 @@ fn cmdPinSet() void {
         shell.printErrorLine("  Failed to setup PIN");
     }
 
-    // Wipe sensitive data
     wipeBuffer(&password_buf);
     wipeSmallBuffer(&pin_buf);
-
     shell.newLine();
 }
 
@@ -393,7 +421,6 @@ fn cmdPinRemove() void {
     }
     shell.newLine();
 
-    // Verify password
     shell.print("  Password to confirm: ");
     var password_buf: [64]u8 = [_]u8{0} ** 64;
     const password_len = readPassword(&password_buf);
@@ -411,7 +438,6 @@ fn cmdPinRemove() void {
         shell.printSuccessLine("  PIN removed");
         shell.println("  Quick unlock is now disabled.");
 
-        // Auto-save to disk
         if (identity_store.isInitialized()) {
             if (identity_store.saveToDisk()) {
                 shell.printSuccessLine("  Changes saved to disk.");
@@ -449,7 +475,6 @@ fn cmdPinChange() void {
     }
     shell.newLine();
 
-    // Step 1: Verify password (not old PIN — password is always authority)
     shell.print("  Password: ");
     var password_buf: [64]u8 = [_]u8{0} ** 64;
     const password_len = readPassword(&password_buf);
@@ -462,7 +487,6 @@ fn cmdPinChange() void {
 
     shell.newLine();
 
-    // Verify
     const current = keyring.getCurrentIdentity();
     if (current == null) {
         wipeBuffer(&password_buf);
@@ -478,7 +502,6 @@ fn cmdPinChange() void {
     }
     constant_time.secureZero32(&test_key);
 
-    // Step 2: Get new PIN
     shell.print("  New PIN (4-8 digits): ");
     var pin_buf: [16]u8 = [_]u8{0} ** 16;
     const pin_len = readPin(&pin_buf);
@@ -493,7 +516,6 @@ fn cmdPinChange() void {
 
     shell.newLine();
 
-    // Step 3: Confirm
     shell.print("  Confirm new PIN: ");
     var pin_confirm: [16]u8 = [_]u8{0} ** 16;
     const confirm_len = readPin(&pin_confirm);
@@ -510,12 +532,10 @@ fn cmdPinChange() void {
 
     wipeSmallBuffer(&pin_confirm);
 
-    // Step 4: Change PIN
     if (keyring.changeSecondaryPin(current.?, password_buf[0..password_len], pin_buf[0..pin_len])) {
         shell.newLine();
         shell.printSuccessLine("  PIN changed successfully");
 
-        // Auto-save to disk
         if (identity_store.isInitialized()) {
             if (identity_store.saveToDisk()) {
                 shell.printSuccessLine("  Changes saved to disk.");
@@ -573,13 +593,13 @@ fn showPinHelp() void {
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_dim);
     }
-    shell.println("    • PIN is for convenience, not maximum security");
-    shell.println("    • Password always required for:");
+    shell.println("    * PIN is for convenience, not maximum security");
+    shell.println("    * Password always required for:");
     shell.println("        - Changing password");
     shell.println("        - Exporting keys/seed phrase");
     shell.println("        - Setting up or removing PIN");
-    shell.println("    • Changing password invalidates PIN (must re-setup)");
-    shell.println("    • Both PIN and password can be used at login");
+    shell.println("    * Changing password invalidates PIN (must re-setup)");
+    shell.println("    * Both PIN and password can be used at login");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
@@ -621,7 +641,6 @@ fn cmdPasswordChange() void {
     }
     shell.newLine();
 
-    // Step 1: Current password
     shell.print("  Current password: ");
     var old_password: [64]u8 = [_]u8{0} ** 64;
     const old_len = readPassword(&old_password);
@@ -634,7 +653,6 @@ fn cmdPasswordChange() void {
 
     shell.newLine();
 
-    // Verify old password
     const current = keyring.getCurrentIdentity();
     if (current == null) {
         wipeBuffer(&old_password);
@@ -650,7 +668,6 @@ fn cmdPasswordChange() void {
     }
     constant_time.secureZero32(&test_key);
 
-    // Step 2: New password
     shell.print("  New password (8+ chars): ");
     var new_password: [64]u8 = [_]u8{0} ** 64;
     const new_len = readPassword(&new_password);
@@ -673,7 +690,6 @@ fn cmdPasswordChange() void {
 
     shell.newLine();
 
-    // Step 3: Confirm new password
     shell.print("  Confirm new password: ");
     var confirm_password: [64]u8 = [_]u8{0} ** 64;
     const confirm_len = readPassword(&confirm_password);
@@ -690,12 +706,10 @@ fn cmdPasswordChange() void {
 
     wipeBuffer(&confirm_password);
 
-    // Step 4: Change password
     if (keyring.reEncryptPrivateKey(current.?, old_password[0..old_len], new_password[0..new_len])) {
         shell.newLine();
         shell.printSuccessLine("  Password changed successfully!");
 
-        // Note about PIN
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_warning);
         }
@@ -705,7 +719,6 @@ fn cmdPasswordChange() void {
             terminal.setFgColor(theme.text_normal);
         }
 
-        // Auto-save to disk
         if (identity_store.isInitialized()) {
             if (identity_store.saveToDisk()) {
                 shell.printSuccessLine("  Changes saved to disk.");
@@ -736,7 +749,7 @@ fn readPassword(buf: *[64]u8) usize {
                 return len;
             }
 
-            if (key == 0x1B) { // ESC
+            if (key == 0x1B) {
                 return 0;
             }
 
@@ -781,7 +794,7 @@ fn readPin(buf: *[16]u8) usize {
                 return len;
             }
 
-            if (key == 0x1B) { // ESC
+            if (key == 0x1B) {
                 return 0;
             }
 
@@ -802,7 +815,6 @@ fn readPin(buf: *[16]u8) usize {
                 return 0;
             }
 
-            // Only accept digits for PIN
             if (key >= '0' and key <= '9' and len < 8) {
                 buf[len] = key;
                 len += 1;
@@ -839,48 +851,8 @@ fn sliceEql(a: []const u8, b: []const u8) bool {
 }
 
 // =============================================================================
-// Existing Commands (unchanged)
+// Persistence Commands
 // =============================================================================
-
-fn exportIdentities() void {
-    shell.printInfoLine("Exporting identities to disk...");
-
-    if (identity.getIdentityCount() == 0) {
-        shell.printWarningLine("No identities to export");
-        return;
-    }
-
-    if (identity_store.saveToDisk()) {
-        shell.printSuccessLine("[OK] Identities saved to /disk/IDENTITY.DAT");
-        shell.print("  Exported: ");
-        helpers.printUsize(identity.getIdentityCount());
-        shell.println(" identities");
-        shell.println("  Note: Private keys stored encrypted (password/PIN required)");
-    } else {
-        shell.printErrorLine("Failed to export identities!");
-    }
-}
-
-fn importIdentities() void {
-    shell.printInfoLine("Importing identities from disk...");
-
-    if (!identity_store.hasSavedIdentities()) {
-        shell.printWarningLine("No saved identities found on disk");
-        return;
-    }
-
-    shell.printWarningLine("Warning: This will replace current identities!");
-
-    if (identity_store.loadFromDisk()) {
-        shell.printSuccessLine("[OK] Identities loaded from /disk/IDENTITY.DAT");
-        shell.print("  Imported: ");
-        helpers.printUsize(identity.getIdentityCount());
-        shell.println(" identities");
-        shell.println("  Note: All identities are LOCKED. Use 'identity unlock <name> <pwd>'");
-    } else {
-        shell.printErrorLine("Failed to import identities!");
-    }
-}
 
 fn showPersistStatus() void {
     shell.printInfoLine("========================================");
@@ -908,6 +880,10 @@ fn showPersistStatus() void {
     shell.newLine();
 }
 
+// =============================================================================
+// Test Commands
+// =============================================================================
+
 pub fn runTest(args: []const u8) void {
     const opt = helpers.trim(args);
 
@@ -925,8 +901,11 @@ pub fn runTest(args: []const u8) void {
         runModuleTest("names");
     } else if (helpers.strEql(opt, "persist")) {
         runModuleTest("persist");
+    } else if (helpers.strEql(opt, "export")) {
+        // H.7.2: Test export/import
+        export_cmd.cmdExportTest();
     } else {
-        shell.println("identity test options: all, quick, keyring, auth, privacy, names, persist");
+        shell.println("identity test options: all, quick, keyring, auth, privacy, names, persist, export");
     }
 }
 
@@ -976,12 +955,12 @@ fn runAllTests() void {
     const privacy = @import("../../identity/privacy.zig");
     const names = @import("../../identity/names.zig");
 
-    helpers.printTestHeader("IDENTITY TEST SUITE (H.7.1)");
+    helpers.printTestHeader("IDENTITY TEST SUITE (H.7.1/H.7.2)");
 
     var p: u32 = 0;
     var f: u32 = 0;
 
-    helpers.printTestCategory(1, 5, "Keyring (Dual Credential)");
+    helpers.printTestCategory(1, 6, "Keyring (Dual Credential)");
     if (keyring.test_keyring()) {
         shell.printSuccessLine("      PASSED");
         p += 1;
@@ -990,7 +969,7 @@ fn runAllTests() void {
         f += 1;
     }
 
-    helpers.printTestCategory(2, 5, "Auth (PIN + Password)");
+    helpers.printTestCategory(2, 6, "Auth (PIN + Password)");
     if (auth.test_auth()) {
         shell.printSuccessLine("      PASSED");
         p += 1;
@@ -999,7 +978,7 @@ fn runAllTests() void {
         f += 1;
     }
 
-    helpers.printTestCategory(3, 5, "Privacy");
+    helpers.printTestCategory(3, 6, "Privacy");
     if (privacy.test_privacy()) {
         shell.printSuccessLine("      PASSED");
         p += 1;
@@ -1008,7 +987,7 @@ fn runAllTests() void {
         f += 1;
     }
 
-    helpers.printTestCategory(4, 5, "Names");
+    helpers.printTestCategory(4, 6, "Names");
     if (names.test_names()) {
         shell.printSuccessLine("      PASSED");
         p += 1;
@@ -1017,8 +996,17 @@ fn runAllTests() void {
         f += 1;
     }
 
-    helpers.printTestCategory(5, 5, "Persistence");
+    helpers.printTestCategory(5, 6, "Persistence");
     if (identity_store.test_identity_store()) {
+        shell.printSuccessLine("      PASSED");
+        p += 1;
+    } else {
+        shell.printErrorLine("      FAILED");
+        f += 1;
+    }
+
+    helpers.printTestCategory(6, 6, "Export/Import (H.7.2)");
+    if (export_cmd.runExportTests()) {
         shell.printSuccessLine("      PASSED");
         p += 1;
     } else {
@@ -1053,6 +1041,10 @@ fn runModuleTest(module: []const u8) void {
         shell.printErrorLine("FAILED");
     }
 }
+
+// =============================================================================
+// Info Commands
+// =============================================================================
 
 fn showInfo() void {
     const theme = ui.getTheme();
@@ -1147,7 +1139,7 @@ fn listIdentities() void {
         shell.println("  (none)");
         shell.println("  Use: identity create <name> <password>");
         if (identity_store.hasSavedIdentities()) {
-            shell.println("  Or:  identity import  (load from disk)");
+            shell.println("  Or:  identity import bundle <file>");
         }
         shell.newLine();
         return;
@@ -1175,7 +1167,6 @@ fn listIdentities() void {
                 shell.print("(anonymous)");
             }
 
-            // Status indicators
             if (id.?.unlocked) {
                 shell.printSuccess(" [UNLOCKED]");
             }
@@ -1239,9 +1230,8 @@ fn createIdentity(args: []const u8) void {
         shell.printSuccessLine("Created!");
         shell.print("  Address: ");
         shell.println(id.getAddress());
-        shell.println("  Tip: Use 'identity pin set' to enable quick unlock");
+        shell.println("  Tip: Use 'identity export mnemonic' to backup your recovery phrase");
 
-        // Auto-save to disk
         if (identity_store.isInitialized()) {
             if (identity_store.saveToDisk()) {
                 shell.printSuccessLine("  Auto-saved to disk");
@@ -1269,7 +1259,6 @@ fn unlockIdentity(args: []const u8) void {
     if (auth.unlock(parsed.first, credential)) {
         shell.printSuccessLine("Unlocked!");
 
-        // Show how they unlocked
         if (auth.getLastUnlockMethod() == .pin) {
             shell.println("  (via PIN)");
         } else {

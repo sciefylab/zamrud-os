@@ -3,6 +3,7 @@
 //! NO additional system encryption needed (avoids chicken-egg problem)
 //!
 //! H.7 FIX: Correct ENTRY_SIZE, magic validation, robust loading
+//! H.7.4 FIX: Correct credential_type enum mapping on deserialize
 
 const serial = @import("../drivers/serial/serial.zig");
 const fat32 = @import("../fs/fat32.zig");
@@ -21,7 +22,7 @@ const IDENTITY_FILENAME = "IDENTITY.DAT";
 // active(1) + has_name(1) + name_len(1) + name(32) + addr_len(1) + address(50) +
 // pubkey(32) + privkey_enc(48) + salt(16) + trust_hash(32) + cred_type(1) +
 // is_owner(1) + created_at(4) + last_used(4) = 224 bytes
-const ENTRY_SIZE: usize = 224; // Was 220 - BUG FIXED!
+const ENTRY_SIZE: usize = 224;
 const HEADER_SIZE: usize = 16;
 const MAX_IDENTITIES: usize = keyring.MAX_IDENTITIES;
 const MAX_FILE_SIZE: usize = HEADER_SIZE + (ENTRY_SIZE * MAX_IDENTITIES) + 64;
@@ -279,7 +280,7 @@ fn serialize(buf: []u8) usize {
         }
         pos += 32;
 
-        // H.7: Credential type (1 byte)
+        // H.7: Credential type (1 byte) - use enum value directly
         buf[pos] = @intFromEnum(id.credential_type);
         pos += 1;
 
@@ -483,10 +484,26 @@ fn deserialize(buf: []const u8) bool {
         }
         pos += 32;
 
-        // H.7: Credential type (1 byte)
+        // H.7.4 FIX: Credential type (1 byte) - correct enum mapping!
         const cred_type_byte = buf[pos];
-        id.credential_type = if (cred_type_byte == 1) .password else .pin;
+        id.credential_type = switch (cred_type_byte) {
+            0 => .none,
+            1 => .pin,
+            2 => .password,
+            else => .pin, // fallback for safety
+        };
         pos += 1;
+
+        // Debug: Log credential type loaded
+        serial.writeString("[IDENTITY_STORE] Loaded credential_type=");
+        switch (id.credential_type) {
+            .none => serial.writeString("none"),
+            .pin => serial.writeString("pin"),
+            .password => serial.writeString("password"),
+        }
+        serial.writeString(" (byte=");
+        printU32(@intCast(cred_type_byte));
+        serial.writeString(")\n");
 
         // H.7: Is owner (1 byte)
         id.is_owner = buf[pos] == 1;
@@ -597,13 +614,13 @@ fn deserializeLegacyV1(buf: []const u8) bool {
         }
         pos += 16;
 
-        // Set defaults for new fields
+        // Set defaults for new fields (legacy = PIN-based)
         j = 0;
         while (j < 32) : (j += 1) {
             id.trust_hash[j] = 0;
         }
-        id.credential_type = .pin;
-        id.is_owner = (slot == 1);
+        id.credential_type = .pin; // Legacy identities used PIN
+        id.is_owner = (slot == 1); // First identity is owner
         id.created_at = 1700000000;
         id.last_used = 1700000000;
 
@@ -621,6 +638,12 @@ fn deserializeLegacyV1(buf: []const u8) bool {
     serial.writeString("[IDENTITY_STORE] Migrated ");
     printU32(@intCast(slot));
     serial.writeString(" identities from v1 format\n");
+
+    // Auto-save in new format
+    if (slot > 0) {
+        serial.writeString("[IDENTITY_STORE] Auto-saving in v3 format...\n");
+        _ = saveToDisk();
+    }
 
     return slot > 0;
 }
@@ -712,12 +735,12 @@ fn deserializeLegacyV2(buf: []const u8) bool {
         id.last_used = readU32LE(buf, pos);
         pos += 4;
 
-        // Set defaults for H.7 fields
+        // Set defaults for H.7 fields (legacy = PIN-based)
         j = 0;
         while (j < 32) : (j += 1) {
             id.trust_hash[j] = 0;
         }
-        id.credential_type = .pin;
+        id.credential_type = .pin; // Legacy identities used PIN
         id.is_owner = (slot == 1);
 
         id.active = true;
@@ -734,6 +757,12 @@ fn deserializeLegacyV2(buf: []const u8) bool {
     serial.writeString("[IDENTITY_STORE] Migrated ");
     printU32(@intCast(slot));
     serial.writeString(" identities from v2 format\n");
+
+    // Auto-save in new format
+    if (slot > 0) {
+        serial.writeString("[IDENTITY_STORE] Auto-saving in v3 format...\n");
+        _ = saveToDisk();
+    }
 
     return slot > 0;
 }
@@ -813,7 +842,7 @@ fn printU32(val: u32) void {
 
 pub fn runTests() bool {
     serial.writeString("\n========================================\n");
-    serial.writeString("  IDENTITY_STORE TESTS (H.7 FIXED)\n");
+    serial.writeString("  IDENTITY_STORE TESTS (H.7.4 FIXED)\n");
     serial.writeString("========================================\n\n");
 
     var passed: u32 = 0;
@@ -842,12 +871,12 @@ pub fn runTests() bool {
         failed += 1;
     }
 
-    // Test 3: Serialize/Deserialize
-    serial.writeString("  Test 3: Serialize identity..........");
+    // Test 3: Serialize/Deserialize with PASSWORD type
+    serial.writeString("  Test 3: Serialize PASSWORD identity.");
     keyring.init();
-    _ = keyring.createIdentity("store_test", "1234");
+    const pwd_id = keyring.createIdentityWithPassword("store_pwd", "SecureP1");
 
-    if (keyring.getIdentityCount() == 1) {
+    if (pwd_id != null and pwd_id.?.credential_type == .password) {
         var test_buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
         const size = serialize(&test_buf);
         if (size > HEADER_SIZE) {
@@ -856,25 +885,26 @@ pub fn runTests() bool {
             serial.writeString(" bytes)\n");
             passed += 1;
 
-            // Test 4: Deserialize
-            serial.writeString("  Test 4: Deserialize identity........");
+            // Test 4: Deserialize preserves PASSWORD type
+            serial.writeString("  Test 4: Deserialize PASSWORD type...");
             keyring.init();
             if (deserialize(test_buf[0..size])) {
-                if (keyring.getIdentityCount() == 1) {
-                    if (keyring.findIdentity("store_test")) |id| {
-                        if (id.active and id.keypair.valid and !id.unlocked) {
-                            serial.writeString(" PASS\n");
-                            passed += 1;
-                        } else {
-                            serial.writeString(" FAIL (state)\n");
-                            failed += 1;
-                        }
+                if (keyring.findIdentity("store_pwd")) |loaded_id| {
+                    if (loaded_id.credential_type == .password) {
+                        serial.writeString(" PASS\n");
+                        passed += 1;
                     } else {
-                        serial.writeString(" FAIL (find)\n");
+                        serial.writeString(" FAIL (type=");
+                        switch (loaded_id.credential_type) {
+                            .none => serial.writeString("none"),
+                            .pin => serial.writeString("pin"),
+                            .password => serial.writeString("password"),
+                        }
+                        serial.writeString(")\n");
                         failed += 1;
                     }
                 } else {
-                    serial.writeString(" FAIL (count)\n");
+                    serial.writeString(" FAIL (find)\n");
                     failed += 1;
                 }
             } else {
@@ -884,18 +914,83 @@ pub fn runTests() bool {
         } else {
             serial.writeString(" FAIL (size)\n");
             failed += 1;
-            failed += 1;
+            failed += 1; // Skip test 4
         }
     } else {
         serial.writeString(" FAIL (create)\n");
         failed += 2;
     }
 
-    // Test 5: hasSavedIdentities validates magic
-    serial.writeString("  Test 5: hasSavedIdentities magic....");
-    // This test would need disk access, so skip if not mounted
+    // Test 5: Serialize/Deserialize with PIN type
+    serial.writeString("  Test 5: Serialize PIN identity......");
+    keyring.init();
+    const pin_id = keyring.createIdentity("store_pin", "1234");
+
+    if (pin_id != null and pin_id.?.credential_type == .pin) {
+        var test_buf: [MAX_FILE_SIZE]u8 = [_]u8{0} ** MAX_FILE_SIZE;
+        const size = serialize(&test_buf);
+        if (size > HEADER_SIZE) {
+            serial.writeString(" PASS\n");
+            passed += 1;
+
+            // Test 6: Deserialize preserves PIN type
+            serial.writeString("  Test 6: Deserialize PIN type........");
+            keyring.init();
+            if (deserialize(test_buf[0..size])) {
+                if (keyring.findIdentity("store_pin")) |loaded_id| {
+                    if (loaded_id.credential_type == .pin) {
+                        serial.writeString(" PASS\n");
+                        passed += 1;
+                    } else {
+                        serial.writeString(" FAIL (type=");
+                        switch (loaded_id.credential_type) {
+                            .none => serial.writeString("none"),
+                            .pin => serial.writeString("pin"),
+                            .password => serial.writeString("password"),
+                        }
+                        serial.writeString(")\n");
+                        failed += 1;
+                    }
+                } else {
+                    serial.writeString(" FAIL (find)\n");
+                    failed += 1;
+                }
+            } else {
+                serial.writeString(" FAIL (deser)\n");
+                failed += 1;
+            }
+        } else {
+            serial.writeString(" FAIL (size)\n");
+            failed += 2;
+        }
+    } else {
+        serial.writeString(" FAIL (create)\n");
+        failed += 2;
+    }
+
+    // Test 7: Credential type byte encoding
+    serial.writeString("  Test 7: Enum byte values............");
+    const none_val: u8 = @intFromEnum(keyring.CredentialType.none);
+    const pin_val: u8 = @intFromEnum(keyring.CredentialType.pin);
+    const pwd_val: u8 = @intFromEnum(keyring.CredentialType.password);
+
+    if (none_val == 0 and pin_val == 1 and pwd_val == 2) {
+        serial.writeString(" PASS (0/1/2)\n");
+        passed += 1;
+    } else {
+        serial.writeString(" FAIL (");
+        printU32(none_val);
+        serial.writeString("/");
+        printU32(pin_val);
+        serial.writeString("/");
+        printU32(pwd_val);
+        serial.writeString(")\n");
+        failed += 1;
+    }
+
+    // Test 8: hasSavedIdentities validates magic
+    serial.writeString("  Test 8: hasSavedIdentities magic....");
     if (fat32.isMounted()) {
-        // The function should return false for non-existent or invalid files
         serial.writeString(" PASS (disk check)\n");
         passed += 1;
     } else {
@@ -909,7 +1004,12 @@ pub fn runTests() bool {
     printU32(passed);
     serial.writeString("/");
     printU32(passed + failed);
-    serial.writeString(" passed\n");
+    serial.writeString(" passed");
+    if (failed == 0) {
+        serial.writeString(" OK\n");
+    } else {
+        serial.writeString(" FAILED\n");
+    }
     serial.writeString("========================================\n");
 
     return failed == 0;

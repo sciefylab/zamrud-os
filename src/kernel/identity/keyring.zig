@@ -20,13 +20,30 @@ fn debug(msg: []const u8) void {
 // Constants
 // =============================================================================
 
+// =============================================================================
+// Constants - H.7.3 HARDENED KDF
+// =============================================================================
+
 pub const MAX_IDENTITIES: usize = 8;
 pub const NAME_MAX_LEN: usize = 32;
 pub const ADDRESS_LEN: usize = 50;
 
-// H.7 FIX: Proper key derivation parameters
-pub const KDF_ROUNDS: u32 = 10000; // Was 100 — now proper strength
-pub const KDF_ROUNDS_PIN: u32 = 5000; // PIN uses fewer rounds (convenience)
+// H.7.3 FIX: Production-grade KDF parameters
+// Reference: OWASP Password Storage Cheat Sheet
+// https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
+
+/// Primary password KDF iterations (100,000 - matches LUKS/1Password/Bitwarden)
+pub const KDF_ROUNDS: u32 = 100_000;
+
+/// Secondary PIN KDF iterations (fewer for UX, but still secure)
+/// PIN has limited keyspace (10^4 to 10^8), so we use more iterations
+/// to compensate, but less than password for responsiveness
+pub const KDF_ROUNDS_PIN: u32 = 50_000;
+
+/// Export/backup password KDF (highest security - offline attack resistant)
+pub const KDF_ROUNDS_EXPORT: u32 = 200_000;
+
+/// Credential length constraints
 pub const CREDENTIAL_MIN_LEN: usize = 4; // PIN minimum
 pub const CREDENTIAL_MAX_LEN: usize = 64; // Password maximum
 pub const PASSWORD_MIN_LEN: usize = 8; // Password minimum
@@ -272,7 +289,7 @@ pub fn createAnonymousIdentity(credential: []const u8) ?*Identity {
 // =============================================================================
 
 /// Detect if credential is a PIN or password
-fn detectCredentialType(credential: []const u8) CredentialType {
+pub fn detectCredentialType(credential: []const u8) CredentialType {
     if (credential.len >= PIN_MIN_LEN and credential.len <= PIN_MAX_LEN) {
         // Check if all digits — it's a PIN
         var all_digits = true;
@@ -393,10 +410,11 @@ fn generateAddress(id: *Identity) void {
 }
 
 // =============================================================================
-// Key Derivation — H.7 HARDENED
+// Key Derivation — H.7.3 HARDENED
 // =============================================================================
 
 /// Key derivation from credential + salt (configurable rounds)
+/// Uses iterated SHA-256 (PBKDF2-like construction)
 fn deriveKeyFromCredentialWithRounds(credential: []const u8, salt: *const [16]u8, rounds: u32, out: *[32]u8) void {
     // Phase 1: Combine credential + salt
     var i: usize = 0;
@@ -414,13 +432,15 @@ fn deriveKeyFromCredentialWithRounds(credential: []const u8, salt: *const [16]u8
     // Phase 2: Initial hash
     hash.sha256Into(&kdf_work_buffer, out);
 
-    // Phase 3: Iterated hashing
+    // Phase 3: Iterated hashing (PBKDF2-style)
     var round: u32 = 0;
     while (round < rounds) : (round += 1) {
         i = 0;
         while (i < 32) : (i += 1) kdf_work_buffer[i] = out[i];
         i = 0;
         while (i < 16) : (i += 1) kdf_work_buffer[32 + i] = salt[i];
+
+        // Include round counter for domain separation
         kdf_work_buffer[48] = @truncate(round);
         kdf_work_buffer[49] = @truncate(round >> 8);
         kdf_work_buffer[50] = @truncate(round >> 16);
@@ -433,12 +453,12 @@ fn deriveKeyFromCredentialWithRounds(credential: []const u8, salt: *const [16]u8
     constant_time.secureZero(&kdf_work_buffer);
 }
 
-/// Key derivation from credential + salt (standard rounds)
+/// Key derivation from password (100,000 rounds)
 fn deriveKeyFromCredential(credential: []const u8, salt: *const [16]u8, out: *[32]u8) void {
     deriveKeyFromCredentialWithRounds(credential, salt, KDF_ROUNDS, out);
 }
 
-/// Key derivation for PIN (fewer rounds for convenience)
+/// Key derivation for PIN (50,000 rounds - fewer for UX)
 fn deriveKeyFromPin(pin: []const u8, salt: *const [16]u8, out: *[32]u8) void {
     deriveKeyFromCredentialWithRounds(pin, salt, KDF_ROUNDS_PIN, out);
 }
