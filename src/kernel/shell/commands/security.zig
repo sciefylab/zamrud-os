@@ -1,6 +1,6 @@
 //! Zamrud OS - Security Commands
 //! Security management, firewall control, threat monitoring
-//! Updated: E3.4 Network Capability integration
+//! Updated: H.8 Threat Scoring & Auto-Response integration
 
 const helpers = @import("helpers.zig");
 const shell = @import("../shell.zig");
@@ -10,6 +10,10 @@ const security = @import("../../security/security.zig");
 const firewall = @import("../../net/firewall.zig");
 const blacklist = @import("../../security/blacklist.zig");
 const threat_log = @import("../../security/threat_log.zig");
+const threat_score = @import("../../security/threat_score.zig");
+
+// H.8: Delegate to threat commands
+const threat_cmd = @import("threat.zig");
 
 // Network imports
 const net_driver = @import("../../drivers/network/network.zig");
@@ -40,6 +44,9 @@ pub fn execute(args: []const u8) void {
         cmdBlacklist(parsed.rest);
     } else if (helpers.strEql(parsed.cmd, "threats")) {
         cmdThreats(parsed.rest);
+    } else if (helpers.strEql(parsed.cmd, "score")) {
+        // H.8: Delegate to threat.zig
+        threat_cmd.execute(parsed.rest);
     } else if (helpers.strEql(parsed.cmd, "test")) {
         runTest(parsed.rest);
     } else {
@@ -71,6 +78,19 @@ fn showHelp() void {
     shell.println("  level               Show current security level");
     shell.println("  threats list        List detected threats");
     shell.println("  threats clear       Clear threat log");
+    shell.newLine();
+
+    shell.println("+-----------------------------------------------------------+");
+    shell.println("|  H.8 THREAT SCORING & AUTO-RESPONSE                       |");
+    shell.println("+-----------------------------------------------------------+");
+    shell.println("  score status        Show threat scoring engine status");
+    shell.println("  score top           Display top threats by score");
+    shell.println("  score <ip>          Show score for specific IP");
+    shell.println("  score reset <ip>    Reset score for IP (forgive)");
+    shell.println("  score remove <ip>   Remove IP from tracking");
+    shell.println("  score thresholds    Show auto-response thresholds");
+    shell.println("  score decay         Force score decay cycle");
+    shell.println("  score test          Run H.8 threat scoring tests");
     shell.newLine();
 
     shell.println("+-----------------------------------------------------------+");
@@ -134,6 +154,7 @@ fn showHelp() void {
     shell.println("+-----------------------------------------------------------+");
     shell.println("  test                Run all security tests");
     shell.println("  test quick          Quick health check");
+    shell.println("  test h8             Run H.8 threat scoring tests");
     shell.newLine();
     shell.println("+===========================================================+");
     shell.newLine();
@@ -207,6 +228,11 @@ fn showStatus() void {
     } else {
         shell.printWarningLine("OFF");
     }
+    shell.newLine();
+
+    // H.8: Threat Scoring - delegate to threat_cmd
+    shell.println("  [H.8 THREAT SCORING]");
+    threat_cmd.printSummary();
     shell.newLine();
 
     // Traffic Statistics
@@ -933,6 +959,8 @@ pub fn runTest(args: []const u8) void {
         runAllTests();
     } else if (helpers.strEql(opt, "quick")) {
         runQuickTest();
+    } else if (helpers.strEql(opt, "h8")) {
+        threat_cmd.runTest();
     } else if (helpers.strEql(opt, "rules")) {
         var dummy_failed: u32 = 0;
         const passed = testRuleManagement(&dummy_failed);
@@ -966,7 +994,7 @@ pub fn runTest(args: []const u8) void {
         helpers.printU32(dummy_failed);
         shell.println(" failed");
     } else {
-        shell.println("Usage: security test [all|quick|rules|filter|blacklist|ratelimit]");
+        shell.println("Usage: security test [all|quick|h8|rules|filter|blacklist|ratelimit]");
     }
 }
 
@@ -989,6 +1017,7 @@ fn runAllTests() void {
     passed += testConnectionTracking(&failed);
     passed += testStateMachine(&failed);
     passed += testIntegration(&failed);
+    passed += testThreatScoring(&failed);
 
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
@@ -1017,7 +1046,7 @@ fn runAllTests() void {
 fn runQuickTest() void {
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
-    shell.println("|              FIREWALL QUICK TEST                          |");
+    shell.println("|              SECURITY QUICK TEST                          |");
     shell.println("+-----------------------------------------------------------+");
     shell.newLine();
 
@@ -1078,6 +1107,19 @@ fn runQuickTest() void {
         ok = false;
     }
 
+    shell.print("  Threat Scoring (H.8):     ");
+    if (threat_score.isInitialized()) {
+        shell.printSuccessLine("PASS");
+    } else {
+        threat_score.init();
+        if (threat_score.isInitialized()) {
+            shell.printSuccessLine("PASS (auto-init)");
+        } else {
+            shell.printErrorLine("FAIL");
+            ok = false;
+        }
+    }
+
     shell.newLine();
     shell.print("  Quick Test Result: ");
     if (ok) {
@@ -1095,7 +1137,7 @@ fn runQuickTest() void {
 // =============================================================================
 
 fn testInitialization(failed: *u32) u32 {
-    helpers.printTestCategory(1, 9, "Initialization");
+    helpers.printTestCategory(1, 10, "Initialization");
     var passed: u32 = 0;
 
     passed += helpers.doTest("Firewall initialized", firewall.isInitialized(), failed);
@@ -1111,7 +1153,7 @@ fn testInitialization(failed: *u32) u32 {
 }
 
 fn testRuleManagement(failed: *u32) u32 {
-    helpers.printTestCategory(2, 9, "Rule Management");
+    helpers.printTestCategory(2, 10, "Rule Management");
     var passed: u32 = 0;
 
     const initial_count = firewall.getRuleCount();
@@ -1162,7 +1204,7 @@ fn testRuleManagement(failed: *u32) u32 {
 }
 
 fn testPacketFiltering(failed: *u32) u32 {
-    helpers.printTestCategory(3, 9, "Packet Filtering");
+    helpers.printTestCategory(3, 10, "Packet Filtering");
     var passed: u32 = 0;
 
     const lo_ip = net_driver.ipToU32(127, 0, 0, 1);
@@ -1204,7 +1246,7 @@ fn testPacketFiltering(failed: *u32) u32 {
 }
 
 fn testBlacklistSystem(failed: *u32) u32 {
-    helpers.printTestCategory(4, 9, "Blacklist System");
+    helpers.printTestCategory(4, 10, "Blacklist System");
     var passed: u32 = 0;
 
     const test_ip = net_driver.ipToU32(192, 168, 99, 99);
@@ -1243,7 +1285,7 @@ fn testBlacklistSystem(failed: *u32) u32 {
 }
 
 fn testRateLimiting(failed: *u32) u32 {
-    helpers.printTestCategory(5, 9, "Rate Limiting");
+    helpers.printTestCategory(5, 10, "Rate Limiting");
     var passed: u32 = 0;
 
     if (!firewall.config.enable_rate_limit) {
@@ -1273,7 +1315,7 @@ fn testRateLimiting(failed: *u32) u32 {
 }
 
 fn testPortScanDetection(failed: *u32) u32 {
-    helpers.printTestCategory(6, 9, "Port Scan Detection");
+    helpers.printTestCategory(6, 10, "Port Scan Detection");
     var passed: u32 = 0;
 
     const scanner_ip = net_driver.ipToU32(192, 168, 77, 77);
@@ -1314,7 +1356,7 @@ fn testPortScanDetection(failed: *u32) u32 {
 }
 
 fn testConnectionTracking(failed: *u32) u32 {
-    helpers.printTestCategory(7, 9, "Connection Tracking");
+    helpers.printTestCategory(7, 10, "Connection Tracking");
     var passed: u32 = 0;
 
     const local_ip = net_driver.ipToU32(10, 0, 2, 15);
@@ -1339,7 +1381,7 @@ fn testConnectionTracking(failed: *u32) u32 {
 }
 
 fn testStateMachine(failed: *u32) u32 {
-    helpers.printTestCategory(8, 9, "State Machine");
+    helpers.printTestCategory(8, 10, "State Machine");
     var passed: u32 = 0;
 
     const original_state = firewall.state;
@@ -1392,7 +1434,7 @@ fn testStateMachine(failed: *u32) u32 {
 }
 
 fn testIntegration(failed: *u32) u32 {
-    helpers.printTestCategory(9, 9, "Integration");
+    helpers.printTestCategory(9, 10, "Integration");
     var passed: u32 = 0;
 
     passed += helpers.doTest("Security init", security.isInitialized(), failed);
@@ -1421,7 +1463,6 @@ fn testIntegration(failed: *u32) u32 {
     const new_stats = firewall.getStats();
     passed += helpers.doTest("Stats reset", new_stats.packets_total == 0, failed);
 
-    // E3.4: Net capability integration
     passed += helpers.doTest("NetCap initialized", net_capability.isInitialized(), failed);
 
     const test_result = firewall.filterInbound(
@@ -1433,6 +1474,61 @@ fn testIntegration(failed: *u32) u32 {
         null,
     );
     passed += helpers.doTest("Complete flow", test_result.rule_id > 0, failed);
+
+    return passed;
+}
+
+fn testThreatScoring(failed: *u32) u32 {
+    helpers.printTestCategory(10, 10, "H.8 Threat Scoring");
+    var passed: u32 = 0;
+
+    // Initialize if needed
+    if (!threat_score.isInitialized()) {
+        threat_score.init();
+    }
+
+    passed += helpers.doTest("Engine initialized", threat_score.isInitialized(), failed);
+
+    const ts_stats = threat_score.getStats();
+    passed += helpers.doTest("Stats accessible", ts_stats.total_events >= 0, failed);
+
+    // Test score for non-existent IP should be 0
+    const zero_score = threat_score.getScore(net_driver.ipToU32(1, 1, 1, 1));
+    passed += helpers.doTest("Zero score default", zero_score == 0, failed);
+
+    // Test level for non-existent IP should be normal
+    const normal_level = threat_score.getLevel(net_driver.ipToU32(1, 1, 1, 2));
+    passed += helpers.doTest("Normal level default", normal_level == .normal, failed);
+
+    // Test recording an event
+    const test_ip = net_driver.ipToU32(192, 168, 88, 88);
+    const result = threat_score.recordEvent(test_ip, .port_scan, .medium);
+    passed += helpers.doTest("Record event", result.score > 0, failed);
+
+    // Test getScore returns non-zero for tracked IP
+    const tracked_score = threat_score.getScore(test_ip);
+    passed += helpers.doTest("Score tracked", tracked_score > 0, failed);
+
+    // Test active count
+    const active = threat_score.getActiveCount();
+    passed += helpers.doTest("Active count", active > 0, failed);
+
+    // Test reset score
+    const reset_ok = threat_score.resetScore(test_ip);
+    passed += helpers.doTest("Reset score", reset_ok, failed);
+
+    // After reset, score should be 0
+    const after_reset = threat_score.getScore(test_ip);
+    passed += helpers.doTest("Score is zero", after_reset == 0, failed);
+
+    // Test remove entry
+    _ = threat_score.recordEvent(test_ip, .auth_failure, .low);
+    const removed = threat_score.removeEntry(test_ip);
+    passed += helpers.doTest("Remove entry", removed, failed);
+
+    // After remove, score should be 0
+    const after_remove = threat_score.getScore(test_ip);
+    passed += helpers.doTest("Entry removed", after_remove == 0, failed);
 
     return passed;
 }

@@ -1,10 +1,16 @@
 //! Zamrud OS - Kernel Firewall
 //! Stealth-mode firewall with Zero Trust architecture
 //! Updated: E3.4 Per-Process Network Filtering
+//! Updated: H.8 Threat Scoring Integration
 
 const std = @import("std");
 const serial = @import("../drivers/serial/serial.zig");
 const timer = @import("../drivers/timer/timer.zig");
+
+// ============================================================================
+// H.8 Integration
+// ============================================================================
+const threat_score = @import("../security/threat_score.zig");
 
 // ============================================================================
 // Configuration
@@ -142,7 +148,7 @@ pub const FirewallStats = struct {
     blocked_no_peer: u64 = 0,
     blocked_syn_flood: u64 = 0,
     blocked_port_scan: u64 = 0,
-    blocked_process_cap: u64 = 0, // E3.4
+    blocked_process_cap: u64 = 0,
     connections_total: u64 = 0,
     connections_active: u64 = 0,
     last_reset: u64 = 0,
@@ -646,6 +652,10 @@ pub fn filterInbound(
         if (!rate_result.allowed) {
             stats.packets_dropped += 1;
             stats.blocked_rate_limit += 1;
+
+            // ⭐ H.8 INTEGRATION: Record rate limit violation
+            _ = threat_score.recordEvent(src_ip, .rate_limit_exceeded, .medium);
+
             if (config.auto_blacklist) {
                 recordViolation(src_ip);
             }
@@ -661,6 +671,10 @@ pub fn filterInbound(
             if (!isRegisteredPeerIP(src_ip)) {
                 stats.packets_dropped += 1;
                 stats.blocked_no_peer += 1;
+
+                // ⭐ H.8 INTEGRATION: Record unknown peer
+                _ = threat_score.recordEvent(src_ip, .unknown_peer, .medium);
+
                 return .{ .action = .drop, .rule_id = 0, .reason = "Unknown peer" };
             }
         }
@@ -856,6 +870,8 @@ fn checkRateLimit(ip: u32, protocol: u8) RateLimitResult {
 
     if (e.packets_this_second > config.max_packets_per_second) {
         e.violations += 1;
+        // ⭐ H.8 INTEGRATION: Record rate limit exceeded
+        _ = threat_score.recordEvent(ip, .rate_limit_exceeded, .medium);
         return .{ .allowed = false, .reason = "Rate limit" };
     }
 
@@ -864,12 +880,16 @@ fn checkRateLimit(ip: u32, protocol: u8) RateLimitResult {
         if (e.syn_count > config.syn_flood_threshold) {
             stats.blocked_syn_flood += 1;
             e.violations += 1;
+            // ⭐ H.8 INTEGRATION: Record DoS attack (SYN flood)
+            _ = threat_score.recordEvent(ip, .dos_attack, .high);
             return .{ .allowed = false, .reason = "SYN flood" };
         }
     }
 
     if (e.connections_active > config.max_connections_per_ip) {
         e.violations += 1;
+        // ⭐ H.8 INTEGRATION: Record too many connections
+        _ = threat_score.recordEvent(ip, .rate_limit_exceeded, .medium);
         return .{ .allowed = false, .reason = "Too many connections" };
     }
 
@@ -996,6 +1016,9 @@ pub fn detectPortScan(src_ip: u32, dst_port: u16) bool {
 
     if (t.port_count >= SCAN_THRESHOLD) {
         stats.blocked_port_scan += 1;
+
+        // ⭐ H.8 INTEGRATION: Record port scan
+        _ = threat_score.recordEvent(src_ip, .port_scan, .high);
 
         if (config.log_to_serial) {
             serial.writeString("[FW] Port scan: ");

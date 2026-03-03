@@ -1,11 +1,18 @@
 //! Zamrud OS - Identity Authentication
 //! H.7.1 UPDATED: Dual credential support (Password + optional PIN)
+//! H.8 UPDATED: Threat scoring integration for auth failures
 
 const serial = @import("../drivers/serial/serial.zig");
 const hash = @import("../crypto/hash.zig");
 const crypto = @import("../crypto/crypto.zig");
 const constant_time = @import("../crypto/constant_time.zig");
 const keyring = @import("keyring.zig");
+
+// ============================================================================
+// H.8 Integration
+// ============================================================================
+const threat_score = @import("../security/threat_score.zig");
+const threat_log = @import("../security/threat_log.zig"); // ⭐ TAMBAHKAN INI
 
 // =============================================================================
 // Security Constants
@@ -65,6 +72,9 @@ var lock_timeout: u32 = 300;
 // H.7.1: Track how user unlocked (for UI feedback)
 var last_unlock_method: UnlockMethod = .password;
 
+// H.8: Track source IP for threat scoring (set by caller)
+var current_source_ip: u32 = 0;
+
 // =============================================================================
 // Functions
 // =============================================================================
@@ -80,11 +90,12 @@ pub fn init() void {
     lockout_state = .normal;
     lockout_until = 0;
     last_unlock_method = .password;
+    current_source_ip = 0;
 
     clearPrivateKey();
 
     initialized = true;
-    serial.writeString("[AUTH] Initialized (H.7.1 dual-credential)\n");
+    serial.writeString("[AUTH] Initialized (H.7.1 dual-credential, H.8 threat-scoring)\n");
 }
 
 fn clearPrivateKey() void {
@@ -102,6 +113,11 @@ pub fn isLockedOut() bool {
 
 pub fn getLockoutState() LockoutState {
     return lockout_state;
+}
+
+/// H.8: Set source IP for threat scoring (call before unlock attempts)
+pub fn setSourceIP(ip: u32) void {
+    current_source_ip = ip;
 }
 
 pub fn getRemainingLockout(current_time: u32) u32 {
@@ -129,6 +145,27 @@ fn recordFailure(current_time: u32) void {
     consecutive_failures += 1;
     last_attempt_time = current_time;
 
+    // ⭐ H.8 INTEGRATION: Record auth failure to threat scoring
+    if (current_source_ip != 0) {
+        // Determine severity based on consecutive failures
+        const severity: threat_log.ThreatSeverity = if (consecutive_failures >= LOCKOUT_ATTEMPTS)
+            .critical
+        else if (consecutive_failures >= MAX_ATTEMPTS)
+            .high
+        else if (consecutive_failures >= 3)
+            .medium
+        else
+            .low;
+
+        // Determine event type
+        const event_type: threat_score.EventType = if (consecutive_failures >= 5)
+            .brute_force
+        else
+            .auth_failure;
+
+        _ = threat_score.recordEvent(current_source_ip, event_type, severity);
+    }
+
     if (consecutive_failures >= LOCKOUT_ATTEMPTS) {
         lockout_state = .hard_lock;
         serial.writeString("[AUTH] LOCKED - Too many failures. Use seed phrase to recover.\n");
@@ -143,6 +180,7 @@ fn recordSuccess() void {
     consecutive_failures = 0;
     lockout_state = .normal;
     lockout_until = 0;
+    // Note: Don't reset source_ip here - might be needed for session tracking
 }
 
 /// Unlock identity with credential (auto-detects PIN or password)
@@ -154,6 +192,12 @@ pub fn unlock(name: []const u8, credential: []const u8) bool {
 
     if (lockout_state == .hard_lock) {
         serial.writeString("[AUTH] Account locked. Use seed phrase to recover.\n");
+
+        // ⭐ H.8: Record attempt while locked (likely attack)
+        if (current_source_ip != 0) {
+            _ = threat_score.recordEvent(current_source_ip, .brute_force, .high);
+        }
+
         return false;
     }
 
@@ -218,6 +262,10 @@ pub fn unlockWithPin(name: []const u8, pin: []const u8) bool {
     auth_attempts += 1;
 
     if (lockout_state != .normal) {
+        // ⭐ H.8: Record attempt while locked
+        if (current_source_ip != 0) {
+            _ = threat_score.recordEvent(current_source_ip, .brute_force, .high);
+        }
         return false;
     }
 
@@ -255,6 +303,10 @@ pub fn unlockWithPassword(name: []const u8, password: []const u8) bool {
     auth_attempts += 1;
 
     if (lockout_state != .normal) {
+        // ⭐ H.8: Record attempt while locked
+        if (current_source_ip != 0) {
+            _ = threat_score.recordEvent(current_source_ip, .brute_force, .high);
+        }
         return false;
     }
 
@@ -454,7 +506,7 @@ pub fn getCredentialStrength(credential: []const u8) u8 {
 // =============================================================================
 
 pub fn test_auth() bool {
-    serial.writeString("\n=== Auth Test (H.7.1 Dual Credential) ===\n");
+    serial.writeString("\n=== Auth Test (H.7.1 Dual Credential + H.8) ===\n");
 
     var passed: u32 = 0;
     var failed: u32 = 0;
@@ -473,8 +525,19 @@ pub fn test_auth() bool {
         failed += 1;
     }
 
-    // Test 2: Unlock with password
-    serial.writeString("  Test 2: Unlock with password\n");
+    // Test 2: Set source IP for H.8
+    serial.writeString("  Test 2: Set source IP (H.8)\n");
+    setSourceIP(0xC0A80101); // 192.168.1.1
+    if (current_source_ip == 0xC0A80101) {
+        serial.writeString("    OK\n");
+        passed += 1;
+    } else {
+        serial.writeString("    FAIL\n");
+        failed += 1;
+    }
+
+    // Test 3: Unlock with password
+    serial.writeString("  Test 3: Unlock with password\n");
     if (unlock("testuser", "SecurePass1")) {
         serial.writeString("    OK\n");
         passed += 1;
@@ -483,8 +546,8 @@ pub fn test_auth() bool {
         failed += 1;
     }
 
-    // Test 3: Last unlock method is password
-    serial.writeString("  Test 3: Unlock method = password\n");
+    // Test 4: Last unlock method is password
+    serial.writeString("  Test 4: Unlock method = password\n");
     if (getLastUnlockMethod() == .password) {
         serial.writeString("    OK\n");
         passed += 1;
@@ -493,8 +556,8 @@ pub fn test_auth() bool {
         failed += 1;
     }
 
-    // Test 4: Setup PIN
-    serial.writeString("  Test 4: Setup PIN\n");
+    // Test 5: Setup PIN
+    serial.writeString("  Test 5: Setup PIN\n");
     if (setupPin("SecurePass1", "1234")) {
         serial.writeString("    OK\n");
         passed += 1;
@@ -503,8 +566,8 @@ pub fn test_auth() bool {
         failed += 1;
     }
 
-    // Test 5: hasPinConfigured
-    serial.writeString("  Test 5: hasPinConfigured\n");
+    // Test 6: hasPinConfigured
+    serial.writeString("  Test 6: hasPinConfigured\n");
     if (hasPinConfigured()) {
         serial.writeString("    OK\n");
         passed += 1;
@@ -513,8 +576,8 @@ pub fn test_auth() bool {
         failed += 1;
     }
 
-    // Test 6: Lock
-    serial.writeString("  Test 6: Lock\n");
+    // Test 7: Lock
+    serial.writeString("  Test 7: Lock\n");
     lock();
     if (!isUnlocked()) {
         serial.writeString("    OK\n");
@@ -524,8 +587,8 @@ pub fn test_auth() bool {
         failed += 1;
     }
 
-    // Test 7: Unlock with PIN
-    serial.writeString("  Test 7: Unlock with PIN\n");
+    // Test 8: Unlock with PIN
+    serial.writeString("  Test 8: Unlock with PIN\n");
     if (unlock("testuser", "1234")) {
         serial.writeString("    OK\n");
         passed += 1;
@@ -534,8 +597,8 @@ pub fn test_auth() bool {
         failed += 1;
     }
 
-    // Test 8: Last unlock method is PIN
-    serial.writeString("  Test 8: Unlock method = PIN\n");
+    // Test 9: Last unlock method is PIN
+    serial.writeString("  Test 9: Unlock method = PIN\n");
     if (getLastUnlockMethod() == .pin) {
         serial.writeString("    OK\n");
         passed += 1;
@@ -544,11 +607,11 @@ pub fn test_auth() bool {
         failed += 1;
     }
 
-    // Test 9: Lock again
+    // Test 10: Lock again
     lock();
 
-    // Test 10: Password still works
-    serial.writeString("  Test 9: Password still works\n");
+    // Test 11: Password still works
+    serial.writeString("  Test 10: Password still works\n");
     if (unlock("testuser", "SecurePass1")) {
         serial.writeString("    OK\n");
         passed += 1;
@@ -557,8 +620,8 @@ pub fn test_auth() bool {
         failed += 1;
     }
 
-    // Test 11: Remove PIN
-    serial.writeString("  Test 10: Remove PIN\n");
+    // Test 12: Remove PIN
+    serial.writeString("  Test 11: Remove PIN\n");
     if (removePin("SecurePass1") and !hasPinConfigured()) {
         serial.writeString("    OK\n");
         passed += 1;
@@ -567,7 +630,21 @@ pub fn test_auth() bool {
         failed += 1;
     }
 
-    serial.writeString("  AUTH: ");
+    // Test 13: H.8 auth failure recording
+    serial.writeString("  Test 12: H.8 auth failure (bad password)\n");
+    lock();
+    setSourceIP(0xC0A80102); // Different IP
+    const before_failures = auth_failures;
+    _ = unlock("testuser", "WrongPassword");
+    if (auth_failures == before_failures + 1) {
+        serial.writeString("    OK (failure recorded)\n");
+        passed += 1;
+    } else {
+        serial.writeString("    FAIL\n");
+        failed += 1;
+    }
+
+    serial.writeString("  AUTH (H.7.1+H.8): ");
     printU32(passed);
     serial.writeString("/");
     printU32(passed + failed);
