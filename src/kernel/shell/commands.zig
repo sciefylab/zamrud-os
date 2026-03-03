@@ -35,6 +35,7 @@ const zam_cmd = @import("commands/zam.zig");
 const mouse_cmd = @import("commands/mouse.zig");
 const sanitize_cmd = @import("commands/sanitize.zig");
 const ceremony_cmd = @import("commands/ceremony.zig");
+const acpi_cmd = @import("commands/acpi.zig");
 
 // =============================================================================
 // Command Execution
@@ -373,6 +374,11 @@ pub fn execute(input: []const u8) void {
         _ = ceremony_cmd.execute(args);
     } else if (helpers.strEql(command, "trustsetup")) {
         _ = ceremony_cmd.execute("run");
+    }
+
+    // B2.6 ACPI
+    else if (helpers.strEql(command, "acpi")) {
+        acpi_cmd.execute(args);
     }
 
     // Test all

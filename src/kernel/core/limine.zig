@@ -133,4 +133,63 @@ pub const VideoMode = extern struct {
     blue_mask_shift: u8,
 };
 
-// check point 8 scheduller
+// ============================================================================
+// RSDP Request (ACPI Root System Description Pointer)
+// ============================================================================
+
+pub const RsdpRequest = extern struct {
+    id: [4]u64 = .{
+        0xc7b1dd30df4c8b88,
+        0x0a82e883a194f07b,
+        0xc5e77b6b397e7b43,
+        0x27637845accdcf3c,
+    },
+    revision: u64 = 0,
+    response: ?*RsdpResponse = null,
+};
+
+pub const RsdpResponse = extern struct {
+    revision: u64,
+    address: u64, // Physical address of RSDP
+};
+
+// ============================================================================
+// Boot Time Request
+// ============================================================================
+
+pub const BootTimeRequest = extern struct {
+    id: [4]u64 = .{
+        0xc7b1dd30df4c8b88,
+        0x0a82e883a194f07b,
+        0x502746e184c088aa,
+        0xfbc5ec83e6327893,
+    },
+    revision: u64 = 0,
+    response: ?*BootTimeResponse = null,
+};
+
+pub const BootTimeResponse = extern struct {
+    revision: u64,
+    boot_time: i64, // UNIX timestamp
+};
+
+// ============================================================================
+// Kernel Address Request
+// ============================================================================
+
+pub const KernelAddressRequest = extern struct {
+    id: [4]u64 = .{
+        0xc7b1dd30df4c8b88,
+        0x0a82e883a194f07b,
+        0x71ba76863cc55f63,
+        0xb2644a48c516a487,
+    },
+    revision: u64 = 0,
+    response: ?*KernelAddressResponse = null,
+};
+
+pub const KernelAddressResponse = extern struct {
+    revision: u64,
+    physical_base: u64,
+    virtual_base: u64,
+};

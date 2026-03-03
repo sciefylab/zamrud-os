@@ -1,5 +1,6 @@
 //! Zamrud OS - Power Commands
 //! System power management: reboot, shutdown, exit
+//! Now with ACPI support!
 
 const helpers = @import("helpers.zig");
 const shell = @import("../shell.zig");
@@ -7,13 +8,7 @@ const serial = @import("../../drivers/serial/serial.zig");
 const terminal = @import("../../drivers/display/terminal.zig");
 const timer = @import("../../drivers/timer/timer.zig");
 const cpu = @import("../../core/cpu.zig");
-
-// =============================================================================
-// Triple fault support
-// =============================================================================
-
-/// Null IDT descriptor for triple fault reboot
-var null_idt_desc: [10]u8 align(2) = [_]u8{0} ** 10;
+const acpi = @import("../../drivers/acpi/acpi.zig");
 
 // =============================================================================
 // Command Entry Points
@@ -36,6 +31,14 @@ pub fn reboot() void {
     shell.println("  Stopping services...");
     timer.sleep(500);
 
+    // Show which method will be used
+    if (acpi.isACPIEnabled()) {
+        shell.println("  Using ACPI reset register...");
+    } else {
+        shell.println("  Using keyboard controller reset...");
+    }
+    timer.sleep(500);
+
     shell.println("  Rebooting in 1 second...");
     timer.sleep(1000);
 
@@ -44,53 +47,10 @@ pub fn reboot() void {
     // Disable interrupts
     cpu.cli();
 
-    // Method 1: Keyboard controller reset (0xFE to port 0x64)
-    // Wait for controller input buffer to be empty
-    var timeout: u32 = 0;
-    while (timeout < 10000) : (timeout += 1) {
-        const status = asm volatile ("inb $0x64, %%al"
-            : [ret] "={al}" (-> u8),
-        );
-        if ((status & 0x02) == 0) break;
-    }
+    // Use ACPI reboot
+    acpi.reboot();
 
-    // Send reset command
-    asm volatile ("outb %%al, $0x64"
-        :
-        : [cmd] "{al}" (@as(u8, 0xFE)),
-    );
-
-    // Wait for reset to take effect
-    var i: u32 = 0;
-    while (i < 10000000) : (i += 1) {
-        asm volatile ("nop");
-    }
-
-    // Method 2: Triple fault via null IDT
-    // Load a zero-length IDT so any interrupt causes triple fault -> reset
-    null_idt_desc = [_]u8{0} ** 10;
-    asm volatile ("lidt (%[idt])"
-        :
-        : [idt] "r" (&null_idt_desc),
-    );
-
-    // Trigger interrupt with null IDT -> triple fault -> CPU reset
-    asm volatile ("int $3");
-
-    // Method 3: QEMU debug exit (if isa-debug-exit device present at 0xF4)
-    asm volatile ("outl %%eax, %%dx"
-        :
-        : [val] "{eax}" (@as(u32, 0x01)),
-          [port] "{dx}" (@as(u16, 0xF4)),
-    );
-
-    // Method 4: Fast A20 gate reset (port 0x92)
-    asm volatile ("outb %%al, $0x92"
-        :
-        : [cmd] "{al}" (@as(u8, 0x01)),
-    );
-
-    // If all methods failed, halt
+    // Should not reach here
     cpu.halt();
 }
 
@@ -111,6 +71,14 @@ pub fn shutdown() void {
     shell.println("  Stopping services...");
     timer.sleep(500);
 
+    // Show which method will be used
+    if (acpi.isACPIEnabled()) {
+        shell.println("  Using ACPI S5 sleep state...");
+    } else {
+        shell.println("  Using QEMU shutdown port...");
+    }
+    timer.sleep(500);
+
     shell.println("  Halting system...");
     timer.sleep(500);
 
@@ -121,7 +89,6 @@ pub fn shutdown() void {
         terminal.setColors(terminal.Colors.WHITE, terminal.Colors.BLACK);
         terminal.clear();
 
-        // Center the message
         const msg1 = "Zamrud OS";
         const msg2 = "System halted.";
         const msg3 = "It is now safe to turn off your computer.";
@@ -149,28 +116,10 @@ pub fn shutdown() void {
     // Disable interrupts
     cpu.cli();
 
-    // Method 1: QEMU ACPI shutdown (port 0x604, value 0x2000)
-    asm volatile ("outw %%ax, %%dx"
-        :
-        : [val] "{ax}" (@as(u16, 0x2000)),
-          [port] "{dx}" (@as(u16, 0x604)),
-    );
+    // Use ACPI shutdown
+    acpi.shutdown();
 
-    // Method 2: QEMU debug exit (if isa-debug-exit device present)
-    asm volatile ("outl %%eax, %%dx"
-        :
-        : [val] "{eax}" (@as(u32, 0x00)),
-          [port] "{dx}" (@as(u16, 0xF4)),
-    );
-
-    // Method 3: Bochs/older QEMU shutdown (port 0xB004)
-    asm volatile ("outw %%ax, %%dx"
-        :
-        : [val] "{ax}" (@as(u16, 0x2000)),
-          [port] "{dx}" (@as(u16, 0xB004)),
-    );
-
-    // Halt the CPU in a loop
+    // Should not reach here, but halt anyway
     while (true) {
         cpu.halt();
     }
@@ -199,15 +148,31 @@ pub fn showHelp() void {
     shell.println("  exit      Exit the shell");
     shell.newLine();
 
+    shell.println("ACPI Status:");
+    if (acpi.isACPIEnabled()) {
+        shell.printSuccessLine("  ACPI: Enabled");
+        shell.print("  Revision: ");
+        if (acpi.getRevision() == 0) {
+            shell.println("1.0");
+        } else {
+            shell.println("2.0+");
+        }
+        shell.print("  Tables found: ");
+        helpers.printUsize(acpi.getTablesFound());
+        shell.newLine();
+    } else {
+        shell.printWarningLine("  ACPI: Not available (using fallback)");
+    }
+    shell.newLine();
+
     shell.println("Notes:");
-    shell.println("  - Reboot performs a CPU reset");
-    shell.println("  - Shutdown halts the CPU");
-    shell.println("  - On VM, shutdown may just halt");
-    shell.println("  - Exit returns control to kernel");
+    shell.println("  - Shutdown uses ACPI S5 state (if available)");
+    shell.println("  - Reboot uses ACPI reset register (if available)");
+    shell.println("  - Falls back to keyboard controller / QEMU ports");
     shell.newLine();
 }
 
-/// Handle power-related subcommands (for extensibility)
+/// Handle power-related subcommands
 pub fn execute(args: []const u8) void {
     const trimmed = helpers.trim(args);
 
@@ -215,8 +180,9 @@ pub fn execute(args: []const u8) void {
         showHelp();
     } else if (helpers.strEql(trimmed, "status")) {
         showPowerStatus();
+    } else if (helpers.strEql(trimmed, "acpi")) {
+        showACPIInfo();
     } else if (helpers.strEql(trimmed, "sleep")) {
-        // Future: implement sleep mode
         shell.printWarningLine("Sleep mode not yet implemented");
     } else {
         shell.printError("power: unknown subcommand '");
@@ -231,7 +197,11 @@ fn showPowerStatus() void {
     shell.printInfoLine("========================================");
     shell.newLine();
 
-    shell.println("  Power Source:   Unknown (no ACPI)");
+    if (acpi.isACPIEnabled()) {
+        shell.println("  Power Source:   ACPI");
+    } else {
+        shell.println("  Power Source:   Unknown (no ACPI)");
+    }
     shell.println("  Battery:        N/A");
     shell.println("  CPU State:      Running");
     shell.println("  Thermal:        Unknown");
@@ -245,5 +215,48 @@ fn showPowerStatus() void {
     helpers.printUsize(@intCast(timer.getTicks() & 0xFFFFFFFF));
     shell.newLine();
 
+    shell.newLine();
+}
+
+fn showACPIInfo() void {
+    shell.printInfoLine("========================================");
+    shell.printInfoLine("  ACPI INFORMATION");
+    shell.printInfoLine("========================================");
+    shell.newLine();
+
+    if (!acpi.isInitialized()) {
+        shell.printWarningLine("  ACPI not initialized");
+        return;
+    }
+
+    shell.print("  Initialized:    ");
+    if (acpi.isACPIEnabled()) {
+        shell.printSuccessLine("Yes");
+    } else {
+        shell.printWarningLine("No (fallback mode)");
+    }
+
+    shell.print("  ACPI Revision:  ");
+    if (acpi.getRevision() == 0) {
+        shell.println("1.0");
+    } else {
+        shell.println("2.0+");
+    }
+
+    shell.print("  Tables Found:   ");
+    helpers.printUsize(acpi.getTablesFound());
+    shell.newLine();
+
+    shell.print("  PM1a_CNT:       0x");
+    helpers.printHex32(acpi.getPM1aControlBlock());
+    shell.newLine();
+
+    shell.print("  SLP_TYPa:       ");
+    helpers.printUsize(acpi.getSleepTypeA());
+    shell.newLine();
+
+    shell.newLine();
+    shell.println("  Shutdown: Uses ACPI S5 state");
+    shell.println("  Reboot:   Uses ACPI reset register");
     shell.newLine();
 }

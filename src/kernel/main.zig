@@ -90,6 +90,8 @@ const loader = @import("loader/loader.zig");
 // H.7: Trust Ceremony
 const trust_ceremony = @import("boot/trust_ceremony.zig");
 
+const acpi = @import("drivers/acpi/acpi.zig");
+
 // ============================================================================
 // Limine Requests
 // ============================================================================
@@ -180,6 +182,10 @@ export fn kernel_main() noreturn {
 
     vmm.init();
     serial.writeString("[OK]   VMM initialized\n");
+
+    // Initialize ACPI (setelah PMM dan VMM)
+    _ = acpi.init();
+    serial.writeString("[OK]   ACPI initialized\n");
 
     heap.init();
     serial.writeString("[OK]   Heap initialized\n");
