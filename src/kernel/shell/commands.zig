@@ -36,6 +36,7 @@ const mouse_cmd = @import("commands/mouse.zig");
 const sanitize_cmd = @import("commands/sanitize.zig");
 const ceremony_cmd = @import("commands/ceremony.zig");
 const acpi_cmd = @import("commands/acpi.zig");
+const date_cmd = @import("commands/date.zig");
 
 // =============================================================================
 // Command Execution
@@ -379,6 +380,17 @@ pub fn execute(input: []const u8) void {
     // B2.6 ACPI
     else if (helpers.strEql(command, "acpi")) {
         acpi_cmd.execute(args);
+    }
+
+    // Date/Time
+    else if (helpers.strEql(command, "date")) {
+        date_cmd.executeDate(args);
+    } else if (helpers.strEql(command, "time")) {
+        date_cmd.executeTime(args);
+    } else if (helpers.strEql(command, "clock")) {
+        date_cmd.executeClock(args);
+    } else if (helpers.strEql(command, "uptime")) {
+        date_cmd.executeUptime(args);
     }
 
     // Test all

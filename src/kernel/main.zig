@@ -92,6 +92,8 @@ const trust_ceremony = @import("boot/trust_ceremony.zig");
 
 const acpi = @import("drivers/acpi/acpi.zig");
 
+const rtc = @import("drivers/timer/rtc.zig");
+
 // ============================================================================
 // Limine Requests
 // ============================================================================
@@ -164,6 +166,10 @@ export fn kernel_main() noreturn {
     serial.writeString("[INIT] Timer...\n");
     timer.init();
     serial.writeString("[OK]   Timer ready\n");
+
+    serial.writeString("[INIT] RTC...\n");
+    rtc.init();
+    serial.writeString("[OK]   RTC ready\n");
 
     fixupPS2Config();
 

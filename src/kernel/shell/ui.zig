@@ -1,10 +1,12 @@
 //! Zamrud OS - Shell UI Components
 //! Professional terminal interface with Zamrud Emerald Forest theme
 //! T3: Fixed cursor positioning — all text-based rendering
+//! B2.7: Added RTC date/time display in status bar
 
 const terminal = @import("../drivers/display/terminal.zig");
 const serial = @import("../drivers/serial/serial.zig");
 const timer = @import("../drivers/timer/timer.zig");
+const rtc = @import("../drivers/timer/rtc.zig");
 const heap = @import("../mm/heap.zig");
 const identity = @import("../identity/identity.zig");
 const boot_verify = @import("../boot/verify.zig");
@@ -352,6 +354,43 @@ pub fn drawStatusBar() void {
         writeStr("--");
     }
 
+    // Center: Date/Time (B2.7)
+    if (screen_width > 80 and rtc.isInitialized()) {
+        const dt = rtc.now();
+
+        // Position in center
+        const center_pos = screen_width / 2 - 10;
+        terminal.setCursor(center_pos, 0);
+
+        terminal.setFgColor(current_theme.text_info);
+
+        // Format: HH:MM:SS
+        if (dt.hour < 10) terminal.writeChar('0');
+        writeNumber(dt.hour);
+        terminal.writeChar(':');
+        if (dt.minute < 10) terminal.writeChar('0');
+        writeNumber(dt.minute);
+        terminal.writeChar(':');
+        if (dt.second < 10) terminal.writeChar('0');
+        writeNumber(dt.second);
+
+        terminal.setFgColor(current_theme.text_dim);
+        writeStr(" | ");
+
+        terminal.setFgColor(current_theme.status_fg);
+
+        // Format: DD Mon YYYY
+        if (dt.day < 10) terminal.writeChar('0');
+        writeNumber(dt.day);
+        terminal.writeChar(' ');
+
+        // Short month name
+        const month_short = getMonthShort(dt.month);
+        writeStr(month_short);
+        terminal.writeChar(' ');
+        writeNumber(dt.year);
+    }
+
     // Right side
     if (screen_width > 60) {
         terminal.setCursor(screen_width - 40, 0);
@@ -405,6 +444,28 @@ pub fn drawStatusBar() void {
     terminal.setFgColor(current_theme.text_normal);
     terminal.setBold(false);
     terminal.setCursor(saved_col, saved_row);
+}
+
+// =============================================================================
+// Helper: Short month name
+// =============================================================================
+
+fn getMonthShort(month: u8) []const u8 {
+    return switch (month) {
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
+        else => "???",
+    };
 }
 
 // =============================================================================

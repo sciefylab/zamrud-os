@@ -1,6 +1,7 @@
 //! Zamrud OS - Enhanced Professional Shell (T3 + T4.2 + T4.3 + T5.1 + H.7)
 //! Full readline-style line editing with login, env vars, I/O redirection
 //! H.7 FIX: Proper login gate, identity loading, system key management
+//! FIX: Keyboard buffer cleared after login to prevent ghost characters
 
 const serial = @import("../drivers/serial/serial.zig");
 const terminal = @import("../drivers/display/terminal.zig");
@@ -20,6 +21,7 @@ const config_store = @import("../persist/config_store.zig");
 const trust_ceremony = @import("../boot/trust_ceremony.zig");
 const sys_encrypt = @import("../crypto/sys_encrypt.zig");
 const auth = @import("../identity/auth.zig");
+const rtc = @import("../drivers/timer/rtc.zig");
 
 // =============================================================================
 // Constants
@@ -175,6 +177,7 @@ pub fn run() void {
 
     // End keyboard grace period — shell is ready for input
     keyboard.endGracePeriod();
+
     // H.7 FIX: Use mustRequireLogin() instead of hasAnyUsers()
     login_required = mustRequireLogin();
 
@@ -458,6 +461,9 @@ fn autoLoginDefault() void {
     const home_path = home_dir[0..home_dir_len];
     env.setLoginVars(default_name, home_path);
 
+    // FIX: Clear keyboard buffer after auto-login
+    keyboard.clearBuffer();
+
     const theme = ui.getTheme();
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_dim);
@@ -523,6 +529,9 @@ fn loginPrompt() void {
             continue;
         }
 
+        // FIX: Clear keyboard buffer before username prompt
+        keyboard.clearBuffer();
+
         // Username prompt
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_normal);
@@ -584,6 +593,9 @@ fn loginPrompt() void {
 
         // Password prompt (if needed)
         if (needs_password) {
+            // FIX: Clear keyboard buffer before password prompt
+            keyboard.clearBuffer();
+
             printDirect("Password: ");
 
             var password_buf: [64]u8 = [_]u8{0} ** 64;
@@ -645,6 +657,9 @@ fn loginPrompt() void {
                     password_buf[i] = 0;
                 }
 
+                // FIX: Clear keyboard buffer after successful auth
+                keyboard.clearBuffer();
+
                 loginSuccess(current_user[0..current_user_len]);
                 return;
             } else {
@@ -678,6 +693,9 @@ fn loginPrompt() void {
             // For PIN identity, still need to verify
             if (identity.getIdentity(username)) |id| {
                 if (id.credential_type == .pin) {
+                    // FIX: Clear keyboard buffer before PIN prompt
+                    keyboard.clearBuffer();
+
                     // Prompt for PIN
                     printDirect("PIN: ");
 
@@ -727,6 +745,10 @@ fn loginPrompt() void {
                     if (auth.unlock(username, pin_buf[0..pin_len])) {
                         i = 0;
                         while (i < 16) : (i += 1) pin_buf[i] = 0;
+
+                        // FIX: Clear keyboard buffer after successful PIN auth
+                        keyboard.clearBuffer();
+
                         loginSuccess(current_user[0..current_user_len]);
                         return;
                     } else {
@@ -750,6 +772,10 @@ fn loginPrompt() void {
             if (users.isInitialized()) {
                 _ = users.login(username, "");
             }
+
+            // FIX: Clear keyboard buffer after legacy login
+            keyboard.clearBuffer();
+
             loginSuccess(current_user[0..current_user_len]);
             return;
         }
@@ -812,6 +838,9 @@ fn loginSuccess(username: []const u8) void {
     logged_in = true;
     setupHomeDir(username);
 
+    // FIX: Clear keyboard buffer to prevent ghost characters after login
+    keyboard.clearBuffer();
+
     const home_path = home_dir[0..home_dir_len];
     env.setLoginVars(username, home_path);
 
@@ -824,6 +853,23 @@ fn loginSuccess(username: []const u8) void {
         terminal.setFgColor(theme.text_dim);
         printDirect("Home: ");
         println(home_path);
+
+        // Show current date/time
+        if (rtc.isInitialized()) {
+            const dt = rtc.now();
+            var buf: [19]u8 = undefined;
+            const len = dt.format(&buf);
+
+            terminal.setFgColor(theme.text_dim);
+            printDirect("Date: ");
+            printDirect(dt.weekdayName());
+            printDirect(", ");
+            printDirect(buf[0..len]);
+            printDirect(" ");
+            printDirect(rtc.getTimezoneName());
+            newLineDirect();
+        }
+
         terminal.setFgColor(theme.text_normal);
         newLine();
     }
@@ -898,6 +944,9 @@ pub fn logout() void {
 
     logged_in = false;
 
+    // FIX: Clear keyboard buffer on logout
+    keyboard.clearBuffer();
+
     if (!login_required) {
         autoLoginDefault();
         return;
@@ -921,6 +970,9 @@ pub fn setLastExitSuccess(success: bool) void {
 // =============================================================================
 
 fn shellLoop() void {
+    // FIX: Clear any leftover keys before starting shell loop
+    clearInputBuffer();
+
     while (running and logged_in) {
         ui.drawStatusBar();
 
@@ -1537,6 +1589,7 @@ fn findCommandCompletions(prefix: []const u8) void {
         "test-fs",  "test-syscall", "login",   "id",       "su",
         "sudo",     "sudoend",      "user",    "usertest", "set",
         "unset",    "env",          "export",  "printenv", "ceremony",
+        "acpi",
     };
     for (cmds) |cmd| {
         if (startsWith(cmd, prefix) and completion_count < TAB_COMPLETE_MAX) {

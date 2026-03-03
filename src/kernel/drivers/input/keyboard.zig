@@ -696,6 +696,58 @@ fn handleE0Scancode(scancode: u8) void {
     }
 }
 
+// =============================================================================
+// Buffer Clear (Public) - Software + Hardware flush
+// =============================================================================
+
+/// Clear the key buffer AND flush hardware - call after password input
+pub fn clearBuffer() void {
+    // Clear software buffer
+    buffer_head = 0;
+    buffer_tail = 0;
+
+    // Reset prefix state
+    e0_prefix = false;
+
+    // Flush hardware keyboard buffer (read and discard all pending bytes)
+    var flush_count: u32 = 0;
+    while (flush_count < 32) : (flush_count += 1) {
+        const status = cpu.inb(STATUS_PORT);
+        if ((status & 0x01) == 0) break; // No more data
+        _ = cpu.inb(DATA_PORT); // Discard
+    }
+
+    if (flush_count > 0) {
+        serial.writeString("[KB] Flushed ");
+        printHex(@intCast(flush_count));
+        serial.writeString(" bytes\n");
+    }
+}
+
+/// Flush with delay to catch late keypresses
+pub fn clearBufferWithDelay() void {
+    // First flush
+    clearBuffer();
+
+    // Small busy-wait delay
+    var delay: u32 = 0;
+    while (delay < 50000) : (delay += 1) {
+        asm volatile ("pause");
+    }
+
+    // Second flush
+    var flush_count: u32 = 0;
+    while (flush_count < 32) : (flush_count += 1) {
+        const status = cpu.inb(STATUS_PORT);
+        if ((status & 0x01) == 0) break;
+        _ = cpu.inb(DATA_PORT);
+    }
+
+    // Clear software buffer again
+    buffer_head = 0;
+    buffer_tail = 0;
+}
+
 // ============================================================================
 // Debug
 // ============================================================================

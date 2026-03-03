@@ -299,7 +299,7 @@ pub fn init() bool {
 
     initialized = true;
 
-    serial.writeString("[ACPI] ═══════════════════════════════\n");
+    serial.writeString("[ACPI] ================═════\n");
     serial.writeString("[ACPI] ACPI initialized successfully!\n");
     serial.writeString("[ACPI] Revision: ");
     if (acpi_revision == 0) {
@@ -316,7 +316,7 @@ pub fn init() bool {
         serial.writeString("FALLBACK");
     }
     serial.writeString("\n");
-    serial.writeString("[ACPI] ═══════════════════════════════\n");
+    serial.writeString("[ACPI] ================═════\n");
 
     return true;
 }
@@ -850,9 +850,9 @@ fn parseDSDT(fadt_virt: u64, fadt_len: u32) void {
 // ============================================================================
 
 pub fn shutdown() void {
-    serial.writeString("[ACPI] ══════════════════════════\n");
+    serial.writeString("[ACPI] ------------------------\n");
     serial.writeString("[ACPI] Initiating SHUTDOWN...\n");
-    serial.writeString("[ACPI] ══════════════════════════\n");
+    serial.writeString("[ACPI] ------------------------\n");
 
     if (acpi_enabled and pm1a_control_block != 0) {
         // ACPI S5 shutdown
@@ -889,9 +889,9 @@ pub fn shutdown() void {
 // ============================================================================
 
 pub fn reboot() void {
-    serial.writeString("[ACPI] ══════════════════════════\n");
+    serial.writeString("[ACPI] ================\n");
     serial.writeString("[ACPI] Initiating REBOOT...\n");
-    serial.writeString("[ACPI] ══════════════════════════\n");
+    serial.writeString("[ACPI] ================\n");
 
     // Method 1: ACPI reset register
     if (acpi_enabled and has_reset_reg) {
