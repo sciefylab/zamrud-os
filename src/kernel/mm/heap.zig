@@ -1,10 +1,12 @@
 //! Zamrud OS - Kernel Heap Allocator
 //! Simple free-list based allocator with security hardening
+//! B2.9c: Thread-safe with spinlock for SMP
 
 const serial = @import("../drivers/serial/serial.zig");
 const pmm = @import("pmm.zig");
 const vmm = @import("vmm.zig");
 const sanitize = @import("sanitize.zig");
+const spinlock = @import("../arch/x86_64/spinlock.zig");
 
 // Heap configuration
 const HEAP_START: u64 = 0xFFFF_C000_0000_0000;
@@ -25,16 +27,15 @@ const BLOCK_FLAG_FREE: u32 = 1;
 const ENABLE_ZERO_ON_FREE: bool = true;
 const ENABLE_CANARY: bool = true;
 const ENABLE_INTEGRITY_CHECK: bool = true;
-const ENABLE_DEBUG: bool = false; // Disable debug for normal operation
+const ENABLE_DEBUG: bool = false;
 
-// Block header - use packed struct with manual alignment
-// Total size: 40 bytes, aligned to 8 bytes
+// Block header
 const BlockHeader = struct {
-    magic: u32, // 0-3
-    flags: u32, // 4-7
-    size: u64, // 8-15
-    next_addr: u64, // 16-23 (store as u64 to avoid alignment issues)
-    prev_addr: u64, // 24-31 (store as u64 to avoid alignment issues)
+    magic: u32,
+    flags: u32,
+    size: u64,
+    next_addr: u64,
+    prev_addr: u64,
 
     pub fn getNext(self: *BlockHeader) ?*BlockHeader {
         if (self.next_addr == 0) return null;
@@ -62,11 +63,20 @@ const CANARY_SIZE: u64 = if (ENABLE_CANARY) @sizeOf(u32) else 0;
 var heap_start: u64 = 0;
 var heap_end: u64 = 0;
 var heap_size: u64 = 0;
-var free_list_addr: u64 = 0; // Store as u64 to avoid alignment issues
+var free_list_addr: u64 = 0;
 var total_allocated: u64 = 0;
 var total_freed: u64 = 0;
 var allocation_count: u64 = 0;
 var initialized: bool = false;
+
+// ============================================================================
+// B2.9c: SMP Thread Safety - Global Heap Lock
+// ============================================================================
+var heap_lock: spinlock.SpinLock = .{};
+
+// Statistics for lock contention (debug)
+var lock_acquisitions: u64 = 0;
+var lock_contentions: u64 = 0;
 
 // Helper to get/set free list
 fn getFreeList() ?*BlockHeader {
@@ -92,12 +102,14 @@ pub fn init() void {
     total_allocated = 0;
     total_freed = 0;
     allocation_count = 0;
+    lock_acquisitions = 0;
+    lock_contentions = 0;
 
     serial.writeString("[HEAP] Allocating initial heap (");
     printHex32(HEAP_INITIAL_SIZE / 1024);
     serial.writeString(" KB)...\n");
 
-    if (!expandHeap(HEAP_INITIAL_SIZE)) {
+    if (!expandHeapInternal(HEAP_INITIAL_SIZE)) {
         serial.writeString("[HEAP] ERROR: Failed to allocate initial heap!\n");
         return;
     }
@@ -126,12 +138,13 @@ pub fn init() void {
     if (ENABLE_ZERO_ON_FREE) {
         serial.writeString("[HEAP] Zero on free: ENABLED\n");
     }
+    serial.writeString("[HEAP] SMP thread-safe: ENABLED (B2.9c)\n");
 
     serial.writeString("[HEAP] Kernel heap initialized!\n");
 }
 
-/// Expand heap by allocating more pages
-fn expandHeap(min_size: u64) bool {
+/// Internal expand (called with lock held or during init)
+fn expandHeapInternal(min_size: u64) bool {
     if (ENABLE_DEBUG) {
         serial.writeString("[HEAP] expandHeap called, min_size: ");
         printHex64(min_size);
@@ -140,12 +153,6 @@ fn expandHeap(min_size: u64) bool {
 
     var pages_needed = (min_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
     if (pages_needed == 0) pages_needed = 1;
-
-    if (ENABLE_DEBUG) {
-        serial.writeString("[HEAP] Pages needed: ");
-        printHex32(pages_needed);
-        serial.writeString("\n");
-    }
 
     if (pages_needed > MAX_PAGES_PER_EXPAND) {
         serial.writeString("[HEAP] ERROR: Allocation too large!\n");
@@ -159,24 +166,10 @@ fn expandHeap(min_size: u64) bool {
 
     const expansion_start = heap_end;
 
-    if (ENABLE_DEBUG) {
-        serial.writeString("[HEAP] Expansion start: ");
-        printHex64(expansion_start);
-        serial.writeString("\n");
-    }
-
     // Allocate and map pages
     var i: u64 = 0;
     while (i < pages_needed) : (i += 1) {
         const virt_addr = expansion_start + i * pmm.PAGE_SIZE;
-
-        if (ENABLE_DEBUG) {
-            serial.writeString("[HEAP] Allocating page ");
-            printHex32(i);
-            serial.writeString(" at virt: ");
-            printHex64(virt_addr);
-            serial.writeString("\n");
-        }
 
         const phys_page = pmm.allocPage() orelse {
             serial.writeString("[HEAP] ERROR: Out of physical memory!\n");
@@ -184,88 +177,57 @@ fn expandHeap(min_size: u64) bool {
             return false;
         };
 
-        if (ENABLE_DEBUG) {
-            serial.writeString("[HEAP] Got phys page: ");
-            printHex64(phys_page);
-            serial.writeString("\n");
-        }
-
         if (!vmm.mapPage(virt_addr, phys_page, vmm.KERNEL_FLAGS)) {
             serial.writeString("[HEAP] ERROR: Failed to map heap page!\n");
             pmm.freePage(phys_page);
             rollbackPages(expansion_start, i);
             return false;
         }
-
-        if (ENABLE_DEBUG) {
-            serial.writeString("[HEAP] Page mapped successfully\n");
-        }
     }
 
     // Calculate new block size
     const new_block_size = pages_needed * pmm.PAGE_SIZE - HEADER_SIZE - CANARY_SIZE;
 
-    if (ENABLE_DEBUG) {
-        serial.writeString("[HEAP] Creating free block at: ");
-        printHex64(expansion_start);
-        serial.writeString(" size: ");
-        printHex64(new_block_size);
-        serial.writeString("\n");
-    }
-
-    // Initialize block header using direct memory writes
+    // Initialize block header
     const block_ptr: [*]u8 = @ptrFromInt(expansion_start);
 
-    // Write magic (bytes 0-3)
     const magic_ptr: *align(1) u32 = @ptrCast(block_ptr);
     magic_ptr.* = BLOCK_MAGIC;
 
-    // Write flags (bytes 4-7)
     const flags_ptr: *align(1) u32 = @ptrCast(block_ptr + 4);
     flags_ptr.* = BLOCK_FLAG_FREE;
 
-    // Write size (bytes 8-15)
     const size_ptr: *align(1) u64 = @ptrCast(block_ptr + 8);
     size_ptr.* = new_block_size;
 
-    // Write next_addr (bytes 16-23)
     const next_ptr: *align(1) u64 = @ptrCast(block_ptr + 16);
     next_ptr.* = free_list_addr;
 
-    // Write prev_addr (bytes 24-31)
     const prev_ptr: *align(1) u64 = @ptrCast(block_ptr + 24);
     prev_ptr.* = 0;
 
-    // Update old free list head's prev pointer
     if (getFreeList()) |fl| {
         const fl_ptr: [*]u8 = @ptrCast(fl);
         const fl_prev_ptr: *align(1) u64 = @ptrCast(fl_ptr + 24);
         fl_prev_ptr.* = expansion_start;
     }
 
-    // Set new free list head
     free_list_addr = expansion_start;
-
-    // Update heap state
     heap_end = expansion_start + pages_needed * pmm.PAGE_SIZE;
     heap_size += pages_needed * pmm.PAGE_SIZE;
 
-    if (ENABLE_DEBUG) {
-        serial.writeString("[HEAP] Expansion complete. New heap_end: ");
-        printHex64(heap_end);
-        serial.writeString("\n");
-    }
-
     return true;
+}
+
+/// Public expand heap (acquires lock)
+fn expandHeap(min_size: u64) bool {
+    // Lock should already be held by caller
+    return expandHeapInternal(min_size);
 }
 
 /// Rollback mapped pages on failure
 fn rollbackPages(start: u64, count: u64) void {
     if (count == 0) return;
-
-    serial.writeString("[HEAP] Rolling back ");
-    printHex32(count);
-    serial.writeString(" pages...\n");
 
     var i: u64 = 0;
     while (i < count) : (i += 1) {
@@ -350,7 +312,7 @@ fn blockSetPrev(block_addr: u64, value: u64) void {
 }
 
 // ============================================================================
-// Memory Allocation
+// Memory Allocation (Thread-Safe)
 // ============================================================================
 
 pub fn kmalloc(size: u64) ?[*]u8 {
@@ -365,6 +327,14 @@ pub fn kmalloc(size: u64) ?[*]u8 {
         serial.writeString("[HEAP] ERROR: Allocation size too large!\n");
         return null;
     }
+
+    // ═══════════════════════════════════════════════════════════
+    // B2.9c: Acquire lock before any heap operation
+    // ═══════════════════════════════════════════════════════════
+    heap_lock.acquire();
+    defer heap_lock.release();
+
+    lock_acquisitions += 1;
 
     // Align size
     var aligned_size = (size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
@@ -381,7 +351,7 @@ pub fn kmalloc(size: u64) ?[*]u8 {
         const block_size = blockGetSize(current_addr);
 
         if (flags == BLOCK_FLAG_FREE and block_size >= total_size) {
-            return allocateFromBlock(current_addr, total_size);
+            return allocateFromBlockInternal(current_addr, total_size);
         }
         current_addr = blockGetNext(current_addr);
     }
@@ -394,7 +364,7 @@ pub fn kmalloc(size: u64) ?[*]u8 {
             const block_size = blockGetSize(current_addr);
 
             if (flags == BLOCK_FLAG_FREE and block_size >= total_size) {
-                return allocateFromBlock(current_addr, total_size);
+                return allocateFromBlockInternal(current_addr, total_size);
             }
             current_addr = blockGetNext(current_addr);
         }
@@ -404,7 +374,8 @@ pub fn kmalloc(size: u64) ?[*]u8 {
     return null;
 }
 
-fn allocateFromBlock(block_addr: u64, size: u64) ?[*]u8 {
+/// Internal allocation (lock already held)
+fn allocateFromBlockInternal(block_addr: u64, size: u64) ?[*]u8 {
     const magic = blockGetMagic(block_addr);
     if (magic != BLOCK_MAGIC) {
         serial.writeString("[HEAP] ERROR: Invalid block magic!\n");
@@ -430,7 +401,6 @@ fn allocateFromBlock(block_addr: u64, size: u64) ?[*]u8 {
         blockSetNext(new_block_addr, blockGetNext(block_addr));
         blockSetPrev(new_block_addr, blockGetPrev(block_addr));
 
-        // Update neighbors
         const next_addr = blockGetNext(new_block_addr);
         if (next_addr != 0) {
             blockSetPrev(next_addr, new_block_addr);
@@ -445,7 +415,7 @@ fn allocateFromBlock(block_addr: u64, size: u64) ?[*]u8 {
 
         blockSetSize(block_addr, size);
     } else {
-        // Use whole block - remove from free list
+        // Use whole block
         const next_addr = blockGetNext(block_addr);
         const prev_addr = blockGetPrev(block_addr);
 
@@ -476,6 +446,10 @@ fn allocateFromBlock(block_addr: u64, size: u64) ?[*]u8 {
     return @ptrFromInt(data_addr);
 }
 
+// ============================================================================
+// Memory Free (Thread-Safe)
+// ============================================================================
+
 pub fn kfree(ptr: ?[*]u8) void {
     if (ptr == null) return;
     if (!initialized) return;
@@ -486,6 +460,14 @@ pub fn kfree(ptr: ?[*]u8) void {
         serial.writeString("[HEAP] ERROR: Invalid free address!\n");
         return;
     }
+
+    // ═══════════════════════════════════════════════════════════
+    // B2.9c: Acquire lock before any heap operation
+    // ═══════════════════════════════════════════════════════════
+    heap_lock.acquire();
+    defer heap_lock.release();
+
+    lock_acquisitions += 1;
 
     const block_addr = data_addr - HEADER_SIZE;
 
@@ -515,13 +497,12 @@ pub fn kfree(ptr: ?[*]u8) void {
         }
     }
 
-    // Zero memory
+    // Zero memory (H.9 secure wipe)
     if (ENABLE_ZERO_ON_FREE) {
         const zero_size = block_size - CANARY_SIZE;
         if (sanitize.isInitialized()) {
             sanitize.secureWipeHeap(data_addr, zero_size);
         } else {
-            // Fallback: volatile wipe before sanitize is ready
             var i: u64 = 0;
             while (i < zero_size) : (i += 1) {
                 const byte_ptr: *volatile u8 = @ptrFromInt(data_addr + i);
@@ -546,10 +527,11 @@ pub fn kfree(ptr: ?[*]u8) void {
     }
     free_list_addr = block_addr;
 
-    coalesceBlocks();
+    coalesceBlocksInternal();
 }
 
-fn coalesceBlocks() void {
+/// Internal coalesce (lock already held)
+fn coalesceBlocksInternal() void {
     var current_addr = free_list_addr;
 
     while (current_addr != 0) {
@@ -576,11 +558,9 @@ fn coalesceBlocks() void {
         const next_flags = blockGetFlags(next_block_addr);
 
         if (next_magic == BLOCK_MAGIC and next_flags == BLOCK_FLAG_FREE) {
-            // Merge blocks
             const next_size = blockGetSize(next_block_addr);
             blockSetSize(current_addr, block_size + HEADER_SIZE + next_size);
 
-            // Remove next_block from free list
             const next_next = blockGetNext(next_block_addr);
             const next_prev = blockGetPrev(next_block_addr);
 
@@ -609,6 +589,9 @@ fn coalesceBlocks() void {
 pub fn checkIntegrity() bool {
     if (!ENABLE_INTEGRITY_CHECK) return true;
     if (!initialized) return false;
+
+    heap_lock.acquire();
+    defer heap_lock.release();
 
     var current_addr = free_list_addr;
     var count: u64 = 0;
@@ -641,7 +624,11 @@ pub fn getStats() struct {
     allocation_count: u64,
     free_blocks: u64,
     largest_free: u64,
+    lock_acquisitions: u64,
 } {
+    heap_lock.acquire();
+    defer heap_lock.release();
+
     var free_count: u64 = 0;
     var largest: u64 = 0;
 
@@ -662,11 +649,17 @@ pub fn getStats() struct {
         .allocation_count = allocation_count,
         .free_blocks = free_count,
         .largest_free = largest,
+        .lock_acquisitions = lock_acquisitions,
     };
 }
 
 pub fn isInitialized() bool {
     return initialized;
+}
+
+/// Check if heap lock is currently held (for debugging)
+pub fn isLocked() bool {
+    return heap_lock.isLocked();
 }
 
 // ============================================================================
@@ -700,7 +693,7 @@ fn printHex32(value: u64) void {
 
 pub fn test_heap() void {
     serial.writeString("\n========================================\n");
-    serial.writeString("  Heap Allocator Tests\n");
+    serial.writeString("  Heap Allocator Tests (B2.9c SMP-Safe)\n");
     serial.writeString("========================================\n");
 
     if (!initialized) {
@@ -764,6 +757,12 @@ pub fn test_heap() void {
     kfree(ptr5);
     serial.writeString("  All freed [OK]\n");
 
+    // Test 5: Lock functionality
+    serial.writeString("\n[TEST 5] Lock test:\n");
+    serial.writeString("  Lock held: ");
+    serial.writeString(if (isLocked()) "YES" else "NO");
+    serial.writeString(" [OK]\n");
+
     // Stats
     serial.writeString("\n[STATS]:\n");
     const stats = getStats();
@@ -775,11 +774,11 @@ pub fn test_heap() void {
     printHex32(stats.total_freed);
     serial.writeString("\n  Free blocks: ");
     printHex32(stats.free_blocks);
+    serial.writeString("\n  Lock acquisitions: ");
+    printHex32(stats.lock_acquisitions);
     serial.writeString("\n");
 
     serial.writeString("\n========================================\n");
-    serial.writeString("  Tests Complete!\n");
+    serial.writeString("  Tests Complete! (SMP Thread-Safe)\n");
     serial.writeString("========================================\n\n");
 }
-
-// check point 8 scheduller

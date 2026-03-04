@@ -1,5 +1,5 @@
 //! Zamrud OS - Main Kernel with Security Integration
-//! Phases A-F4.2 + SC1 + H.7 Complete
+//! Phases A-F4.2 + SC1 + H.7 + B2.9 SMP Complete
 //! FIXED: Terminal init BEFORE ceremony so UI renders on screen
 
 const cpu = @import("core/cpu.zig");
@@ -15,6 +15,7 @@ const timer = @import("drivers/timer/timer.zig");
 
 const gdt = @import("arch/x86_64/gdt.zig");
 const idt = @import("arch/x86_64/idt.zig");
+const smp = @import("arch/x86_64/smp.zig");
 
 const pmm = @import("mm/pmm.zig");
 const vmm = @import("mm/vmm.zig");
@@ -199,6 +200,20 @@ export fn kernel_main() noreturn {
     sanitize.init();
     serial.writeString("[OK]   Memory sanitization ready (H.9)\n");
 
+    // =====================================================================
+    // B2.9: SMP Initialization (after memory & ACPI, before security)
+    // =====================================================================
+    printLine();
+    serial.writeString("[SMP]\n");
+
+    if (smp.init()) {
+        serial.writeString("[OK]   SMP: ");
+        printDecSerial(smp.getOnlineCpuCount());
+        serial.writeString(" CPUs online\n");
+    } else {
+        serial.writeString("[WARN] SMP init failed, single-CPU mode\n");
+    }
+
     printLine();
     serial.writeString("[SECURITY]\n");
 
@@ -372,17 +387,13 @@ export fn kernel_main() noreturn {
         serial.writeString("  1. Run 'ceremony reset' then 'ceremony start'\n");
         serial.writeString("  2. Or restore from backup\n");
 
-        // Mark as needing login (will fail, but triggers recovery prompt)
         trust_ceremony.setJustCompleted(false);
     } else {
         // RETURNING USER: Valid identity file
         serial.writeString("[BOOT] Returning user detected\n");
 
-        // DON'T load identities here - shell login will do it!
-        // Just mark that we're a returning user
         trust_ceremony.setReturningUser(true);
 
-        // Load config (might be encrypted, will try)
         if (has_config_file) {
             if (config_store.loadFromDisk()) {
                 serial.writeString("[OK]   Config: ");
@@ -480,6 +491,12 @@ export fn kernel_main() noreturn {
     shell.run();
 
     serial.writeString("\n[HALT] System halted.\n");
+
+    // B2.9: Halt all CPUs on shutdown
+    if (smp.isSmpReady()) {
+        smp.sendHaltIpiAll();
+    }
+
     cpu.halt();
 }
 
@@ -583,6 +600,24 @@ fn printSystemSummary() void {
     serial.writeString(if (cpu.hasSSE()) "OK\n" else "NO\n");
     serial.writeString("  Boot:       ");
     serial.writeString(if (boot_verify.isVerified()) "Verified\n" else "Unverified\n");
+
+    // B2.9: SMP status
+    serial.writeString("  SMP(B2.9):  ");
+    if (smp.isInitialized()) {
+        printDecSerial(smp.getOnlineCpuCount());
+        serial.writeString("/");
+        printDecSerial(smp.getCpuCount());
+        serial.writeString(" CPUs online");
+        if (smp.isSmpReady()) {
+            serial.writeString(" [ACTIVE]");
+        } else {
+            serial.writeString(" [SINGLE]");
+        }
+        serial.writeString("\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+
     serial.writeString("  Crypto:     ");
     serial.writeString(if (crypto.isInitialized()) "OK\n" else "NO\n");
     serial.writeString("  Caps(E3.1): ");
@@ -799,6 +834,11 @@ fn printSystemSummary() void {
 
 pub fn panic(msg: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {
     cpu.cli();
+
+    // B2.9: Halt all other CPUs on panic
+    if (smp.isInitialized()) {
+        smp.sendHaltIpiAll();
+    }
 
     serial.writeString("\n\n");
     serial.writeString("========================================\n");

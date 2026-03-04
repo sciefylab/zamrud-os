@@ -1,4 +1,5 @@
-//! Zamrud OS - Scheduler (FINAL FIX)
+//! Zamrud OS - Scheduler (SMP-aware)
+//! B2.9: Per-CPU scheduling support
 
 const serial = @import("../drivers/serial/serial.zig");
 const process = @import("process.zig");
@@ -6,29 +7,38 @@ const switch_ctx = @import("../arch/x86_64/switch.zig");
 const gdt = @import("../arch/x86_64/gdt.zig");
 const cpu = @import("../core/cpu.zig");
 const sanitize = @import("../mm/sanitize.zig");
+const spinlock = @import("../arch/x86_64/spinlock.zig");
+const per_cpu = @import("../arch/x86_64/per_cpu.zig");
+const apic = @import("../arch/x86_64/apic.zig");
+
+// ============================================================================
+// Global State (shared across CPUs)
+// ============================================================================
 
 var scheduler_enabled: bool = false;
-var current_slot: usize = 0;
-var switch_count: u64 = 0;
-var tick_count: u64 = 0;
 var scheduler_running: bool = false;
-var preempt_pending: bool = false;
-var in_switch: bool = false;
+var global_switch_count: u64 = 0;
+var global_tick_count: u64 = 0;
+
+// Global scheduler lock (for process table operations)
+var sched_lock: spinlock.SpinLock = .{};
+
+// Exit stack - dedicated for exit handling
+var exit_stack: [4096]u8 align(16) = undefined;
+
+// Dummy RSP for context switch when no old context needed
 var dummy_rsp: u64 = 0;
 
-// Exit stack - dedicated untuk exit handling
-var exit_stack: [4096]u8 align(16) = undefined;
+// ============================================================================
+// Initialization
+// ============================================================================
 
 pub fn init() void {
     serial.writeString("[SCHED] Init\n");
     scheduler_enabled = false;
     scheduler_running = false;
-    current_slot = 0;
-    switch_count = 0;
-    tick_count = 0;
-    preempt_pending = false;
-    in_switch = false;
-    dummy_rsp = 0;
+    global_switch_count = 0;
+    global_tick_count = 0;
 }
 
 pub fn enable() void {
@@ -48,47 +58,97 @@ pub fn isRunning() bool {
     return scheduler_running;
 }
 
+// ============================================================================
+// Tick Handling (called from timer interrupt on each CPU)
+// ============================================================================
+
 pub fn tick() void {
-    if (scheduler_enabled) tick_count += 1;
+    if (!scheduler_enabled) return;
+
+    // Atomic increment of global tick
+    _ = spinlock.Atomic.fetchAdd64(&global_tick_count, 1);
+
+    // Per-CPU tick tracking
+    if (per_cpu.isInitialized()) {
+        per_cpu.incrementTimerTicks();
+    }
 }
 
 pub fn getTicks() u64 {
-    return tick_count;
+    return spinlock.Atomic.load64(&global_tick_count);
 }
 
 pub fn getSwitchCount() u64 {
-    return switch_count;
+    return spinlock.Atomic.load64(&global_switch_count);
 }
+
+// ============================================================================
+// Current Slot (per-CPU aware)
+// ============================================================================
 
 pub fn getCurrentSlot() usize {
-    return current_slot;
+    if (per_cpu.isInitialized()) {
+        return per_cpu.getCurrentSlot();
+    }
+    // Fallback for pre-SMP
+    return 0;
 }
 
+fn setCurrentSlot(slot: usize) void {
+    if (per_cpu.isInitialized()) {
+        per_cpu.setCurrentSlot(slot);
+    }
+}
+
+// ============================================================================
+// Preemption
+// ============================================================================
+
 pub fn requestPreempt() void {
-    if (scheduler_running and scheduler_enabled and !in_switch) {
-        preempt_pending = true;
+    if (!scheduler_running or !scheduler_enabled) return;
+
+    if (per_cpu.isInitialized()) {
+        if (!per_cpu.isInSwitch()) {
+            per_cpu.setPreemptPending(true);
+        }
     }
 }
 
 pub fn checkPreempt() void {
-    if (in_switch) return;
-    if (preempt_pending) {
-        preempt_pending = false;
-        preemptSwitch();
+    if (!scheduler_enabled or !scheduler_running) return;
+
+    if (per_cpu.isInitialized()) {
+        if (per_cpu.isInSwitch()) return;
+        if (per_cpu.isPreemptPending()) {
+            per_cpu.setPreemptPending(false);
+            preemptSwitch();
+        }
     }
 }
 
 pub fn isPreemptPending() bool {
-    return preempt_pending;
+    if (per_cpu.isInitialized()) {
+        return per_cpu.isPreemptPending();
+    }
+    return false;
 }
 
 pub fn clearPreempt() void {
-    preempt_pending = false;
+    if (per_cpu.isInitialized()) {
+        per_cpu.setPreemptPending(false);
+    }
 }
 
-fn preemptSwitch() void {
-    if (!scheduler_enabled or !scheduler_running or in_switch) return;
+// ============================================================================
+// Context Switching
+// ============================================================================
 
+fn preemptSwitch() void {
+    if (!scheduler_enabled or !scheduler_running) return;
+
+    const current_slot = getCurrentSlot();
+
+    // Validate current process
     if (!process.process_used[current_slot] or
         process.process_table[current_slot].state != .Running)
     {
@@ -108,11 +168,16 @@ fn preemptSwitch() void {
 }
 
 fn findNextReady() ?usize {
-    var next: usize = current_slot;
+    sched_lock.acquire();
+    defer sched_lock.release();
+
+    const current = getCurrentSlot();
+    var next: usize = current;
     var i: u8 = 0;
-    while (i < 8) : (i += 1) {
-        next = (next + 1) & 0x7;
-        if (next == 0) continue;
+
+    while (i < process.MAX_SLOTS_USED) : (i += 1) {
+        next = (next + 1) % process.MAX_SLOTS_USED;
+        if (next == 0) continue; // Skip idle
 
         if (process.process_used[next] and
             process.process_table[next].state == .Ready)
@@ -124,9 +189,12 @@ fn findNextReady() ?usize {
 }
 
 pub fn yield() void {
-    if (!scheduler_enabled or !scheduler_running or in_switch) return;
+    if (!scheduler_enabled or !scheduler_running) return;
+
+    if (per_cpu.isInitialized() and per_cpu.isInSwitch()) return;
+
     const next = findNextReady() orelse return;
-    if (next == current_slot) return;
+    if (next == getCurrentSlot()) return;
     doSwitch(next);
 }
 
@@ -135,39 +203,64 @@ pub fn schedule() void {
 }
 
 fn doSwitch(next: usize) void {
-    in_switch = true;
+    if (per_cpu.isInitialized()) {
+        per_cpu.setInSwitch(true);
+    }
 
-    const old_slot = current_slot;
+    const old_slot = getCurrentSlot();
 
+    sched_lock.acquire();
+
+    // Mark old as ready (if still running)
     if (process.process_used[old_slot] and
         process.process_table[old_slot].state == .Running)
     {
         process.process_table[old_slot].state = .Ready;
     }
 
+    // Mark new as running
     process.process_table[next].state = .Running;
     process.setCurrentPid(process.process_table[next].pid);
-    current_slot = next;
-    switch_count += 1;
+
+    sched_lock.release();
+
+    // Update per-CPU state
+    setCurrentSlot(next);
+    _ = spinlock.Atomic.fetchAdd64(&global_switch_count, 1);
+
+    if (per_cpu.isInitialized()) {
+        per_cpu.incrementSwitchCount();
+    }
+
+    // Update kernel stack for interrupts
     gdt.setKernelStack(process.process_table[next].kernel_stack_top);
 
+    // Perform context switch
     switch_ctx.contextSwitch(
         &process.process_table[old_slot].rsp,
         process.process_table[next].rsp,
     );
 
-    in_switch = false;
+    if (per_cpu.isInitialized()) {
+        per_cpu.setInSwitch(false);
+    }
 }
 
-/// Exit current process - dengan switch ke exit stack
+// ============================================================================
+// Process Exit
+// ============================================================================
+
 pub fn exitCurrentProcess() void {
     if (!scheduler_running) return;
 
     cpu.cli();
-    in_switch = true;
-    preempt_pending = false;
 
-    const slot = current_slot;
+    if (per_cpu.isInitialized()) {
+        per_cpu.setInSwitch(true);
+        per_cpu.setPreemptPending(false);
+    }
+
+    const slot = getCurrentSlot();
     const pid = process.process_table[slot].pid;
 
     serial.writeString("\n[EXIT] PID=0x");
@@ -177,44 +270,50 @@ pub fn exitCurrentProcess() void {
     serial.writeString("\n");
 
     // Mark as terminated
+    sched_lock.acquire();
     process.process_table[slot].state = .Terminated;
     process.process_used[slot] = false;
+    sched_lock.release();
 
-    // Check if ada process lain
+    // Find next process
     var has_next = false;
     var next_slot: usize = 0;
 
-    // Simple loop - tidak pakai findNextReady untuk avoid any issues
+    sched_lock.acquire();
     var i: usize = 1;
-    while (i < 8) : (i += 1) {
+    while (i < process.MAX_SLOTS_USED) : (i += 1) {
         if (process.process_used[i] and process.process_table[i].state == .Ready) {
             has_next = true;
             next_slot = i;
             break;
         }
     }
+    sched_lock.release();
 
     if (has_next) {
         serial.writeString("[EXIT] -> slot=");
         printHex8(@intCast(next_slot));
         serial.writeString("\n");
 
+        sched_lock.acquire();
         process.process_table[next_slot].state = .Running;
         process.setCurrentPid(process.process_table[next_slot].pid);
+        sched_lock.release();
+
         gdt.setKernelStack(process.process_table[next_slot].kernel_stack_top);
-        current_slot = next_slot;
-        switch_count += 1;
-        in_switch = false;
+        setCurrentSlot(next_slot);
+        _ = spinlock.Atomic.fetchAdd64(&global_switch_count, 1);
+
+        if (per_cpu.isInitialized()) {
+            per_cpu.setInSwitch(false);
+        }
 
         cpu.sti();
         switch_ctx.contextSwitch(&dummy_rsp, process.process_table[next_slot].rsp);
     } else {
-        // ALL PROCESSES DONE - switch ke exit stack dulu
-
-        // Switch ke exit stack untuk safe execution
+        // All processes done - switch to exit stack
         const exit_stack_top = @intFromPtr(&exit_stack) + exit_stack.len;
 
-        // Call completion handler on exit stack
         asm volatile (
             \\movq %[stack], %%rsp
             \\call schedulerComplete
@@ -226,31 +325,38 @@ pub fn exitCurrentProcess() void {
     }
 }
 
-/// Called when all processes complete - runs on exit stack
+/// Called when all processes complete
 export fn schedulerComplete() noreturn {
     scheduler_running = false;
     scheduler_enabled = false;
-    in_switch = false;
+
+    if (per_cpu.isInitialized()) {
+        per_cpu.setInSwitch(false);
+    }
 
     serial.writeString("\n========================================\n");
     serial.writeString("  ALL PROCESSES COMPLETED!\n");
     serial.writeString("  Switches: 0x");
-    printHex8(@intCast(switch_count & 0xFF));
+    printHex8(@intCast(global_switch_count & 0xFF));
     serial.writeString("\n");
     serial.writeString("========================================\n");
 
-    // Halt forever
     cpu.cli();
     while (true) {
         asm volatile ("hlt");
     }
 }
 
-// === UPDATE killProcess() ===
+// ============================================================================
+// Kill Process
+// ============================================================================
+
 pub fn killProcess(pid: u32) bool {
     if (pid == 0) return false;
+
     const slot = process.getSlotByPid(pid) orelse return false;
-    if (slot == current_slot and scheduler_running) {
+
+    if (slot == getCurrentSlot() and scheduler_running) {
         exitCurrentProcess();
         return true;
     }
@@ -264,15 +370,26 @@ pub fn killProcess(pid: u32) bool {
         );
     }
 
+    sched_lock.acquire();
     process.process_table[slot].state = .Terminated;
     process.process_used[slot] = false;
+    sched_lock.release();
+
     return true;
 }
 
+// ============================================================================
+// Running Count
+// ============================================================================
+
 pub fn getRunningCount() u32 {
     var count: u32 = 0;
+
+    sched_lock.acquire();
+    defer sched_lock.release();
+
     var i: usize = 1;
-    while (i < 8) : (i += 1) {
+    while (i < process.MAX_SLOTS_USED) : (i += 1) {
         if (process.process_used[i] and
             (process.process_table[i].state == .Ready or
                 process.process_table[i].state == .Running))
@@ -282,6 +399,10 @@ pub fn getRunningCount() u32 {
     }
     return count;
 }
+
+// ============================================================================
+// Start Scheduler
+// ============================================================================
 
 pub fn start() void {
     if (!scheduler_enabled) {
@@ -295,8 +416,10 @@ pub fn start() void {
 
     var slot: usize = 0;
     var found: bool = false;
+
+    sched_lock.acquire();
     var i: usize = 1;
-    while (i < 8) : (i += 1) {
+    while (i < process.MAX_SLOTS_USED) : (i += 1) {
         if (process.process_used[i] and
             process.process_table[i].state == .Ready)
         {
@@ -305,6 +428,7 @@ pub fn start() void {
             break;
         }
     }
+    sched_lock.release();
 
     if (!found) {
         serial.writeString("[S-ERR] No ready process\n");
@@ -315,11 +439,18 @@ pub fn start() void {
     printHex8(@intCast(slot));
     serial.writeString("\n");
 
-    current_slot = slot;
+    setCurrentSlot(slot);
     scheduler_running = true;
-    in_switch = false;
+
+    if (per_cpu.isInitialized()) {
+        per_cpu.setInSwitch(false);
+    }
+
+    sched_lock.acquire();
     process.process_table[slot].state = .Running;
     process.setCurrentPid(process.process_table[slot].pid);
+    sched_lock.release();
+
     gdt.setKernelStack(process.process_table[slot].kernel_stack_top);
 
     switch_ctx.jumpToFirst(process.process_table[slot].rsp, 0);
@@ -328,9 +459,16 @@ pub fn start() void {
 pub fn stop() void {
     scheduler_running = false;
     scheduler_enabled = false;
-    preempt_pending = false;
-    in_switch = false;
+
+    if (per_cpu.isInitialized()) {
+        per_cpu.setPreemptPending(false);
+        per_cpu.setInSwitch(false);
+    }
 }
+
+// ============================================================================
+// Status
+// ============================================================================
 
 pub fn printStatus() void {
     serial.writeString("[SCHED] en=");
@@ -338,14 +476,22 @@ pub fn printStatus() void {
     serial.writeString(" run=");
     printHex8(if (scheduler_running) 1 else 0);
     serial.writeString(" slot=");
-    printHex8(@intCast(current_slot));
+    printHex8(@intCast(getCurrentSlot()));
+
+    if (per_cpu.isInitialized()) {
+        serial.writeString(" cpu=");
+        printHex8(@intCast(per_cpu.currentIndex()));
+    }
+
     serial.writeString("\n");
 }
+
+// ============================================================================
+// Helpers
+// ============================================================================
 
 fn printHex8(val: u8) void {
     const hex = "0123456789ABCDEF";
     serial.writeChar(hex[(val >> 4) & 0xF]);
     serial.writeChar(hex[val & 0xF]);
 }
-
-// check point 8 scheduller

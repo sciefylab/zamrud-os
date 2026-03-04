@@ -1,4 +1,5 @@
 //! Zamrud OS - Limine Protocol
+//! Updated: B2.9 SMP Support
 
 // ============================================================================
 // Request Markers
@@ -192,4 +193,40 @@ pub const KernelAddressResponse = extern struct {
     revision: u64,
     physical_base: u64,
     virtual_base: u64,
+};
+
+// ============================================================================
+// SMP Request (B2.9: Symmetric Multiprocessing)
+// ============================================================================
+
+pub const SmpRequest = extern struct {
+    id: [4]u64 = .{
+        0xc7b1dd30df4c8b88,
+        0x0a82e883a194f07b,
+        0x95a67b819a1b857e,
+        0xa0b61b723b6a73e0,
+    },
+    revision: u64 = 0,
+    response: ?*SmpResponse = null,
+    flags: u64 = 0, // bit 0: request x2APIC if available
+};
+
+pub const SmpResponse = extern struct {
+    revision: u64,
+    flags: u32,
+    bsp_lapic_id: u32,
+    cpu_count: u64,
+    cpus_ptr: [*]*SmpInfo,
+
+    pub fn getCpus(self: *SmpResponse) []*SmpInfo {
+        return self.cpus_ptr[0..self.cpu_count];
+    }
+};
+
+pub const SmpInfo = extern struct {
+    processor_id: u32,
+    lapic_id: u32,
+    reserved: u64,
+    goto_address: u64, // Write function pointer here to boot AP
+    extra_argument: u64,
 };

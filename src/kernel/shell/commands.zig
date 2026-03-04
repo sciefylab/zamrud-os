@@ -1,6 +1,7 @@
 //! Zamrud OS - Shell Commands Main Dispatcher
 //! Phases A-F5.0 + T4.2 (Environment Variables)
 //! B2.3: Added mv, cp, truncate commands
+//! B2.9: Added SMP commands
 
 const shell = @import("shell.zig");
 
@@ -37,6 +38,7 @@ const sanitize_cmd = @import("commands/sanitize.zig");
 const ceremony_cmd = @import("commands/ceremony.zig");
 const acpi_cmd = @import("commands/acpi.zig");
 const date_cmd = @import("commands/date.zig");
+const smp_cmd = @import("commands/smp.zig");
 
 // =============================================================================
 // Command Execution
@@ -370,7 +372,7 @@ pub fn execute(input: []const u8) void {
         sanitize_cmd.cmdMunlock(args);
     }
 
-    // H.7: Trust Ceremony  <-- TAMBAHKAN INI
+    // H.7: Trust Ceremony
     else if (helpers.strEql(command, "ceremony")) {
         _ = ceremony_cmd.execute(args);
     } else if (helpers.strEql(command, "trustsetup")) {
@@ -391,6 +393,15 @@ pub fn execute(input: []const u8) void {
         date_cmd.executeClock(args);
     } else if (helpers.strEql(command, "uptime")) {
         date_cmd.executeUptime(args);
+    }
+
+    // B2.9: SMP
+    else if (helpers.strEql(command, "smp")) {
+        smp_cmd.handleCommand(args);
+    } else if (helpers.strEql(command, "cpus")) {
+        smp_cmd.handleCommand("cpus");
+    } else if (helpers.strEql(command, "smptest")) {
+        smp_cmd.handleCommand("test");
     }
 
     // Test all
@@ -506,14 +517,10 @@ fn runAllTests() void {
     system.cmdEnvTest("");
     shell.newLine();
 
-    // =========================================================
-    // ADD THIS: Privacy & Identity Tests (P.1/P.2/P.5)
-    // =========================================================
     shell.printInfoLine("=== IDENTITY & PRIVACY TESTS (P.1/P.2/P.5) ===");
     identity_cmd.runTest("all");
     shell.newLine();
 
-    // ADD THIS BLOCK:
     shell.printInfoLine("=== CONSTANT-TIME CRYPTO TESTS (H.1) ===");
     crypto_cmd.execute("cttest");
     shell.newLine();
@@ -528,6 +535,11 @@ fn runAllTests() void {
 
     shell.printInfoLine("=== TRUST CEREMONY TESTS (H.7) ===");
     _ = ceremony_cmd.execute("test");
+    shell.newLine();
+
+    // B2.9: SMP Tests
+    shell.printInfoLine("=== SMP TESTS (B2.9) ===");
+    smp_cmd.handleCommand("test");
     shell.newLine();
 
     shell.printInfoLine("########################################");

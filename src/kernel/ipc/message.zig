@@ -1,5 +1,6 @@
 //! Zamrud OS - F1: IPC Message Passing
 //! F4.2: Optional encrypted message channels
+//! B2.9: SMP-safe with spinlock protection
 //! Capability-gated: requires CAP_IPC
 
 const serial = @import("../drivers/serial/serial.zig");
@@ -7,6 +8,7 @@ const timer = @import("../drivers/timer/timer.zig");
 const capability = @import("../security/capability.zig");
 const violation = @import("../security/violation.zig");
 const sys_encrypt = @import("../crypto/sys_encrypt.zig");
+const spinlock = @import("../arch/x86_64/spinlock.zig");
 
 // ============================================================================
 // Constants
@@ -102,6 +104,9 @@ var next_msg_id: u32 = 1;
 pub var stats = MsgStats{};
 var initialized: bool = false;
 
+// B2.9: SMP lock
+var msg_lock: spinlock.SpinLock = .{};
+
 // ============================================================================
 // Init
 // ============================================================================
@@ -128,7 +133,11 @@ pub fn isInitialized() bool {
 
 pub fn createMailbox(pid: u16) bool {
     if (!initialized) return false;
-    if (findMailbox(pid) != null) return true;
+
+    msg_lock.acquire();
+    defer msg_lock.release();
+
+    if (findMailboxUnsafe(pid) != null) return true;
 
     for (&mailboxes) |*mb| {
         if (!mb.active) {
@@ -147,7 +156,10 @@ pub fn createMailbox(pid: u16) bool {
 }
 
 pub fn destroyMailbox(pid: u16) void {
-    if (findMailbox(pid)) |mb| {
+    msg_lock.acquire();
+    defer msg_lock.release();
+
+    if (findMailboxUnsafe(pid)) |mb| {
         mb.active = false;
         mb.pid = 0;
         mb.count = 0;
@@ -156,12 +168,18 @@ pub fn destroyMailbox(pid: u16) void {
 }
 
 pub fn hasMailbox(pid: u16) bool {
-    return findMailbox(pid) != null;
+    msg_lock.acquire();
+    defer msg_lock.release();
+
+    return findMailboxUnsafe(pid) != null;
 }
 
 /// F4.2: Enable encryption mode for a mailbox
 pub fn setEncryptMode(pid: u16, enabled: bool) bool {
-    const mb = findMailbox(pid) orelse return false;
+    msg_lock.acquire();
+    defer msg_lock.release();
+
+    const mb = findMailboxUnsafe(pid) orelse return false;
     mb.encrypt_mode = enabled;
     serial.writeString("[IPC-MSG] Encrypt mode ");
     serial.writeString(if (enabled) "ON" else "OFF");
@@ -173,15 +191,24 @@ pub fn setEncryptMode(pid: u16, enabled: bool) bool {
 
 /// F4.2: Check if mailbox has encryption mode
 pub fn isEncryptMode(pid: u16) bool {
-    const mb = findMailbox(pid) orelse return false;
+    msg_lock.acquire();
+    defer msg_lock.release();
+
+    const mb = findMailboxUnsafe(pid) orelse return false;
     return mb.encrypt_mode;
 }
 
-fn findMailbox(pid: u16) ?*Mailbox {
+// Internal finder tanpa lock
+fn findMailboxUnsafe(pid: u16) ?*Mailbox {
     for (&mailboxes) |*mb| {
         if (mb.active and mb.pid == pid) return mb;
     }
     return null;
+}
+
+// Legacy public finder (calls unsafe, assumes caller holds lock or is single-threaded)
+fn findMailbox(pid: u16) ?*Mailbox {
+    return findMailboxUnsafe(pid);
 }
 
 // ============================================================================
@@ -189,6 +216,7 @@ fn findMailbox(pid: u16) ?*Mailbox {
 // ============================================================================
 
 pub fn send(sender_pid: u16, receiver_pid: u16, msg_type: MsgType, data: []const u8) SendResult {
+    // CAP check outside lock
     if (sender_pid != 0) {
         if (!capability.check(sender_pid, capability.CAP_IPC)) {
             stats.cap_violations += 1;
@@ -199,7 +227,10 @@ pub fn send(sender_pid: u16, receiver_pid: u16, msg_type: MsgType, data: []const
 
     if (sender_pid == receiver_pid and sender_pid != 0) return .self_send;
 
-    const mb = findMailbox(receiver_pid) orelse return .no_mailbox;
+    msg_lock.acquire();
+    defer msg_lock.release();
+
+    const mb = findMailboxUnsafe(receiver_pid) orelse return .no_mailbox;
 
     if (mb.count >= MAX_MESSAGES_PER_BOX) {
         mb.total_dropped += 1;
@@ -265,6 +296,7 @@ pub fn sendEncrypted(sender_pid: u16, receiver_pid: u16, data: []const u8) SendR
         return .encrypt_failed;
     }
 
+    // CAP check outside lock
     if (sender_pid != 0) {
         if (!capability.check(sender_pid, capability.CAP_IPC)) {
             stats.cap_violations += 1;
@@ -275,7 +307,10 @@ pub fn sendEncrypted(sender_pid: u16, receiver_pid: u16, data: []const u8) SendR
 
     if (sender_pid == receiver_pid and sender_pid != 0) return .self_send;
 
-    const mb = findMailbox(receiver_pid) orelse return .no_mailbox;
+    msg_lock.acquire();
+    defer msg_lock.release();
+
+    const mb = findMailboxUnsafe(receiver_pid) orelse return .no_mailbox;
 
     if (mb.count >= MAX_MESSAGES_PER_BOX) {
         mb.total_dropped += 1;
@@ -317,6 +352,7 @@ pub fn sendEncrypted(sender_pid: u16, receiver_pid: u16, data: []const u8) SendR
 // ============================================================================
 
 pub fn recv(pid: u16) RecvResult {
+    // CAP check outside lock
     if (pid != 0) {
         if (!capability.check(pid, capability.CAP_IPC)) {
             stats.cap_violations += 1;
@@ -325,7 +361,10 @@ pub fn recv(pid: u16) RecvResult {
         }
     }
 
-    const mb = findMailbox(pid) orelse {
+    msg_lock.acquire();
+    defer msg_lock.release();
+
+    const mb = findMailboxUnsafe(pid) orelse {
         return .{ .success = false, .message = null };
     };
 
@@ -365,13 +404,19 @@ pub fn recv(pid: u16) RecvResult {
 }
 
 pub fn peek(pid: u16) ?*const Message {
-    const mb = findMailbox(pid) orelse return null;
+    msg_lock.acquire();
+    defer msg_lock.release();
+
+    const mb = findMailboxUnsafe(pid) orelse return null;
     if (mb.count == 0) return null;
     return &mb.messages[mb.head];
 }
 
 pub fn pendingCount(pid: u16) u8 {
-    const mb = findMailbox(pid) orelse return 0;
+    msg_lock.acquire();
+    defer msg_lock.release();
+
+    const mb = findMailboxUnsafe(pid) orelse return 0;
     return mb.count;
 }
 
@@ -380,6 +425,7 @@ pub fn pendingCount(pid: u16) u8 {
 // ============================================================================
 
 pub fn broadcast(sender_pid: u16, msg_type: MsgType, data: []const u8) u32 {
+    // CAP check outside lock
     if (sender_pid != 0) {
         if (!capability.check(sender_pid, capability.CAP_IPC)) {
             stats.cap_violations += 1;
@@ -388,12 +434,24 @@ pub fn broadcast(sender_pid: u16, msg_type: MsgType, data: []const u8) u32 {
         }
     }
 
-    var sent: u32 = 0;
+    // Collect target PIDs first (to avoid nested lock with send)
+    var targets: [MAX_MAILBOXES]u16 = undefined;
+    var target_count: usize = 0;
+
+    msg_lock.acquire();
     for (&mailboxes) |*mb| {
         if (mb.active and mb.pid != sender_pid) {
-            const result = send(sender_pid, mb.pid, msg_type, data);
-            if (result == .ok) sent += 1;
+            targets[target_count] = mb.pid;
+            target_count += 1;
         }
+    }
+    msg_lock.release();
+
+    // Send to each target (send() will acquire its own lock)
+    var sent: u32 = 0;
+    for (0..target_count) |i| {
+        const result = send(sender_pid, targets[i], msg_type, data);
+        if (result == .ok) sent += 1;
     }
 
     stats.total_broadcasts += 1;
@@ -429,6 +487,9 @@ pub fn resetStats() void {
 }
 
 pub fn getMailboxCount() usize {
+    msg_lock.acquire();
+    defer msg_lock.release();
+
     var count: usize = 0;
     for (&mailboxes) |*mb| {
         if (mb.active) count += 1;
@@ -442,7 +503,10 @@ pub fn getMailboxInfo(pid: u16) ?struct {
     total_dropped: u64,
     encrypt_mode: bool,
 } {
-    const mb = findMailbox(pid) orelse return null;
+    msg_lock.acquire();
+    defer msg_lock.release();
+
+    const mb = findMailboxUnsafe(pid) orelse return null;
     return .{
         .pending = mb.count,
         .total_received = mb.total_received,

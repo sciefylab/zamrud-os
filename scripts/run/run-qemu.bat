@@ -1,8 +1,8 @@
 @echo off
 
 echo ============================================
-echo   Zamrud OS - QEMU Runner (Triple NIC)
-echo   E1000 + RTL8139 + VirtIO
+echo   Zamrud OS - QEMU Runner (SMP + Triple NIC)
+echo   B2.9: Auto-detect CPUs + APIC
 echo ============================================
 
 set SCRIPT_DIR=%~dp0
@@ -16,7 +16,23 @@ if not exist "%ISO%" (
     exit /b 1
 )
 
-echo Starting Zamrud OS...
+REM ============================================
+REM Auto-detect CPU cores (max 8 for QEMU)
+REM ============================================
+set /a CPU_CORES=%NUMBER_OF_PROCESSORS%
+if %CPU_CORES% GTR 8 set CPU_CORES=8
+if %CPU_CORES% LSS 1 set CPU_CORES=2
+
+REM Calculate memory based on CPU count
+set /a MEM_MB=128 + (%CPU_CORES% * 32)
+if %MEM_MB% GTR 512 set MEM_MB=512
+
+echo.
+echo CPU Configuration (B2.9 SMP - Auto-detected):
+echo   Host CPUs:  %NUMBER_OF_PROCESSORS%
+echo   Guest CPUs: %CPU_CORES% (max 8)
+echo   Memory:     %MEM_MB%MB
+echo   APIC:       Enabled (multi-core scheduling)
 echo.
 echo Network Interfaces:
 echo   eth0: Intel E1000     (Gigabit, MMIO)
@@ -42,9 +58,10 @@ qemu-system-x86_64 ^
     -cdrom "%ISO%" ^
     -boot d ^
     %DISK_OPTS% ^
-    -m 256M ^
+    -m %MEM_MB%M ^
+    -smp %CPU_CORES%,cores=%CPU_CORES%,threads=1,sockets=1 ^
+    -cpu qemu64,+rdrand,+x2apic ^
     -serial stdio ^
-    -cpu qemu64,+rdrand ^
     -no-shutdown ^
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 ^
     -device e1000,netdev=net0,mac=52:54:00:12:34:56 ^
@@ -55,47 +72,21 @@ qemu-system-x86_64 ^
     -netdev user,id=net2,hostfwd=tcp::8082-:82
 
 REM ============================================
-REM Storage:
-REM   AHCI Controller: ahci0
-REM   SATA Port 0:     disks/system.qcow2
-REM   (B2.4: AHCI/DMA mode instead of IDE/PIO)
+REM B2.9 SMP Auto-Detection:
+REM   Uses %NUMBER_OF_PROCESSORS% from Windows
+REM   Caps at 8 CPUs (QEMU practical limit)
+REM   Memory scales: 128MB + 32MB per CPU
 REM
-REM Network Interfaces (B2.8 Complete):
-REM   +-------+----------+-------------------+------------------+
-REM   | Name  | Driver   | Type              | MAC Address      |
-REM   +-------+----------+-------------------+------------------+
-REM   | eth0  | E1000    | Intel Gigabit     | 52:54:00:12:34:56|
-REM   | eth1  | RTL8139  | Realtek 10/100    | 52:54:00:12:34:57|
-REM   | eth2  | VirtIO   | Paravirtualized   | 52:54:00:12:34:58|
-REM   +-------+----------+-------------------+------------------+
+REM   Example on 16-core host:
+REM     Guest CPUs: 8
+REM     Memory:     384MB (128 + 8*32)
 REM
-REM   All interfaces use QEMU SLIRP:
-REM     IP:      10.0.2.15
-REM     Gateway: 10.0.2.2
-REM     DNS:     10.0.2.3
+REM   Example on 4-core host:
+REM     Guest CPUs: 4
+REM     Memory:     256MB (128 + 4*32)
 REM
-REM Port Forwarding:
-REM   Host 8080 -> Guest 80 (via E1000)
-REM   Host 8081 -> Guest 81 (via RTL8139)
-REM   Host 8082 -> Guest 82 (via VirtIO)
-REM
-REM Debug:
-REM   isa-debug-exit on port 0xF4 for clean shutdown
-REM
-REM Test Commands in Zamrud OS:
-REM   ifconfig          - Show all interfaces
-REM   net drivers       - Show driver status
-REM   net test b1       - Test all NIC drivers
-REM   ping 10.0.2.2     - Test connectivity
-REM
-REM Alternative Configurations:
-REM   Single NIC (E1000 only):
-REM     qemu-system-x86_64 ... -device e1000,netdev=net0 -netdev user,id=net0
-REM
-REM   Single NIC (RTL8139 only):
-REM     qemu-system-x86_64 ... -device rtl8139,netdev=net0 -netdev user,id=net0
-REM
-REM   Single NIC (VirtIO only):
-REM     qemu-system-x86_64 ... -device virtio-net-pci,netdev=net0 -netdev user,id=net0
+REM Manual Override:
+REM   run-qemu.bat 2     (force 2 CPUs)
+REM   run-qemu.bat 1     (single CPU mode)
 REM
 REM ============================================

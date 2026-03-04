@@ -1,5 +1,6 @@
 //! Zamrud OS - F2: Shared Memory
 //! F4.2: Optional encrypted shared memory regions
+//! B2.9: SMP-safe with spinlock protection
 //! Zero-copy data sharing between processes
 //! CAP_MEMORY enforced, owner-based access control
 
@@ -9,6 +10,7 @@ const capability = @import("../security/capability.zig");
 const violation = @import("../security/violation.zig");
 const sys_encrypt = @import("../crypto/sys_encrypt.zig");
 const aes = @import("../crypto/aes.zig");
+const spinlock = @import("../arch/x86_64/spinlock.zig");
 
 // ============================================================================
 // Constants
@@ -127,6 +129,9 @@ var next_region_id: u16 = 1;
 pub var stats = ShmStats{};
 var initialized: bool = false;
 
+// B2.9: SMP lock
+var shmem_lock: spinlock.SpinLock = .{};
+
 // ============================================================================
 // Init
 // ============================================================================
@@ -158,20 +163,7 @@ pub fn isInitialized() bool {
 // ============================================================================
 
 pub fn create(owner_pid: u16, name: []const u8, size: u32) CreateResult {
-    return createInternal(owner_pid, name, size, false);
-}
-
-/// F4.2: Create encrypted shared memory region
-pub fn createEncrypted(owner_pid: u16, name: []const u8, size: u32) CreateResult {
-    if (!sys_encrypt.isInitialized() or !sys_encrypt.isMasterKeySet()) {
-        return createInternal(owner_pid, name, size, false);
-    }
-    return createInternal(owner_pid, name, size, true);
-}
-
-fn createInternal(owner_pid: u16, name: []const u8, size: u32, encrypted: bool) CreateResult {
-    if (!initialized) return .{ .result = .not_found, .id = 0 };
-
+    // CAP check outside lock to avoid deadlock
     if (owner_pid != 0) {
         if (!capability.check(owner_pid, capability.CAP_MEMORY)) {
             stats.cap_violations += 1;
@@ -180,15 +172,44 @@ fn createInternal(owner_pid: u16, name: []const u8, size: u32, encrypted: bool) 
         }
     }
 
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    return createInternalUnsafe(owner_pid, name, size, false);
+}
+
+/// F4.2: Create encrypted shared memory region
+pub fn createEncrypted(owner_pid: u16, name: []const u8, size: u32) CreateResult {
+    // CAP check outside lock
+    if (owner_pid != 0) {
+        if (!capability.check(owner_pid, capability.CAP_MEMORY)) {
+            stats.cap_violations += 1;
+            reportShmViolation(owner_pid, "create without CAP_MEMORY");
+            return .{ .result = .no_cap, .id = 0 };
+        }
+    }
+
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    if (!sys_encrypt.isInitialized() or !sys_encrypt.isMasterKeySet()) {
+        return createInternalUnsafe(owner_pid, name, size, false);
+    }
+    return createInternalUnsafe(owner_pid, name, size, true);
+}
+
+fn createInternalUnsafe(owner_pid: u16, name: []const u8, size: u32, encrypted: bool) CreateResult {
+    if (!initialized) return .{ .result = .not_found, .id = 0 };
+
     if (size == 0 or size > MAX_REGION_SIZE) {
         return .{ .result = .too_large, .id = 0 };
     }
 
-    if (findByName(name) != null) {
+    if (findByNameUnsafe(name) != null) {
         return .{ .result = .already_exists, .id = 0 };
     }
 
-    if (owner_pid != 0 and countRegionsForPid(owner_pid) >= MAX_REGIONS_PER_PROCESS) {
+    if (owner_pid != 0 and countRegionsForPidUnsafe(owner_pid) >= MAX_REGIONS_PER_PROCESS) {
         return .{ .result = .process_limit, .id = 0 };
     }
 
@@ -247,7 +268,10 @@ fn createInternal(owner_pid: u16, name: []const u8, size: u32, encrypted: bool) 
 // ============================================================================
 
 pub fn destroy(pid: u16, region_id: u16) ShmResult {
-    const r = findById(region_id) orelse return .not_found;
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    const r = findByIdUnsafe(region_id) orelse return .not_found;
 
     if (pid != 0 and r.owner_pid != pid) {
         return .not_owner;
@@ -276,6 +300,7 @@ pub fn destroy(pid: u16, region_id: u16) ShmResult {
 // ============================================================================
 
 pub fn attach(pid: u16, region_id: u16, perm: ShmPerm) ShmResult {
+    // CAP check outside lock
     if (pid != 0) {
         if (!capability.check(pid, capability.CAP_MEMORY)) {
             stats.cap_violations += 1;
@@ -284,7 +309,10 @@ pub fn attach(pid: u16, region_id: u16, perm: ShmPerm) ShmResult {
         }
     }
 
-    const r = findById(region_id) orelse return .not_found;
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    const r = findByIdUnsafe(region_id) orelse return .not_found;
 
     for (&r.attachments) |*a| {
         if (a.active and a.pid == pid) {
@@ -296,7 +324,7 @@ pub fn attach(pid: u16, region_id: u16, perm: ShmPerm) ShmResult {
         return .attach_full;
     }
 
-    if (pid != 0 and countAttachmentsForPid(pid) >= MAX_REGIONS_PER_PROCESS) {
+    if (pid != 0 and countAttachmentsForPidUnsafe(pid) >= MAX_REGIONS_PER_PROCESS) {
         return .process_limit;
     }
 
@@ -320,7 +348,10 @@ pub fn attach(pid: u16, region_id: u16, perm: ShmPerm) ShmResult {
 }
 
 pub fn detach(pid: u16, region_id: u16) ShmResult {
-    const r = findById(region_id) orelse return .not_found;
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    const r = findByIdUnsafe(region_id) orelse return .not_found;
 
     for (&r.attachments) |*a| {
         if (a.active and a.pid == pid) {
@@ -347,6 +378,9 @@ pub fn detach(pid: u16, region_id: u16) ShmResult {
 }
 
 pub fn detachAll(pid: u16) void {
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
     for (&regions) |*r| {
         if (!r.active) continue;
 
@@ -377,9 +411,12 @@ pub fn detachAll(pid: u16) void {
 // ============================================================================
 
 pub fn writeData(pid: u16, region_id: u16, offset: u32, data: []const u8) WriteResult {
-    const r = findById(region_id) orelse return .{ .result = .not_found, .written = 0 };
+    shmem_lock.acquire();
+    defer shmem_lock.release();
 
-    const att = findAttachment(r, pid) orelse {
+    const r = findByIdUnsafe(region_id) orelse return .{ .result = .not_found, .written = 0 };
+
+    const att = findAttachmentUnsafe(r, pid) orelse {
         reportShmViolation(pid, "write not attached");
         return .{ .result = .not_attached, .written = 0 };
     };
@@ -424,9 +461,12 @@ pub fn writeData(pid: u16, region_id: u16, offset: u32, data: []const u8) WriteR
 }
 
 pub fn readData(pid: u16, region_id: u16, offset: u32, buf: []u8) ReadResult {
-    const r = findById(region_id) orelse return .{ .result = .not_found, .bytes_read = 0 };
+    shmem_lock.acquire();
+    defer shmem_lock.release();
 
-    const att = findAttachment(r, pid) orelse {
+    const r = findByIdUnsafe(region_id) orelse return .{ .result = .not_found, .bytes_read = 0 };
+
+    const att = findAttachmentUnsafe(r, pid) orelse {
         reportShmViolation(pid, "read not attached");
         return .{ .result = .not_attached, .bytes_read = 0 };
     };
@@ -471,44 +511,44 @@ pub fn readData(pid: u16, region_id: u16, offset: u32, buf: []u8) ReadResult {
 // ============================================================================
 
 pub fn lockRegion(pid: u16, region_id: u16) ShmResult {
-    const r = findById(region_id) orelse return .not_found;
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    const r = findByIdUnsafe(region_id) orelse return .not_found;
     if (pid != 0 and r.owner_pid != pid) return .not_owner;
     r.locked = true;
     return .ok;
 }
 
 pub fn unlockRegion(pid: u16, region_id: u16) ShmResult {
-    const r = findById(region_id) orelse return .not_found;
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    const r = findByIdUnsafe(region_id) orelse return .not_found;
     if (pid != 0 and r.owner_pid != pid) return .not_owner;
     r.locked = false;
     return .ok;
 }
 
 // ============================================================================
-// Query
+// Query (Internal Unsafe versions - no lock)
 // ============================================================================
 
-/// F4.2: Check if region is encrypted
-pub fn isRegionEncrypted(region_id: u16) bool {
-    const r = findById(region_id) orelse return false;
-    return r.encrypted;
-}
-
-fn findById(id: u16) ?*SharedRegion {
+fn findByIdUnsafe(id: u16) ?*SharedRegion {
     for (&regions) |*r| {
         if (r.active and r.id == id) return r;
     }
     return null;
 }
 
-fn findByName(name: []const u8) ?*SharedRegion {
+fn findByNameUnsafe(name: []const u8) ?*SharedRegion {
     for (&regions) |*r| {
         if (r.active and strEql(r.getName(), name)) return r;
     }
     return null;
 }
 
-fn findAttachment(r: *SharedRegion, pid: u16) ?*Attachment {
+fn findAttachmentUnsafe(r: *SharedRegion, pid: u16) ?*Attachment {
     if (pid == 0) return &r.attachments[0];
     for (&r.attachments) |*a| {
         if (a.active and a.pid == pid) return a;
@@ -516,7 +556,7 @@ fn findAttachment(r: *SharedRegion, pid: u16) ?*Attachment {
     return null;
 }
 
-fn countRegionsForPid(pid: u16) usize {
+fn countRegionsForPidUnsafe(pid: u16) usize {
     var count: usize = 0;
     for (&regions) |*r| {
         if (r.active and r.owner_pid == pid) count += 1;
@@ -524,7 +564,7 @@ fn countRegionsForPid(pid: u16) usize {
     return count;
 }
 
-fn countAttachmentsForPid(pid: u16) usize {
+fn countAttachmentsForPidUnsafe(pid: u16) usize {
     var count: usize = 0;
     for (&regions) |*r| {
         if (!r.active) continue;
@@ -533,6 +573,40 @@ fn countAttachmentsForPid(pid: u16) usize {
         }
     }
     return count;
+}
+
+// ============================================================================
+// Query (Public - with lock)
+// ============================================================================
+
+/// F4.2: Check if region is encrypted
+pub fn isRegionEncrypted(region_id: u16) bool {
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    const r = findByIdUnsafe(region_id) orelse return false;
+    return r.encrypted;
+}
+
+// Legacy public finders (for backward compatibility)
+fn findById(id: u16) ?*SharedRegion {
+    return findByIdUnsafe(id);
+}
+
+fn findByName(name: []const u8) ?*SharedRegion {
+    return findByNameUnsafe(name);
+}
+
+fn findAttachment(r: *SharedRegion, pid: u16) ?*Attachment {
+    return findAttachmentUnsafe(r, pid);
+}
+
+fn countRegionsForPid(pid: u16) usize {
+    return countRegionsForPidUnsafe(pid);
+}
+
+fn countAttachmentsForPid(pid: u16) usize {
+    return countAttachmentsForPidUnsafe(pid);
 }
 
 pub fn getStats() ShmStats {
@@ -544,6 +618,9 @@ pub fn resetStats() void {
 }
 
 pub fn getActiveRegionCount() usize {
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
     var count: usize = 0;
     for (&regions) |*r| {
         if (r.active) count += 1;
@@ -560,7 +637,10 @@ pub fn getRegionById(id: u16) ?struct {
     locked: bool,
     encrypted: bool,
 } {
-    const r = findById(id) orelse return null;
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    const r = findByIdUnsafe(id) orelse return null;
     return .{
         .name = r.getName(),
         .owner = r.owner_pid,
@@ -573,18 +653,27 @@ pub fn getRegionById(id: u16) ?struct {
 }
 
 pub fn findRegionByName(name: []const u8) ?u16 {
-    const r = findByName(name) orelse return null;
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    const r = findByNameUnsafe(name) orelse return null;
     return r.id;
 }
 
 pub fn isAttached(pid: u16, region_id: u16) bool {
-    const r = findById(region_id) orelse return false;
-    return findAttachment(r, pid) != null;
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    const r = findByIdUnsafe(region_id) orelse return false;
+    return findAttachmentUnsafe(r, pid) != null;
 }
 
 pub fn getAttachmentPerm(pid: u16, region_id: u16) ShmPerm {
-    const r = findById(region_id) orelse return .none;
-    const att = findAttachment(r, pid) orelse return .none;
+    shmem_lock.acquire();
+    defer shmem_lock.release();
+
+    const r = findByIdUnsafe(region_id) orelse return .none;
+    const att = findAttachmentUnsafe(r, pid) orelse return .none;
     return att.perm;
 }
 
@@ -630,6 +719,9 @@ pub fn printStatus() void {
     serial.writeString("\n  CAP violations: ");
     printNum64(stats.cap_violations);
     serial.writeString("\n");
+
+    shmem_lock.acquire();
+    defer shmem_lock.release();
 
     var found = false;
     for (&regions) |*r| {

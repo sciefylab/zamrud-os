@@ -1,9 +1,11 @@
 //! Zamrud OS - Physical Memory Manager (PMM)
 //! Uses bitmap allocation for 4KB pages
+//! B2.9: SMP-safe with spinlock protection
 
 const serial = @import("../drivers/serial/serial.zig");
 const limine = @import("../core/limine.zig");
 const sanitize = @import("sanitize.zig");
+const spinlock = @import("../arch/x86_64/spinlock.zig");
 
 // Page size: 4 KB
 pub const PAGE_SIZE: u64 = 4096;
@@ -19,6 +21,9 @@ var total_pages: u64 = 0;
 var used_pages: u64 = 0;
 var hhdm_offset: u64 = 0;
 var highest_page: u64 = 0;
+
+// B2.9: SMP lock for PMM operations
+var pmm_lock: spinlock.IrqSpinLock = .{};
 
 // ============================================================================
 // Safe Memory Read (avoid SSE)
@@ -224,9 +229,17 @@ fn markRegionUsed(base: u64, length: u64) void {
     }
 }
 
-/// Allocate a single physical page
+/// Allocate a single physical page (SMP-safe)
 /// Returns physical address or null if no memory available
 pub fn allocPage() ?u64 {
+    pmm_lock.acquire();
+    defer pmm_lock.release();
+
+    return allocPageUnsafe();
+}
+
+/// Allocate without lock (for use inside already-locked sections)
+fn allocPageUnsafe() ?u64 {
     // Search for a free page
     var page: u64 = 256; // Start after first 1MB (page 256)
     while (page < total_pages) : (page += 1) {
@@ -247,9 +260,12 @@ pub fn allocPage() ?u64 {
     return null;
 }
 
-/// Allocate multiple contiguous pages
+/// Allocate multiple contiguous pages (SMP-safe)
 pub fn allocPages(count: u64) ?u64 {
     if (count == 0) return null;
+
+    pmm_lock.acquire();
+    defer pmm_lock.release();
 
     var page: u64 = 256; // Start after first 1MB
     while (page + count <= total_pages) : (page += 1) {
@@ -289,7 +305,7 @@ pub fn allocPages(count: u64) ?u64 {
     return null;
 }
 
-/// Free a physical page
+/// Free a physical page (SMP-safe)
 pub fn freePage(phys_addr: u64) void {
     if (phys_addr % PAGE_SIZE != 0) {
         serial.writeString("[PMM] ERROR: Unaligned free at ");
@@ -305,6 +321,9 @@ pub fn freePage(phys_addr: u64) void {
         serial.writeString("\n");
         return;
     }
+
+    pmm_lock.acquire();
+    defer pmm_lock.release();
 
     if (!testBit(page)) {
         serial.writeString("[PMM] WARNING: Double free at ");
@@ -326,7 +345,8 @@ pub fn freePage(phys_addr: u64) void {
         used_pages -= 1;
     }
 }
-/// Free multiple contiguous pages
+
+/// Free multiple contiguous pages (SMP-safe)
 pub fn freePages(phys_addr: u64, count: u64) void {
     if (phys_addr % PAGE_SIZE != 0) {
         serial.writeString("[PMM] ERROR: Unaligned free at ");
@@ -340,6 +360,9 @@ pub fn freePages(phys_addr: u64, count: u64) void {
         serial.writeString("[PMM] ERROR: Range out of bounds\n");
         return;
     }
+
+    pmm_lock.acquire();
+    defer pmm_lock.release();
 
     var i: u64 = 0;
     while (i < count) : (i += 1) {
@@ -500,7 +523,7 @@ pub fn test_pmm() void {
     if (page1) |p1| {
         serial.writeString("  Page 1: ");
         printHex64(p1);
-        serial.writeString(" [OK]\n"); // Ganti ✓ dengan [OK]
+        serial.writeString(" [OK]\n");
     }
 
     if (page2) |p2| {
@@ -541,7 +564,7 @@ pub fn test_pmm() void {
         printHex64(p4);
         if (page2) |p2| {
             if (p4 == p2) {
-                serial.writeString(" (Reused page 2) [OK]"); // Ganti ✓
+                serial.writeString(" (Reused page 2) [OK]");
             }
         }
         serial.writeString("\n");
@@ -555,11 +578,11 @@ pub fn test_pmm() void {
         printHex64(cp);
         serial.writeString(" - ");
         printHex64(cp + 4 * PAGE_SIZE - 1);
-        serial.writeString(" [OK]\n"); // Ganti ✓
+        serial.writeString(" [OK]\n");
 
         serial.writeString("  Freeing contiguous block...\n");
         freePages(cp, 4);
-        serial.writeString("  Freed [OK]\n"); // Ganti ✓
+        serial.writeString("  Freed [OK]\n");
     }
 
     // Final stats
@@ -568,8 +591,8 @@ pub fn test_pmm() void {
     printHex16(getFreePages());
     serial.writeString("\n");
     serial.writeString("  Memory leaked: ");
-    if (getFreePages() == initial_free - 3) { // We allocated 3 pages in test 1
-        serial.writeString("None [PASS]\n"); // Ganti ✓
+    if (getFreePages() == initial_free - 3) {
+        serial.writeString("None [PASS]\n");
     } else {
         serial.writeString("Some pages not freed [FAIL]\n");
     }
@@ -578,5 +601,3 @@ pub fn test_pmm() void {
     serial.writeString("  PMM Tests Complete!\n");
     serial.writeString("========================================\n\n");
 }
-
-// check point 8 scheduller
