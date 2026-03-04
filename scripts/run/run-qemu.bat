@@ -1,7 +1,8 @@
 @echo off
 
 echo ============================================
-echo   Zamrud OS - QEMU Runner (AHCI + Dual NIC)
+echo   Zamrud OS - QEMU Runner (Triple NIC)
+echo   E1000 + RTL8139 + VirtIO
 echo ============================================
 
 set SCRIPT_DIR=%~dp0
@@ -16,7 +17,12 @@ if not exist "%ISO%" (
 )
 
 echo Starting Zamrud OS...
-echo Network: E1000 (eth0) + VirtIO (eth1)
+echo.
+echo Network Interfaces:
+echo   eth0: Intel E1000     (Gigabit, MMIO)
+echo   eth1: Realtek RTL8139 (Fast Ethernet, I/O Port)
+echo   eth2: VirtIO-Net      (Paravirtualized, High Performance)
+echo.
 
 REM Check if disk exists
 set DISK_OPTS=
@@ -28,6 +34,7 @@ if exist "%DISK%" (
     echo   Run 'scripts\run\create-disk.bat' to create virtual disk
 )
 
+echo.
 echo Press Ctrl+C to exit
 echo.
 
@@ -42,8 +49,10 @@ qemu-system-x86_64 ^
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 ^
     -device e1000,netdev=net0,mac=52:54:00:12:34:56 ^
     -netdev user,id=net0,hostfwd=tcp::8080-:80 ^
-    -device virtio-net-pci,netdev=net1,mac=52:54:00:12:34:57 ^
-    -netdev user,id=net1
+    -device rtl8139,netdev=net1,mac=52:54:00:12:34:57 ^
+    -netdev user,id=net1,hostfwd=tcp::8081-:81 ^
+    -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58 ^
+    -netdev user,id=net2,hostfwd=tcp::8082-:82
 
 REM ============================================
 REM Storage:
@@ -51,19 +60,42 @@ REM   AHCI Controller: ahci0
 REM   SATA Port 0:     disks/system.qcow2
 REM   (B2.4: AHCI/DMA mode instead of IDE/PIO)
 REM
-REM Network Interfaces:
-REM   eth0 (E1000):   10.0.2.15 (default)
-REM   eth1 (VirtIO):  10.0.2.15 (secondary)
-REM   Gateway:        10.0.2.2
-REM   DNS Server:     10.0.2.3
+REM Network Interfaces (B2.8 Complete):
+REM   +-------+----------+-------------------+------------------+
+REM   | Name  | Driver   | Type              | MAC Address      |
+REM   +-------+----------+-------------------+------------------+
+REM   | eth0  | E1000    | Intel Gigabit     | 52:54:00:12:34:56|
+REM   | eth1  | RTL8139  | Realtek 10/100    | 52:54:00:12:34:57|
+REM   | eth2  | VirtIO   | Paravirtualized   | 52:54:00:12:34:58|
+REM   +-------+----------+-------------------+------------------+
+REM
+REM   All interfaces use QEMU SLIRP:
+REM     IP:      10.0.2.15
+REM     Gateway: 10.0.2.2
+REM     DNS:     10.0.2.3
 REM
 REM Port Forwarding:
-REM   Host 8080 -> Guest 80
+REM   Host 8080 -> Guest 80 (via E1000)
+REM   Host 8081 -> Guest 81 (via RTL8139)
+REM   Host 8082 -> Guest 82 (via VirtIO)
 REM
 REM Debug:
 REM   isa-debug-exit on port 0xF4 for clean shutdown
 REM
-REM Fallback (IDE mode, if AHCI has issues):
-REM   Replace DISK_OPTS with:
-REM   set DISK_OPTS=-drive file=%DISK%,format=qcow2,if=ide
+REM Test Commands in Zamrud OS:
+REM   ifconfig          - Show all interfaces
+REM   net drivers       - Show driver status
+REM   net test b1       - Test all NIC drivers
+REM   ping 10.0.2.2     - Test connectivity
+REM
+REM Alternative Configurations:
+REM   Single NIC (E1000 only):
+REM     qemu-system-x86_64 ... -device e1000,netdev=net0 -netdev user,id=net0
+REM
+REM   Single NIC (RTL8139 only):
+REM     qemu-system-x86_64 ... -device rtl8139,netdev=net0 -netdev user,id=net0
+REM
+REM   Single NIC (VirtIO only):
+REM     qemu-system-x86_64 ... -device virtio-net-pci,netdev=net0 -netdev user,id=net0
+REM
 REM ============================================

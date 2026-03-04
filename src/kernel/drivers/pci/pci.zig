@@ -45,6 +45,16 @@ pub const SUBCLASS_ETHERNET: u8 = 0x00;
 pub const SUBCLASS_TOKEN_RING: u8 = 0x01;
 pub const SUBCLASS_FDDI: u8 = 0x02;
 
+// Di bagian constants, tambahkan:
+pub const DEVICE_RTL8139: u16 = 0x8139;
+pub const DEVICE_RTL8139B: u16 = 0x8138;
+
+// Di fungsi hasRtl8139Device (tambahkan fungsi baru):
+pub fn hasRtl8139Device() bool {
+    return findDevice(VENDOR_REALTEK, 0x8139) != null or
+        findDevice(VENDOR_REALTEK, 0x8138) != null;
+}
+
 // =============================================================================
 // Types
 // =============================================================================

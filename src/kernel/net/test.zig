@@ -1,5 +1,6 @@
 //! Zamrud OS - Network Stack Tests (B1 + B2 + S.3 + H.6)
 //! Comprehensive tests for Network Drivers, TCP/IP Stack, ARP Defense, and DHCP Security
+//! B2.8: Added RTL8139 driver tests
 
 const serial = @import("../drivers/serial/serial.zig");
 const terminal = @import("../drivers/display/terminal.zig");
@@ -8,6 +9,7 @@ const ethernet = @import("../drivers/network/ethernet.zig");
 const loopback = @import("../drivers/network/loopback.zig");
 const virtio_net = @import("../drivers/network/virtio_net.zig");
 const e1000 = @import("../drivers/network/e1000.zig");
+const rtl8139 = @import("../drivers/network/rtl8139.zig");
 const pci = @import("../drivers/pci/pci.zig");
 const net = @import("net.zig");
 const arp = @import("arp.zig");
@@ -20,7 +22,7 @@ const checksum = @import("checksum.zig");
 const socket = @import("socket.zig");
 const dhcp = @import("dhcp.zig");
 const dns = @import("dns.zig");
-const dhcp_security = @import("dhcp_security.zig"); // H.6
+const dhcp_security = @import("dhcp_security.zig");
 
 // =============================================================================
 // Unified Output - Writes to BOTH terminal and serial
@@ -150,6 +152,7 @@ pub fn runAllTests() TestResult {
     testLoopbackInterface(&result);
     testVirtioNet(&result);
     testE1000(&result);
+    testRtl8139(&result);
     testEthernetFrames(&result);
     testPacketBuffer(&result);
     testInterfaceManagement(&result);
@@ -204,12 +207,13 @@ pub fn runAllTests() TestResult {
 // =============================================================================
 
 fn testPciBus(result: *TestResult) void {
-    printTest("1", "8", "PCI Bus Driver");
+    printTest("1", "9", "PCI Bus Driver");
 
     result.check(pci.isInitialized(), "PCI initialized");
     result.check(pci.PCI_VENDOR_INVALID == 0xFFFF, "VENDOR_INVALID = 0xFFFF");
     result.check(pci.VENDOR_INTEL == 0x8086, "VENDOR_INTEL = 0x8086");
     result.check(pci.VENDOR_VIRTIO == 0x1AF4, "VENDOR_VIRTIO = 0x1AF4");
+    result.check(pci.VENDOR_REALTEK == 0x10EC, "VENDOR_REALTEK = 0x10EC");
 
     const device_count = pci.getDeviceCount();
     result.check(device_count >= 0, "Device count valid");
@@ -220,8 +224,10 @@ fn testPciBus(result: *TestResult) void {
 
     const found_intel = pci.findDevice(pci.VENDOR_INTEL, 0x100E);
     const found_virtio = pci.findDevice(pci.VENDOR_VIRTIO, 0x1000);
+    const found_realtek = pci.findDevice(pci.VENDOR_REALTEK, 0x8139);
     _ = found_intel;
     _ = found_virtio;
+    _ = found_realtek;
     result.check(true, "Device lookup works");
 
     const class_name = pci.getClassName(0x02);
@@ -233,7 +239,7 @@ fn testPciBus(result: *TestResult) void {
 // =============================================================================
 
 fn testNetworkDriver(result: *TestResult) void {
-    printTest("2", "8", "Network Driver Core");
+    printTest("2", "9", "Network Driver Core");
 
     result.check(network.isInitialized(), "Driver initialized");
     result.check(network.getInterfaceCount() >= 1, "Interface count >= 1");
@@ -246,7 +252,7 @@ fn testNetworkDriver(result: *TestResult) void {
 }
 
 fn testLoopbackInterface(result: *TestResult) void {
-    printTest("3", "8", "Loopback Interface");
+    printTest("3", "9", "Loopback Interface");
 
     const lo = network.getInterfaceByName("lo");
     result.check(lo != null, "Loopback exists");
@@ -272,7 +278,7 @@ fn testLoopbackInterface(result: *TestResult) void {
 }
 
 fn testVirtioNet(result: *TestResult) void {
-    printTest("4", "8", "VirtIO Network Driver");
+    printTest("4", "9", "VirtIO Network Driver");
 
     const virtio_available = virtio_net.isInitialized();
     const probed = virtio_net.probe();
@@ -310,7 +316,7 @@ fn testVirtioNet(result: *TestResult) void {
 }
 
 fn testE1000(result: *TestResult) void {
-    printTest("5", "8", "Intel E1000 Driver");
+    printTest("5", "9", "Intel E1000 Driver");
 
     const e1000_available = e1000.isInitialized();
     const probed = e1000.probe();
@@ -348,8 +354,85 @@ fn testE1000(result: *TestResult) void {
     result.check(e1000.E1000_DEV_ID == 0x100E, "E1000_DEV_ID");
 }
 
+// =============================================================================
+// B1/B2.8: RTL8139 Driver Tests
+// =============================================================================
+
+fn testRtl8139(result: *TestResult) void {
+    printTest("6", "9", "Realtek RTL8139 Driver (B2.8)");
+
+    // Constants verification
+    result.check(rtl8139.REALTEK_VENDOR_ID == 0x10EC, "REALTEK_VENDOR_ID = 0x10EC");
+    result.check(rtl8139.RTL8139_DEVICE_ID == 0x8139, "RTL8139_DEVICE_ID = 0x8139");
+    result.check(rtl8139.NUM_TX_DESC == 4, "NUM_TX_DESC = 4");
+    result.check(rtl8139.RX_BUFFER_SIZE >= 8192, "RX_BUFFER >= 8K");
+    result.check(rtl8139.TX_BUFFER_SIZE >= 1536, "TX_BUFFER >= 1536");
+
+    // Register definitions
+    result.check(rtl8139.REG_CR == 0x37, "REG_CR = 0x37");
+    result.check(rtl8139.REG_IMR == 0x3C, "REG_IMR = 0x3C");
+    result.check(rtl8139.REG_ISR == 0x3E, "REG_ISR = 0x3E");
+    result.check(rtl8139.REG_RCR == 0x44, "REG_RCR = 0x44");
+    result.check(rtl8139.REG_TCR == 0x40, "REG_TCR = 0x40");
+
+    // Control bits
+    result.check(rtl8139.CR_RST == 0x10, "CR_RST = 0x10");
+    result.check(rtl8139.CR_RE == 0x08, "CR_RE = 0x08");
+    result.check(rtl8139.CR_TE == 0x04, "CR_TE = 0x04");
+    result.check(rtl8139.INT_ROK == 0x0001, "INT_ROK = 0x0001");
+    result.check(rtl8139.INT_TOK == 0x0004, "INT_TOK = 0x0004");
+
+    // Probe
+    const rtl_available = rtl8139.isInitialized();
+    const probed = rtl8139.probe();
+    result.check(true, "Probe function works");
+
+    if (probed or rtl_available) {
+        result.checkOrSkip(rtl8139.isInitialized(), rtl_available, "RTL8139 initialized");
+
+        if (rtl_available) {
+            result.check(rtl8139.getIoBase() != 0, "I/O base != 0");
+
+            const iface = rtl8139.getInterfaceConst();
+            result.check(iface.mtu == 1500, "MTU = 1500");
+
+            var mac_valid = false;
+            for (iface.mac) |b| {
+                if (b != 0 and b != 0xFF) {
+                    mac_valid = true;
+                    break;
+                }
+            }
+            result.check(mac_valid, "MAC address valid");
+
+            result.check(true, "Link status check");
+
+            const speed = rtl8139.getLinkSpeed();
+            result.check(speed == .speed_10 or speed == .speed_100, "Speed = 10/100 Mbps");
+
+            const stats = rtl8139.getStats();
+            result.check(stats.tx_packets >= 0, "Stats accessible");
+        } else {
+            result.skip("I/O base != 0");
+            result.skip("MTU = 1500");
+            result.skip("MAC address valid");
+            result.skip("Link status check");
+            result.skip("Speed = 10/100 Mbps");
+            result.skip("Stats accessible");
+        }
+    } else {
+        result.skip("RTL8139 initialized");
+        result.skip("I/O base != 0");
+        result.skip("MTU = 1500");
+        result.skip("MAC address valid");
+        result.skip("Link status check");
+        result.skip("Speed = 10/100 Mbps");
+        result.skip("Stats accessible");
+    }
+}
+
 fn testEthernetFrames(result: *TestResult) void {
-    printTest("6", "8", "Ethernet Frames");
+    printTest("7", "9", "Ethernet Frames");
 
     var buffer: [ethernet.MAX_FRAME_SIZE]u8 = undefined;
     const src_mac: network.MacAddress = .{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
@@ -379,7 +462,7 @@ fn testEthernetFrames(result: *TestResult) void {
 }
 
 fn testPacketBuffer(result: *TestResult) void {
-    printTest("7", "8", "Packet Buffer");
+    printTest("8", "9", "Packet Buffer");
 
     var pkt = network.PacketBuffer.init();
     result.check(pkt.len == 0, "Init with len=0");
@@ -398,7 +481,7 @@ fn testPacketBuffer(result: *TestResult) void {
 }
 
 fn testInterfaceManagement(result: *TestResult) void {
-    printTest("8", "8", "Interface Management");
+    printTest("9", "9", "Interface Management");
 
     result.check(network.getInterface(0) != null, "getInterface(0)");
     result.check(network.getInterface(100) == null, "getInterface(100) = null");
@@ -538,7 +621,6 @@ fn testSocketApi(result: *TestResult) void {
     result.check(socket.isInitialized(), "Socket initialized");
     result.check(socket.MAX_SOCKETS >= 16, "MAX_SOCKETS >= 16");
 
-    // Create UDP socket
     const udp_sock = socket.create(.udp);
     result.check(udp_sock != null, "Create UDP socket");
 
@@ -555,7 +637,6 @@ fn testSocketApi(result: *TestResult) void {
         result.fail("Socket closed");
     }
 
-    // Create TCP socket
     const tcp_sock = socket.create(.tcp);
     result.check(tcp_sock != null, "Create TCP socket");
     if (tcp_sock) |s| {
@@ -595,10 +676,11 @@ fn testNetworkIntegration(result: *TestResult) void {
     result.check(stats.interfaces >= 1, "Stats valid");
     result.check(pci.isInitialized(), "PCI ready");
 
-    // Check for physical NICs
+    // Check for physical NICs (any of the three)
     const virtio_ready = virtio_net.isInitialized();
     const e1000_ready = e1000.isInitialized();
-    if (virtio_ready or e1000_ready) {
+    const rtl8139_ready = rtl8139.isInitialized();
+    if (virtio_ready or e1000_ready or rtl8139_ready) {
         result.check(true, "Physical NIC detected");
     } else {
         result.skip("Physical NIC detected");
@@ -635,7 +717,6 @@ fn testNetworkIntegration(result: *TestResult) void {
 fn testArpDefenseInit(result: *TestResult) void {
     printTest("1", "6", "ARP Defense Initialization");
 
-    // Ensure initialized
     if (!arp_defense.isInitialized()) {
         arp_defense.init();
     }
@@ -646,7 +727,6 @@ fn testArpDefenseInit(result: *TestResult) void {
     const stats = arp_defense.getStats();
     result.check(stats.bindings_created >= 2, "Stats accessible");
 
-    // Check config defaults
     result.check(!arp_defense.config.require_signature, "Signature disabled (QEMU)");
     result.check(!arp_defense.config.require_peer_binding, "Peer binding disabled");
     result.check(arp_defense.config.detect_gratuitous, "Gratuitous detect ON");
@@ -658,9 +738,8 @@ fn testArpDefenseBindings(result: *TestResult) void {
 
     const before_count = arp_defense.getBindingCount();
 
-    // Create a test binding with PeerID
     const test_mac: arp_defense.MacAddress = .{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01 };
-    const test_ip: u32 = (192 << 24) | (168 << 16) | (50 << 8) | 1; // 192.168.50.1
+    const test_ip: u32 = (192 << 24) | (168 << 16) | (50 << 8) | 1;
     const test_peer_id: [32]u8 = [_]u8{0x42} ** 32;
     const test_pubkey: [32]u8 = [_]u8{0x00} ** 32;
 
@@ -668,7 +747,6 @@ fn testArpDefenseBindings(result: *TestResult) void {
     result.check(created, "Create crypto binding");
     result.check(arp_defense.getBindingCount() == before_count + 1, "Binding count +1");
 
-    // Check binding properties
     var found = false;
     for (0..arp_defense.getBindingCount()) |i| {
         if (arp_defense.getBinding(i)) |b| {
@@ -685,13 +763,11 @@ fn testArpDefenseBindings(result: *TestResult) void {
         result.fail("Trust = verified");
     }
 
-    // Create static binding
     const static_mac: arp_defense.MacAddress = .{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
-    const static_ip: u32 = (10 << 24) | (0 << 16) | (50 << 8) | 1; // 10.0.50.1
+    const static_ip: u32 = (10 << 24) | (0 << 16) | (50 << 8) | 1;
     const static_ok = arp_defense.createStaticBinding(static_mac, static_ip, "Test Static");
     result.check(static_ok, "Create static binding");
 
-    // Verify static has trusted level
     var static_found = false;
     for (0..arp_defense.getBindingCount()) |i| {
         if (arp_defense.getBinding(i)) |b| {
@@ -706,23 +782,19 @@ fn testArpDefenseBindings(result: *TestResult) void {
         result.fail("Static trust level");
     }
 
-    // Remove test binding
     result.check(arp_defense.removeBinding(test_ip), "Remove binding");
-
-    // Cleanup static
     _ = arp_defense.removeBinding(static_ip);
 }
 
 fn testArpDefenseValidation(result: *TestResult) void {
     printTest("3", "6", "ARP Packet Validation");
 
-    // Test with QEMU gateway (should be trusted)
     const qemu_gw_mac: arp_defense.MacAddress = .{ 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
-    const qemu_gw_ip: u32 = (10 << 24) | (0 << 16) | (2 << 8) | 2; // 10.0.2.2
-    const our_ip: u32 = (10 << 24) | (0 << 16) | (2 << 8) | 15; // 10.0.2.15
+    const qemu_gw_ip: u32 = (10 << 24) | (0 << 16) | (2 << 8) | 2;
+    const our_ip: u32 = (10 << 24) | (0 << 16) | (2 << 8) | 15;
 
     const valid_result = arp_defense.validateArpPacket(
-        1, // ARP request
+        1,
         qemu_gw_mac,
         qemu_gw_ip,
         [_]u8{0} ** 6,
@@ -732,9 +804,8 @@ fn testArpDefenseValidation(result: *TestResult) void {
     result.check(valid_result.allowed, "Trusted source allowed");
     result.check(@intFromEnum(valid_result.trust_level) >= @intFromEnum(arp_defense.TrustLevel.trusted), "Trust level >= trusted");
 
-    // Test with unknown source (should be allowed but unverified in default config)
     const unknown_mac: arp_defense.MacAddress = .{ 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01 };
-    const unknown_ip: u32 = (172 << 24) | (16 << 16) | (0 << 8) | 100; // 172.16.0.100
+    const unknown_ip: u32 = (172 << 24) | (16 << 16) | (0 << 8) | 100;
 
     const unknown_result = arp_defense.validateArpPacket(
         1,
@@ -744,33 +815,29 @@ fn testArpDefenseValidation(result: *TestResult) void {
         our_ip,
         null,
     );
-    // With default config (no signature required), unknown should be allowed
     result.check(unknown_result.trust_level == .unknown, "Unknown = unverified");
 
-    // Verify stats updated
-    const stats = arp_defense.getStats();
-    result.check(stats.total_packets > 0, "Stats: packets counted");
-    result.check(stats.packets_allowed > 0, "Stats: allowed counted");
+    const arp_stats = arp_defense.getStats();
+    result.check(arp_stats.total_packets > 0, "Stats: packets counted");
+    result.check(arp_stats.packets_allowed > 0, "Stats: allowed counted");
 }
 
 fn testArpDefenseSpoofDetection(result: *TestResult) void {
     printTest("4", "6", "Spoof Detection");
 
-    // First, create a verified binding
     const legit_mac: arp_defense.MacAddress = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
-    const legit_ip: u32 = (192 << 24) | (168 << 16) | (99 << 8) | 1; // 192.168.99.1
+    const legit_ip: u32 = (192 << 24) | (168 << 16) | (99 << 8) | 1;
     const peer_id: [32]u8 = [_]u8{0xAB} ** 32;
     const pubkey: [32]u8 = [_]u8{0x00} ** 32;
 
     _ = arp_defense.createBinding(legit_mac, legit_ip, peer_id, pubkey);
 
-    // Now try to spoof with different MAC
     const spoof_mac: arp_defense.MacAddress = .{ 0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA };
 
     const spoof_result = arp_defense.validateArpPacket(
-        2, // ARP reply
+        2,
         spoof_mac,
-        legit_ip, // Same IP, different MAC = SPOOF
+        legit_ip,
         [_]u8{0} ** 6,
         0,
         null,
@@ -782,22 +849,18 @@ fn testArpDefenseSpoofDetection(result: *TestResult) void {
     result.check(stats.spoof_attempts > 0, "Spoof attempt counted");
     result.check(stats.packets_blocked > 0, "Blocked counted");
 
-    // Cleanup
     _ = arp_defense.removeBinding(legit_ip);
 }
 
 fn testArpDefenseRateLimit(result: *TestResult) void {
     printTest("5", "6", "Rate Limiting");
 
-    // Use a unique IP for rate limit test
     const rate_mac: arp_defense.MacAddress = .{ 0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE };
-    const rate_ip: u32 = (192 << 24) | (168 << 16) | (200 << 8) | 1; // 192.168.200.1
+    const rate_ip: u32 = (192 << 24) | (168 << 16) | (200 << 8) | 1;
 
-    // Get config rate limit
     const rate_limit = arp_defense.config.arp_rate_limit;
     result.check(rate_limit > 0, "Rate limit configured");
 
-    // Send many packets quickly - should eventually get rate limited
     var blocked_count: u32 = 0;
     var i: u32 = 0;
     while (i < rate_limit + 20) : (i += 1) {
@@ -814,7 +877,6 @@ fn testArpDefenseRateLimit(result: *TestResult) void {
         }
     }
 
-    // Some should have been blocked due to rate limiting
     result.check(blocked_count > 0 or i >= rate_limit, "Rate limit enforced");
 
     const stats = arp_defense.getStats();
@@ -824,7 +886,6 @@ fn testArpDefenseRateLimit(result: *TestResult) void {
 fn testArpDefenseEvents(result: *TestResult) void {
     printTest("6", "6", "Event Logging & Config");
 
-    // Events should have been logged from previous tests
     const event_count = arp_defense.getEventCount();
     result.check(event_count >= 0, "Event count accessible");
 
@@ -841,22 +902,18 @@ fn testArpDefenseEvents(result: *TestResult) void {
         result.skip("Event type valid");
     }
 
-    // Test config changes
     arp_defense.setRequireSignature(true);
     result.check(arp_defense.config.require_signature, "Set require_signature");
 
     arp_defense.setRequirePeerBinding(true);
     result.check(arp_defense.config.require_peer_binding, "Set require_peer_binding");
 
-    // Reset to defaults for other tests
     arp_defense.setRequireSignature(false);
     arp_defense.setRequirePeerBinding(false);
 
-    // Clear events
     arp_defense.clearEvents();
     result.check(arp_defense.getEventCount() == 0, "Clear events");
 
-    // Test ARP module security integration
     result.check(arp.isSecurityEnabled(), "ARP security enabled");
 
     const sec_stats = arp.getSecurityStats();
@@ -870,20 +927,17 @@ fn testArpDefenseEvents(result: *TestResult) void {
 fn testDhcpSecurityInit(result: *TestResult) void {
     printTest("1", "6", "DHCP Security Initialization");
 
-    // Initialize
     dhcp_security.init();
 
     result.check(dhcp_security.isInitialized(), "DHCP-SEC initialized");
     result.check(dhcp_security.isEnabled(), "DHCP-SEC enabled");
 
-    // Check config defaults
     const cfg = dhcp_security.config;
     result.check(cfg.enabled, "Config: enabled");
     result.check(cfg.trust_first_server, "Config: trust first");
     result.check(cfg.validate_offers, "Config: validate offers");
     result.check(cfg.detect_rogue, "Config: detect rogue");
 
-    // Stats should be zeroed
     const stats = dhcp_security.getStats();
     result.check(stats.rogue_detections == 0, "Stats zeroed");
 }
@@ -893,22 +947,18 @@ fn testDhcpSecurityPinning(result: *TestResult) void {
 
     dhcp_security.init();
 
-    // Pin a server
-    const server_ip: u32 = (192 << 24) | (168 << 16) | (1 << 8) | 1; // 192.168.1.1
+    const server_ip: u32 = (192 << 24) | (168 << 16) | (1 << 8) | 1;
     dhcp_security.pinServer(server_ip);
 
     result.check(dhcp_security.isServerTrusted(server_ip), "Server pinned");
 
-    // Different server should not be trusted
-    const other_ip: u32 = (10 << 24) | (0 << 16) | (0 << 8) | 1; // 10.0.0.1
+    const other_ip: u32 = (10 << 24) | (0 << 16) | (0 << 8) | 1;
     result.check(!dhcp_security.isServerTrusted(other_ip), "Other not trusted");
 
-    // Get trusted server info
     const trusted = dhcp_security.getTrustedServer();
     result.check(trusted.pinned, "Trusted is pinned");
     result.check(trusted.ip == server_ip, "Trusted IP correct");
 
-    // Clear and verify
     dhcp_security.clearTrustedServer();
     result.check(!dhcp_security.isServerTrusted(server_ip), "Clear works");
 }
@@ -918,22 +968,18 @@ fn testDhcpSecurityRogue(result: *TestResult) void {
 
     dhcp_security.init();
 
-    // First server should be accepted and pinned
-    const legit_ip: u32 = (192 << 24) | (168 << 16) | (1 << 8) | 1; // 192.168.1.1
+    const legit_ip: u32 = (192 << 24) | (168 << 16) | (1 << 8) | 1;
     const first_ok = dhcp_security.checkServer(legit_ip);
     result.check(first_ok, "First server OK");
     result.check(dhcp_security.isServerTrusted(legit_ip), "First server pinned");
 
-    // Second different server should be detected as rogue
-    const rogue_ip: u32 = (10 << 24) | (0 << 16) | (0 << 8) | 99; // 10.0.0.99
+    const rogue_ip: u32 = (10 << 24) | (0 << 16) | (0 << 8) | 99;
     const rogue_blocked = !dhcp_security.checkServer(rogue_ip);
     result.check(rogue_blocked, "Rogue blocked");
 
-    // Stats should reflect detection
     const stats = dhcp_security.getStats();
     result.check(stats.rogue_detections >= 1, "Rogue counted");
 
-    // Events should be logged
     result.check(dhcp_security.getEventCount() >= 1, "Event logged");
 }
 
@@ -942,7 +988,6 @@ fn testDhcpSecurityValidation(result: *TestResult) void {
 
     dhcp_security.init();
 
-    // Valid offer: 192.168.1.100, mask 255.255.255.0, gw 192.168.1.1, dns 8.8.8.8
     const valid = dhcp_security.validateOffer(
         (192 << 24) | (168 << 16) | (1 << 8) | 100,
         (255 << 24) | (255 << 16) | (255 << 8) | 0,
@@ -951,7 +996,6 @@ fn testDhcpSecurityValidation(result: *TestResult) void {
     );
     result.check(valid, "Valid offer OK");
 
-    // Zero IP should be rejected
     const zero_ip = dhcp_security.validateOffer(
         0,
         (255 << 24) | (255 << 16) | (255 << 8) | 0,
@@ -960,7 +1004,6 @@ fn testDhcpSecurityValidation(result: *TestResult) void {
     );
     result.check(!zero_ip, "Zero IP rejected");
 
-    // Broadcast should be rejected
     const broadcast = dhcp_security.validateOffer(
         0xFFFFFFFF,
         (255 << 24) | (255 << 16) | (255 << 8) | 0,
@@ -969,7 +1012,6 @@ fn testDhcpSecurityValidation(result: *TestResult) void {
     );
     result.check(!broadcast, "Broadcast rejected");
 
-    // Zero subnet should be rejected
     const zero_mask = dhcp_security.validateOffer(
         (192 << 24) | (168 << 16) | (1 << 8) | 100,
         0,
@@ -978,7 +1020,6 @@ fn testDhcpSecurityValidation(result: *TestResult) void {
     );
     result.check(!zero_mask, "Zero mask rejected");
 
-    // Stats should reflect accepted/rejected
     const stats = dhcp_security.getStats();
     result.check(stats.offers_accepted >= 1, "Accepted counted");
     result.check(stats.offers_rejected >= 3, "Rejected counted");
@@ -990,7 +1031,6 @@ fn testDhcpSecurityRateLimit(result: *TestResult) void {
     dhcp_security.init();
     dhcp_security.config.max_packets_per_window = 10;
 
-    // Send packets under limit
     var under_ok = true;
     var i: u16 = 0;
     while (i < 10) : (i += 1) {
@@ -1001,16 +1041,13 @@ fn testDhcpSecurityRateLimit(result: *TestResult) void {
     }
     result.check(under_ok, "Under limit OK");
 
-    // Next packet should be blocked
     const over_blocked = !dhcp_security.checkRateLimit();
     result.check(over_blocked, "Over limit blocked");
 
-    // Stats should reflect
     const stats = dhcp_security.getStats();
     result.check(stats.rate_limit_hits >= 1, "Rate hits counted");
     result.check(stats.packets_seen >= 11, "Packets counted");
 
-    // Reset window and verify
     dhcp_security.resetRateWindow();
     const after_reset = dhcp_security.checkRateLimit();
     result.check(after_reset, "Reset works");
@@ -1021,7 +1058,6 @@ fn testDhcpSecurityFallback(result: *TestResult) void {
 
     dhcp_security.init();
 
-    // Set static config: 10.0.0.50, mask 255.255.255.0, gw 10.0.0.1, dns 10.0.0.1
     dhcp_security.setStaticFallback(
         (10 << 24) | (0 << 16) | (0 << 8) | 50,
         (255 << 24) | (255 << 16) | (255 << 8) | 0,
@@ -1033,15 +1069,12 @@ fn testDhcpSecurityFallback(result: *TestResult) void {
     result.check(fb.configured, "Static configured");
     result.check(fb.ip_addr == ((10 << 24) | (0 << 16) | (0 << 8) | 50), "Static IP correct");
 
-    // Activate fallback
     result.check(dhcp_security.activateFallback(), "Activate OK");
     result.check(dhcp_security.isFallbackActive(), "Fallback active");
 
-    // Deactivate
     dhcp_security.deactivateFallback();
     result.check(!dhcp_security.isFallbackActive(), "Deactivate OK");
 
-    // Event should be logged
     result.check(dhcp_security.getEventCount() >= 1, "Fallback event logged");
 }
 

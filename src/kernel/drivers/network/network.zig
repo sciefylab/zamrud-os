@@ -1,5 +1,6 @@
 //! Zamrud OS - Network Driver Interface
 //! Abstraction layer for network hardware
+//! B2.8: Added RTL8139 + VirtIO + E1000 support
 
 const serial = @import("../serial/serial.zig");
 const ethernet = @import("ethernet.zig");
@@ -61,6 +62,7 @@ pub const InterfaceType = enum {
     ethernet,
     virtio,
     e1000,
+    rtl8139,
     unknown,
 };
 
@@ -188,8 +190,10 @@ var loopback_pending: bool = false;
 var loopback_len: usize = 0;
 var loopback_iface_ptr: ?*NetworkInterface = null;
 
-// E1000
+// Hardware NIC pointers
 var e1000_iface_ptr: ?*NetworkInterface = null;
+var rtl8139_iface_ptr: ?*NetworkInterface = null;
+var virtio_iface_ptr: ?*NetworkInterface = null;
 
 // =============================================================================
 // Initialization
@@ -203,6 +207,8 @@ pub fn init() void {
     loopback_len = 0;
     loopback_iface_ptr = null;
     e1000_iface_ptr = null;
+    rtl8139_iface_ptr = null;
+    virtio_iface_ptr = null;
     rx_callback = null;
 
     for (&interfaces) |*iface| {
@@ -219,58 +225,181 @@ pub fn init() void {
 /// Late initialization - register hardware NICs
 pub fn initHardware() void {
     const e1000 = @import("e1000.zig");
+    const rtl8139 = @import("rtl8139.zig");
+    const virtio_net = @import("virtio_net.zig");
 
+    var eth_index: u8 = 0;
+
+    // =========================================================================
+    // Try E1000 first (Intel Gigabit - most common in QEMU)
+    // =========================================================================
     if (e1000.probe()) {
         e1000.init();
 
         if (e1000.isInitialized()) {
             if (interface_count < MAX_INTERFACES) {
-                // Get pointer to our interface slot
                 var iface = &interfaces[interface_count];
 
-                // Initialize interface
                 iface.id = @intCast(interface_count);
-                iface.setName("eth0");
+
+                var name_buf: [8]u8 = undefined;
+                const name = formatEthName(&name_buf, eth_index);
+                iface.setName(name);
+
                 iface.interface_type = .e1000;
                 iface.state = .up;
                 iface.mtu = 1500;
 
-                // Set IP configuration FIRST
-                iface.ip_addr = QEMU_SLIRP_IP;
-                iface.netmask = QEMU_SLIRP_NETMASK;
-                iface.gateway = QEMU_SLIRP_GATEWAY;
+                // First NIC gets default SLIRP IP
+                if (eth_index == 0) {
+                    iface.ip_addr = QEMU_SLIRP_IP;
+                    iface.netmask = QEMU_SLIRP_NETMASK;
+                    iface.gateway = QEMU_SLIRP_GATEWAY;
+                } else {
+                    iface.ip_addr = 0;
+                    iface.netmask = 0;
+                    iface.gateway = 0;
+                }
 
-                // Reset stats
-                iface.rx_packets = 0;
-                iface.tx_packets = 0;
-                iface.rx_bytes = 0;
-                iface.tx_bytes = 0;
-                iface.rx_errors = 0;
-                iface.tx_errors = 0;
-                iface.rx_dropped = 0;
-                iface.tx_dropped = 0;
-
-                // Tell E1000 to use this interface
+                resetIfaceStats(iface);
                 e1000.setManagedInterface(iface);
-
                 e1000_iface_ptr = iface;
                 interface_count += 1;
+                eth_index += 1;
 
-                serial.writeString("[NET-DRV] E1000 registered:\n");
-                serial.writeString("[NET-DRV]   IP:      ");
-                printIp(iface.ip_addr);
-                serial.writeString("\n[NET-DRV]   Netmask: ");
-                printIp(iface.netmask);
-                serial.writeString("\n[NET-DRV]   Gateway: ");
-                printIp(iface.gateway);
-                serial.writeString("\n[NET-DRV]   MAC:     ");
-                printMac(iface.mac);
-                serial.writeString("\n");
+                serial.writeString("[NET-DRV] E1000 registered as ");
+                serial.writeString(iface.getName());
+                serial.writeString(" (Intel Gigabit)\n");
             }
         }
-    } else {
-        serial.writeString("[NET-DRV] No E1000 device found\n");
     }
+
+    // =========================================================================
+    // Try RTL8139 (Realtek Fast Ethernet)
+    // =========================================================================
+    if (rtl8139.probe()) {
+        rtl8139.init();
+
+        if (rtl8139.isInitialized()) {
+            if (interface_count < MAX_INTERFACES) {
+                var iface = &interfaces[interface_count];
+
+                iface.id = @intCast(interface_count);
+
+                var name_buf: [8]u8 = undefined;
+                const name = formatEthName(&name_buf, eth_index);
+                iface.setName(name);
+
+                iface.interface_type = .rtl8139;
+                iface.state = .up;
+                iface.mtu = 1500;
+
+                // First NIC gets default SLIRP IP
+                if (eth_index == 0) {
+                    iface.ip_addr = QEMU_SLIRP_IP;
+                    iface.netmask = QEMU_SLIRP_NETMASK;
+                    iface.gateway = QEMU_SLIRP_GATEWAY;
+                } else {
+                    iface.ip_addr = 0;
+                    iface.netmask = 0;
+                    iface.gateway = 0;
+                }
+
+                resetIfaceStats(iface);
+                rtl8139.setManagedInterface(iface);
+                rtl8139_iface_ptr = iface;
+                interface_count += 1;
+                eth_index += 1;
+
+                serial.writeString("[NET-DRV] RTL8139 registered as ");
+                serial.writeString(iface.getName());
+                serial.writeString(" (Realtek 10/100)\n");
+            }
+        }
+    }
+
+    // =========================================================================
+    // Try VirtIO (Paravirtualized - high performance)
+    // =========================================================================
+    if (virtio_net.probe()) {
+        virtio_net.init();
+
+        if (virtio_net.isInitialized()) {
+            if (interface_count < MAX_INTERFACES) {
+                var iface = &interfaces[interface_count];
+
+                iface.id = @intCast(interface_count);
+
+                var name_buf: [8]u8 = undefined;
+                const name = formatEthName(&name_buf, eth_index);
+                iface.setName(name);
+
+                iface.interface_type = .virtio;
+                iface.state = .up;
+                iface.mtu = 1500;
+
+                // First NIC gets default SLIRP IP
+                if (eth_index == 0) {
+                    iface.ip_addr = QEMU_SLIRP_IP;
+                    iface.netmask = QEMU_SLIRP_NETMASK;
+                    iface.gateway = QEMU_SLIRP_GATEWAY;
+                } else {
+                    iface.ip_addr = 0;
+                    iface.netmask = 0;
+                    iface.gateway = 0;
+                }
+
+                resetIfaceStats(iface);
+
+                // VirtIO uses internal interface - copy MAC and callbacks
+                const viface = virtio_net.getInterfaceConst();
+                iface.mac = viface.mac;
+                iface.send_fn = viface.send_fn;
+                iface.recv_fn = viface.recv_fn;
+                iface.driver_data = viface.driver_data;
+
+                virtio_iface_ptr = iface;
+                interface_count += 1;
+                eth_index += 1;
+
+                serial.writeString("[NET-DRV] VirtIO registered as ");
+                serial.writeString(iface.getName());
+                serial.writeString(" (Paravirtualized)\n");
+            }
+        }
+    }
+
+    // =========================================================================
+    // Log summary
+    // =========================================================================
+    if (eth_index == 0) {
+        serial.writeString("[NET-DRV] No hardware NIC found\n");
+    } else {
+        serial.writeString("[NET-DRV] Total NICs registered: ");
+        printU8(eth_index);
+        serial.writeString("\n");
+    }
+}
+
+/// Format ethernet interface name (eth0, eth1, etc.)
+fn formatEthName(buf: []u8, index: u8) []const u8 {
+    buf[0] = 'e';
+    buf[1] = 't';
+    buf[2] = 'h';
+    buf[3] = '0' + index;
+    return buf[0..4];
+}
+
+/// Helper to reset interface stats
+fn resetIfaceStats(iface: *NetworkInterface) void {
+    iface.rx_packets = 0;
+    iface.tx_packets = 0;
+    iface.rx_bytes = 0;
+    iface.tx_bytes = 0;
+    iface.rx_errors = 0;
+    iface.tx_errors = 0;
+    iface.rx_dropped = 0;
+    iface.tx_dropped = 0;
 }
 
 pub fn isInitialized() bool {
@@ -410,6 +539,14 @@ pub fn getE1000Interface() ?*NetworkInterface {
     return e1000_iface_ptr;
 }
 
+pub fn getRtl8139Interface() ?*NetworkInterface {
+    return rtl8139_iface_ptr;
+}
+
+pub fn getVirtioInterface() ?*NetworkInterface {
+    return virtio_iface_ptr;
+}
+
 // =============================================================================
 // Interface Configuration
 // =============================================================================
@@ -519,9 +656,19 @@ pub fn receivePacket(iface: *NetworkInterface, buffer: []u8) isize {
 
 pub fn pollAll() void {
     const e1000 = @import("e1000.zig");
+    const rtl8139 = @import("rtl8139.zig");
+    const virtio_net = @import("virtio_net.zig");
 
     if (e1000.isInitialized()) {
         e1000.poll();
+    }
+
+    if (rtl8139.isInitialized()) {
+        rtl8139.poll();
+    }
+
+    if (virtio_net.isInitialized()) {
+        virtio_net.poll();
     }
 }
 

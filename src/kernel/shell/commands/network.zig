@@ -1296,6 +1296,7 @@ fn showInterface(iface: *net_driver.NetworkInterface) void {
         .ethernet => shell.print("ETHERNET"),
         .virtio => shell.print("VIRTIO"),
         .e1000 => shell.print("E1000"),
+        .rtl8139 => shell.print("RTL8139"), // ADD THIS LINE
         .unknown => shell.print("UNKNOWN"),
     }
     shell.println(">");
