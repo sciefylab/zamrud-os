@@ -1,5 +1,5 @@
 //! Zamrud OS - Process Management
-//! Updated: F3 User/Group context per-process
+//! B2.9b: CPU affinity support added
 
 const serial = @import("../drivers/serial/serial.zig");
 const heap = @import("../mm/heap.zig");
@@ -13,8 +13,9 @@ const sanitize = @import("../mm/sanitize.zig");
 // ============================================================================
 
 pub const MAX_PROCESSES: usize = 64;
-pub const MAX_SLOTS_USED: usize = 8;
+pub const MAX_SLOTS_USED: usize = 16; // Increased for SMP
 pub const KERNEL_STACK_SIZE: u64 = 16 * 1024;
+pub const CPU_AFFINITY_ANY: u8 = 0xFF; // Run on any CPU
 
 // ============================================================================
 // Process State
@@ -43,6 +44,11 @@ pub const Process = struct {
     total_ticks: u64 = 0,
     caps: u32 = capability.CAP_ALL,
 
+    // === B2.9b: CPU affinity ===
+    cpu_affinity: u8 = CPU_AFFINITY_ANY, // Which CPU to run on (0xFF = any)
+    last_cpu: u8 = 0, // Last CPU this process ran on
+    migrations: u32 = 0, // Number of times migrated between CPUs
+
     // === F3: User context ===
     uid: u16 = 0,
     gid: u16 = 0,
@@ -56,6 +62,11 @@ pub const Process = struct {
     pub fn getName(self: *const Process) []const u8 {
         if (self.name_len == 0) return "unnamed";
         return self.name[0..self.name_len];
+    }
+
+    /// B2.9b: Check if process can run on given CPU
+    pub fn canRunOnCpu(self: *const Process, cpu_id: u8) bool {
+        return self.cpu_affinity == CPU_AFFINITY_ANY or self.cpu_affinity == cpu_id;
     }
 };
 
@@ -91,6 +102,9 @@ pub fn init() void {
             .time_slice = 0,
             .total_ticks = 0,
             .caps = capability.CAP_NONE,
+            .cpu_affinity = CPU_AFFINITY_ANY,
+            .last_cpu = 0,
+            .migrations = 0,
             .uid = 0,
             .gid = 0,
             .euid = 0,
@@ -104,7 +118,7 @@ pub fn init() void {
     process_count = 0;
     initialized = true;
 
-    serial.writeString("[PROC] Initialized!\n");
+    serial.writeString("[PROC] Initialized (B2.9b SMP-aware)!\n");
 }
 
 pub fn isInitialized() bool {
@@ -144,6 +158,11 @@ pub fn createWithEntry(name: []const u8, entry: u64, arg: u64) ?u32 {
 }
 
 pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
+    return createFull(name, entry, arg, caps, CPU_AFFINITY_ANY);
+}
+
+/// B2.9b: Full process creation with CPU affinity
+pub fn createFull(name: []const u8, entry: u64, arg: u64, caps: u32, affinity: u8) ?u32 {
     if (!initialized) {
         serial.writeString("[PROC] ERROR: Not initialized!\n");
         return null;
@@ -178,7 +197,6 @@ pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
         proc_uid = users_mod.getCurrentUid();
         proc_gid = users_mod.getCurrentGid();
 
-        // If caller passed CAP_ALL, use role-based caps instead
         if (caps == capability.CAP_ALL) {
             proc_caps = users_mod.getCurrentRole().defaultCaps();
         }
@@ -194,13 +212,16 @@ pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
         .time_slice = 10,
         .total_ticks = 0,
         .caps = proc_caps,
+        .cpu_affinity = affinity,
+        .last_cpu = 0,
+        .migrations = 0,
         .uid = proc_uid,
         .gid = proc_gid,
         .euid = proc_uid,
         .egid = proc_gid,
     };
 
-    // F3: Copy process name
+    // Copy process name
     const nlen = @min(name.len, 32);
     var ni: usize = 0;
     while (ni < nlen) : (ni += 1) {
@@ -221,21 +242,54 @@ pub fn createWithCaps(name: []const u8, entry: u64, arg: u64, caps: u32) ?u32 {
     serial.writeString("[PROC] Created PID=0x");
     printHex32(pid);
     serial.writeString(" slot=");
-    serial.writeChar('0' + @as(u8, @intCast(slot)));
-    serial.writeString(" caps=0x");
-    printHex32(proc_caps);
-    serial.writeString(" uid=");
-    printDec16(proc_uid);
+    printDec8(@intCast(slot));
+    serial.writeString(" affinity=");
+    if (affinity == CPU_AFFINITY_ANY) {
+        serial.writeString("ANY");
+    } else {
+        printDec8(affinity);
+    }
     serial.writeString("\n");
 
     return pid;
 }
 
 // ============================================================================
+// B2.9b: CPU Affinity
+// ============================================================================
+
+/// Set CPU affinity for a process
+pub fn setAffinity(pid: u32, cpu_id: u8) bool {
+    const slot = getSlotByPid(pid) orelse return false;
+    process_table[slot].cpu_affinity = cpu_id;
+    return true;
+}
+
+/// Get CPU affinity for a process
+pub fn getAffinity(pid: u32) u8 {
+    const slot = getSlotByPid(pid) orelse return CPU_AFFINITY_ANY;
+    return process_table[slot].cpu_affinity;
+}
+
+/// Record that process ran on a CPU
+pub fn recordCpuRun(pid: u32, cpu_id: u8) void {
+    const slot = getSlotByPid(pid) orelse return;
+    if (process_table[slot].last_cpu != cpu_id and process_table[slot].last_cpu != 0) {
+        process_table[slot].migrations += 1;
+    }
+    process_table[slot].last_cpu = cpu_id;
+}
+
+/// Get migration count for a process
+pub fn getMigrations(pid: u32) u32 {
+    const slot = getSlotByPid(pid) orelse return 0;
+    return process_table[slot].migrations;
+}
+
+// ============================================================================
 // Terminate
 // ============================================================================
 
-// === GANTI terminate() ===
 pub fn terminate(pid: u32) bool {
     if (!initialized) return false;
 
@@ -291,6 +345,9 @@ pub fn terminate(pid: u32) bool {
         .time_slice = 0,
         .total_ticks = 0,
         .caps = capability.CAP_NONE,
+        .cpu_affinity = CPU_AFFINITY_ANY,
+        .last_cpu = 0,
+        .migrations = 0,
         .uid = 0,
         .gid = 0,
         .euid = 0,
@@ -311,7 +368,6 @@ pub fn getCurrentCaps() u32 {
 
 pub fn getProcessCaps(pid: u32) u32 {
     if (pid == 0) return capability.CAP_ALL;
-
     const slot = getSlotByPid(pid) orelse return capability.CAP_ALL;
     return process_table[slot].caps;
 }
@@ -319,7 +375,6 @@ pub fn getProcessCaps(pid: u32) u32 {
 pub fn setProcessCaps(pid: u32, caps: u32) bool {
     const slot = getSlotByPid(pid) orelse return false;
     process_table[slot].caps = caps;
-
     if (capability.isInitialized()) {
         return capability.setCaps(pid, caps);
     }
@@ -329,7 +384,6 @@ pub fn setProcessCaps(pid: u32, caps: u32) bool {
 pub fn grantProcessCap(pid: u32, cap: u32) bool {
     const slot = getSlotByPid(pid) orelse return false;
     process_table[slot].caps |= cap;
-
     if (capability.isInitialized()) {
         return capability.grantCap(pid, cap);
     }
@@ -339,7 +393,6 @@ pub fn grantProcessCap(pid: u32, cap: u32) bool {
 pub fn revokeProcessCap(pid: u32, cap: u32) bool {
     const slot = getSlotByPid(pid) orelse return false;
     process_table[slot].caps &= ~cap;
-
     if (capability.isInitialized()) {
         return capability.revokeCap(pid, cap);
     }
@@ -410,13 +463,15 @@ pub fn createIdleProcess() void {
         .time_slice = 1,
         .total_ticks = 0,
         .caps = capability.CAP_ALL,
+        .cpu_affinity = CPU_AFFINITY_ANY, // Idle runs on any CPU
+        .last_cpu = 0,
+        .migrations = 0,
         .uid = 0,
         .gid = 0,
         .euid = 0,
         .egid = 0,
     };
 
-    // Set name for idle
     const idle_name = "idle";
     var ni: usize = 0;
     while (ni < idle_name.len) : (ni += 1) {
@@ -465,8 +520,39 @@ pub fn getMaxSlots() usize {
     return MAX_SLOTS_USED;
 }
 
+/// B2.9b: Count ready processes that can run on a specific CPU
+pub fn countReadyForCpu(cpu_id: u8) u32 {
+    var count: u32 = 0;
+    for (1..MAX_SLOTS_USED) |i| {
+        if (process_used[i] and
+            process_table[i].state == .Ready and
+            process_table[i].canRunOnCpu(cpu_id))
+        {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+/// B2.9b: Find next ready process for a specific CPU
+pub fn findReadyForCpu(cpu_id: u8, start_slot: usize) ?usize {
+    var slot = start_slot;
+    for (0..MAX_SLOTS_USED) |_| {
+        slot = (slot + 1) % MAX_SLOTS_USED;
+        if (slot == 0) continue; // Skip idle
+
+        if (process_used[slot] and
+            process_table[slot].state == .Ready and
+            process_table[slot].canRunOnCpu(cpu_id))
+        {
+            return slot;
+        }
+    }
+    return null;
+}
+
 // ============================================================================
-// Safe access for shell — F3: includes uid/gid/name
+// Safe access for shell
 // ============================================================================
 
 pub fn getProcessInfo(slot: usize) ?struct {
@@ -477,6 +563,9 @@ pub fn getProcessInfo(slot: usize) ?struct {
     uid: u16,
     gid: u16,
     name: []const u8,
+    cpu_affinity: u8,
+    last_cpu: u8,
+    migrations: u32,
 } {
     if (slot >= MAX_SLOTS_USED) return null;
     if (!process_used[slot]) return null;
@@ -489,6 +578,9 @@ pub fn getProcessInfo(slot: usize) ?struct {
         .uid = process_table[slot].euid,
         .gid = process_table[slot].egid,
         .name = process_table[slot].getName(),
+        .cpu_affinity = process_table[slot].cpu_affinity,
+        .last_cpu = process_table[slot].last_cpu,
+        .migrations = process_table[slot].migrations,
     };
 }
 
@@ -502,19 +594,21 @@ pub fn printProcessList() void {
     while (i < MAX_SLOTS_USED) : (i += 1) {
         if (process_used[i]) {
             serial.writeString("  [");
-            serial.writeChar('0' + @as(u8, @intCast(i)));
+            printDec8(@intCast(i));
             serial.writeString("] PID=0x");
             printHex32(process_table[i].pid);
-            serial.writeString(" state=0x");
-            printHex8(@intFromEnum(process_table[i].state));
-            serial.writeString(" caps=0x");
-            printHex32(process_table[i].caps);
-            serial.writeString(" uid=");
-            printDec16(process_table[i].euid);
+            serial.writeString(" state=");
+            printDec8(@intFromEnum(process_table[i].state));
+            serial.writeString(" cpu=");
+            if (process_table[i].cpu_affinity == CPU_AFFINITY_ANY) {
+                serial.writeString("ANY");
+            } else {
+                printDec8(process_table[i].cpu_affinity);
+            }
+            serial.writeString(" last=");
+            printDec8(process_table[i].last_cpu);
             serial.writeString(" ");
             serial.writeString(process_table[i].getName());
-            serial.writeString(" rsp=0x");
-            printHex64(process_table[i].rsp);
             serial.writeString("\n");
         }
     }
@@ -561,6 +655,24 @@ fn printHex64(val: u64) void {
         serial.writeChar(hex[@intCast((val >> i) & 0xF)]);
         if (i == 0) break;
         i -= 4;
+    }
+}
+
+fn printDec8(val: u8) void {
+    if (val == 0) {
+        serial.writeChar('0');
+        return;
+    }
+    var buf: [3]u8 = undefined;
+    var i: usize = 0;
+    var v = val;
+    while (v > 0) : (i += 1) {
+        buf[i] = @intCast((v % 10) + '0');
+        v /= 10;
+    }
+    while (i > 0) {
+        i -= 1;
+        serial.writeChar(buf[i]);
     }
 }
 

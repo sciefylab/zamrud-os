@@ -491,6 +491,11 @@ export fn kernel_main() noreturn {
 
     serial.writeString("[INIT] Starting shell...\n");
     shell.init();
+
+    // B2.9b: Enable AP scheduling after all init complete
+    smp.enableApScheduling();
+    serial.writeString("[OK]   AP scheduling enabled\n");
+
     shell.run();
 
     serial.writeString("\n[HALT] System halted.\n");

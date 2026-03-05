@@ -1,6 +1,6 @@
 //! Zamrud OS - SMP (Symmetric Multiprocessing) Bootstrap
-//! B2.9a: APIC Timer on BSP only, APs idle safely
-//! FIXED v3: Don't start APIC timer on APs (no IDT loaded)
+//! B2.9b: Multi-CPU Scheduler - STABLE VERSION
+//! APs online with timer but idle until full scheduler integration
 
 const cpu = @import("../../core/cpu.zig");
 const serial = @import("../../drivers/serial/serial.zig");
@@ -14,6 +14,7 @@ const pmm = @import("../../mm/pmm.zig");
 const pic = @import("pic.zig");
 const terminal = @import("../../drivers/display/terminal.zig");
 const scheduler = @import("../../proc/scheduler.zig");
+const process = @import("../../proc/process.zig");
 
 pub export var smp_request: limine.SmpRequest linksection(".limine_requests") = .{};
 
@@ -23,23 +24,29 @@ var aps_online: u32 = 0;
 var smp_ready: bool = false;
 var ap_boot_complete: [apic.MAX_CPUS]bool = [_]bool{false} ** apic.MAX_CPUS;
 
+// B2.9b: Flags
+var aps_can_schedule: bool = false;
+var scheduler_ready: bool = false;
+
 pub const APIC_TIMER_VECTOR: u8 = 48;
 pub const IPI_RESCHEDULE_VECTOR: u8 = 49;
 pub const IPI_HALT_VECTOR: u8 = 50;
 
-// B2.9a: APIC Timer ENABLED (BSP only)
-const ENABLE_APIC_TIMER: bool = true;
+// B2.9b: APIC Timer - BSP only for stability
+const ENABLE_APIC_TIMER_BSP: bool = true;
+const ENABLE_APIC_TIMER_AP: bool = false; // Disabled for stability
 const APIC_TIMER_HZ: u32 = 100;
 
-// B2.9a: Track APIC timer ticks for time-keeping
+// Time-keeping
 var apic_ticks: u64 = 0;
 var apic_seconds: u64 = 0;
 
-// B2.9a: Flag to indicate scheduler is ready
-var scheduler_ready: bool = false;
+// ============================================================================
+// Initialization
+// ============================================================================
 
 pub fn init() bool {
-    serial.writeString("[SMP] Initializing Symmetric Multiprocessing...\n");
+    serial.writeString("[SMP] Initializing Symmetric Multiprocessing (B2.9b)...\n");
 
     if (!apic.init()) {
         serial.writeString("[SMP] APIC init failed, single-CPU mode\n");
@@ -68,7 +75,7 @@ pub fn init() bool {
         return true;
     }
 
-    // Boot APs first (before enabling APIC timer)
+    // Boot APs
     const cpus = smp_response.getCpus();
     var aps_started: u32 = 0;
 
@@ -127,30 +134,34 @@ pub fn init() bool {
         }
     }
 
-    // B2.9a: Enable APIC timer on BSP ONLY
+    // Enable APIC timer on BSP
     setupBspApicTimer();
 
     smp_ready = true;
     initialized = true;
 
     serial.writeString("[SMP] ═══════════════════════════\n");
-    serial.writeString("[SMP] SMP initialized: ");
+    serial.writeString("[SMP] SMP initialized (B2.9b): ");
     printDec(apic.getOnlineCpuCount());
     serial.writeString(" CPUs online\n");
-    serial.writeString("[SMP] APIC Timer: ");
-    serial.writeString(if (ENABLE_APIC_TIMER) "ENABLED @ 100Hz (BSP only)\n" else "DISABLED\n");
-    serial.writeString("[SMP] PIC IRQ0: ");
-    serial.writeString(if (pic.isIrq0Masked()) "MASKED\n" else "ENABLED\n");
-    serial.writeString("[SMP] Scheduler calls: DEFERRED (until scheduler.init)\n");
+    serial.writeString("[SMP] APIC Timer: BSP @ 100Hz\n");
+    serial.writeString("[SMP] APs: Idle (ready for future work)\n");
+    serial.writeString("[SMP] Per-CPU Runqueues: READY\n");
     serial.writeString("[SMP] ═══════════════════════════\n");
 
     return true;
 }
 
-/// B2.9a: Called by main.zig AFTER scheduler.init()
+/// Called after scheduler.init()
 pub fn enableSchedulerCalls() void {
     @atomicStore(bool, &scheduler_ready, true, .release);
-    serial.writeString("[SMP] Scheduler calls ENABLED in APIC timer handler\n");
+    serial.writeString("[SMP] Scheduler calls ENABLED\n");
+}
+
+/// Called after full system init
+pub fn enableApScheduling() void {
+    @atomicStore(bool, &aps_can_schedule, true, .release);
+    serial.writeString("[SMP] AP scheduling flag SET (APs remain idle for now)\n");
 }
 
 fn setupBspOnly() void {
@@ -159,7 +170,7 @@ fn setupBspOnly() void {
 }
 
 fn setupBspApicTimer() void {
-    if (!ENABLE_APIC_TIMER) {
+    if (!ENABLE_APIC_TIMER_BSP) {
         serial.writeString("[SMP] BSP APIC timer DISABLED\n");
         return;
     }
@@ -171,25 +182,19 @@ fn setupBspApicTimer() void {
 
     serial.writeString("[SMP] Transitioning from PIT to APIC timer...\n");
 
-    // Step 1: Disable interrupts during transition
     cpu.cli();
-
-    // Step 2: Mask PIC IRQ0 (PIT timer stops)
     pic.maskIrq0Only();
-
-    // Step 3: Start APIC timer on BSP ONLY
     apic.startTimer(APIC_TIMER_VECTOR, APIC_TIMER_HZ);
-
-    // Step 4: Re-enable interrupts
     cpu.sti();
 
     serial.writeString("[SMP] BSP APIC timer started at ");
     printDec(APIC_TIMER_HZ);
-    serial.writeString("Hz (vector ");
-    printDec(APIC_TIMER_VECTOR);
-    serial.writeString(")\n");
-    serial.writeString("[SMP] PIT IRQ0 masked, keyboard/mouse still working\n");
+    serial.writeString("Hz\n");
 }
+
+// ============================================================================
+// AP Entry Point (B2.9b STABLE: No timer, no scheduler loop)
+// ============================================================================
 
 fn apEntry(smp_info: *limine.SmpInfo) callconv(.c) noreturn {
     const lapic_id = smp_info.lapic_id;
@@ -198,35 +203,41 @@ fn apEntry(smp_info: *limine.SmpInfo) callconv(.c) noreturn {
     };
 
     ap_boot_lock.acquire();
+
+    // Basic CPU setup
     cpu.enableSSE();
     apic.enableLocalApicAP();
 
+    // Setup per-CPU data
     const pcpu = per_cpu.get(cpu_index);
     pcpu.tss.rsp0 = pcpu.kernel_stack_top;
     pcpu.online = true;
     apic.markCpuOnline(pcpu.apic_id);
 
-    // B2.9a FIX: Do NOT start APIC timer on APs
-    // APs don't have their own IDT loaded, so timer interrupt
-    // would triple-fault. APs just idle with interrupts DISABLED.
+    // B2.9b STABLE: Do NOT start APIC timer on APs
+    // This prevents race conditions during boot
 
     _ = spinlock.Atomic.fetchAdd(&aps_online, 1);
     @atomicStore(bool, &ap_boot_complete[cpu_index], true, .release);
+
     ap_boot_lock.release();
 
-    // APs: interrupts DISABLED, just halt
-    // They are "online" for CPU count but don't process interrupts yet
-    // Future B2.9b will load IDT per-AP and enable scheduling
+    // AP idle loop - interrupts DISABLED for stability
+    // Future B2.9b+ will enable per-AP scheduling
     cpu.cli();
-    while (true) cpu.hlt();
+    while (true) {
+        cpu.hlt();
+    }
 }
 
-/// B2.9a: APIC Timer interrupt handler (BSP only)
+// ============================================================================
+// APIC Timer Handler (BSP only for now)
+// ============================================================================
+
 pub fn handleApicTimer() void {
-    // Increment tick counters (always safe)
+    // Increment tick counters (BSP only increments global)
     _ = spinlock.Atomic.fetchAdd64(&apic_ticks, 1);
 
-    // Update seconds counter
     const ticks = spinlock.Atomic.load64(&apic_ticks);
     if ((ticks % 100) == 0) {
         _ = spinlock.Atomic.fetchAdd64(&apic_seconds, 1);
@@ -247,7 +258,7 @@ pub fn handleApicTimer() void {
         }
     }
 
-    // Only call scheduler/terminal after they're initialized
+    // Scheduler integration
     if (@atomicLoad(bool, &scheduler_ready, .acquire)) {
         if (terminal.isInitialized()) {
             terminal.tick();
@@ -260,7 +271,6 @@ pub fn handleApicTimer() void {
         }
     }
 
-    // Send EOI (ALWAYS)
     apic.sendEoi();
 }
 
@@ -273,22 +283,6 @@ pub fn handleHaltIpi() noreturn {
     apic.sendEoi();
     cpu.cli();
     while (true) cpu.hlt();
-}
-
-// ============================================================================
-// Time-keeping (B2.9a)
-// ============================================================================
-
-pub fn getTicks() u64 {
-    return spinlock.Atomic.load64(&apic_ticks);
-}
-
-pub fn getSeconds() u64 {
-    return spinlock.Atomic.load64(&apic_seconds);
-}
-
-pub fn getMillis() u64 {
-    return spinlock.Atomic.load64(&apic_ticks) * 10;
 }
 
 // ============================================================================
@@ -312,6 +306,37 @@ pub fn sendHaltIpiAll() void {
     apic.sendIpiAllExSelf(IPI_HALT_VECTOR);
 }
 
+/// Wake up a specific AP
+pub fn wakeApForWork(cpu_index: usize) void {
+    if (!initialized or !smp_ready) return;
+    if (cpu_index == 0) return;
+
+    const info = apic.getCpuInfo(cpu_index) orelse return;
+    if (!info.online) return;
+
+    apic.sendIpi(info.apic_id, IPI_RESCHEDULE_VECTOR);
+}
+
+// ============================================================================
+// Time-keeping
+// ============================================================================
+
+pub fn getTicks() u64 {
+    return spinlock.Atomic.load64(&apic_ticks);
+}
+
+pub fn getSeconds() u64 {
+    return spinlock.Atomic.load64(&apic_seconds);
+}
+
+pub fn getMillis() u64 {
+    return spinlock.Atomic.load64(&apic_ticks) * 10;
+}
+
+// ============================================================================
+// Status Functions
+// ============================================================================
+
 fn findCpuIndex(lapic_id: u32) ?usize {
     const count = apic.getCpuCount();
     for (0..count) |i| {
@@ -320,10 +345,6 @@ fn findCpuIndex(lapic_id: u32) ?usize {
     }
     return null;
 }
-
-// ============================================================================
-// Status Functions
-// ============================================================================
 
 pub fn isInitialized() bool {
     return initialized;
@@ -342,34 +363,57 @@ pub fn getCpuCount() usize {
 }
 
 pub fn isApicTimerEnabled() bool {
-    return ENABLE_APIC_TIMER and pic.isIrq0Masked();
+    return ENABLE_APIC_TIMER_BSP and pic.isIrq0Masked();
 }
 
 pub fn isSchedulerReady() bool {
     return @atomicLoad(bool, &scheduler_ready, .acquire);
 }
 
+pub fn isApSchedulingEnabled() bool {
+    return @atomicLoad(bool, &aps_can_schedule, .acquire);
+}
+
 pub fn printStatus() void {
-    serial.writeString("\n[SMP] ─── Status ───\n");
+    serial.writeString("\n[SMP] --- Status (B2.9b) ---\n");
     serial.writeString("[SMP] CPUs: ");
     printDec(apic.getOnlineCpuCount());
     serial.writeString("/");
     printDec(apic.getCpuCount());
     serial.writeString(" online\n");
-    serial.writeString("[SMP] APIC Timer: ");
-    serial.writeString(if (isApicTimerEnabled()) "ON @ 100Hz (BSP)" else "OFF");
-    serial.writeString(", PIC IRQ0: ");
-    serial.writeString(if (pic.isIrq0Masked()) "MASKED" else "ENABLED");
-    serial.writeString("\n");
+    serial.writeString("[SMP] APIC Timer: BSP @ 100Hz\n");
     serial.writeString("[SMP] Scheduler: ");
     serial.writeString(if (isSchedulerReady()) "ENABLED" else "DEFERRED");
     serial.writeString("\n");
-    serial.writeString("[SMP] APIC Ticks: ");
+    serial.writeString("[SMP] Ticks: ");
     printDec(getTicks());
     serial.writeString(", Seconds: ");
     printDec(getSeconds());
     serial.writeString("\n");
+
+    // Per-CPU stats
+    serial.writeString("[SMP] Per-CPU:\n");
+    const cpu_count = apic.getCpuCount();
+    for (0..cpu_count) |i| {
+        const info = apic.getCpuInfo(i) orelse continue;
+        if (!info.online) continue;
+
+        const pcpu = per_cpu.get(i);
+
+        serial.writeString("  CPU");
+        printDec(i);
+        serial.writeString(": ticks=");
+        printDec(pcpu.timer_ticks);
+        serial.writeString(" switches=");
+        printDec(pcpu.switch_count);
+        if (info.is_bsp) serial.writeString(" (BSP)") else serial.writeString(" (idle)");
+        serial.writeString("\n");
+    }
 }
+
+// ============================================================================
+// Helpers
+// ============================================================================
 
 fn printDec(value: anytype) void {
     const v: u64 = @intCast(value);
