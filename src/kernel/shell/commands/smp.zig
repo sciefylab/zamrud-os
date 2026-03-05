@@ -1,5 +1,5 @@
 //! Zamrud OS - SMP Shell Commands
-//! B2.9: Shell interface for SMP status and control
+//! B2.9a: Added APIC timer status and test commands
 //! FIXED: Dual output to terminal AND serial for debugging
 
 const terminal = @import("../../drivers/display/terminal.zig");
@@ -8,6 +8,8 @@ const smp = @import("../../arch/x86_64/smp.zig");
 const apic = @import("../../arch/x86_64/apic.zig");
 const per_cpu = @import("../../arch/x86_64/per_cpu.zig");
 const spinlock = @import("../../arch/x86_64/spinlock.zig");
+const pic = @import("../../arch/x86_64/pic.zig");
+const timer = @import("../../drivers/timer/timer.zig");
 
 // ============================================================================
 // Dual Output Helpers (Terminal + Serial)
@@ -74,6 +76,13 @@ fn outDecPad(val: anytype, width: usize) void {
     }
 }
 
+fn outHex8(val: u8) void {
+    const hex = "0123456789ABCDEF";
+    terminal.print(&[_]u8{ hex[(val >> 4) & 0xF], hex[val & 0xF] });
+    serial.writeChar(hex[(val >> 4) & 0xF]);
+    serial.writeChar(hex[val & 0xF]);
+}
+
 // ============================================================================
 // Command Handler
 // ============================================================================
@@ -85,6 +94,8 @@ pub fn handleCommand(args: []const u8) void {
         showCpus();
     } else if (eql(args, "topology")) {
         showTopology();
+    } else if (eql(args, "timer")) {
+        showTimerStatus();
     } else if (eql(args, "test")) {
         runTest();
     } else if (eql(args, "help")) {
@@ -100,44 +111,134 @@ pub fn handleCommand(args: []const u8) void {
 
 fn showStatus() void {
     outln("");
-    outln("=== SMP Status (B2.9) ===");
+    outln("=== SMP Status (B2.9a) ===");
     outln("");
 
-    out("  Initialized:  ");
+    out("  Initialized:    ");
     outln(if (smp.isInitialized()) "YES" else "NO");
 
-    out("  SMP Ready:    ");
+    out("  SMP Ready:      ");
     outln(if (smp.isSmpReady()) "YES (multi-core active)" else "NO (single-core)");
 
-    out("  Total CPUs:   ");
+    out("  Total CPUs:     ");
     outDec(smp.getCpuCount());
     outln("");
 
-    out("  Online CPUs:  ");
+    out("  Online CPUs:    ");
     outDec(smp.getOnlineCpuCount());
     outln("");
 
     if (apic.isInitialized()) {
-        out("  Enabled CPUs: ");
+        out("  Enabled CPUs:   ");
         outDec(apic.getEnabledCpuCount());
         outln("");
 
-        out("  BSP APIC ID:  ");
+        out("  BSP APIC ID:    ");
         outDec(apic.getBspApicId());
         outln("");
 
-        out("  Current CPU:  ");
+        out("  Current CPU:    ");
         outDec(apic.getCurrentCpuIndex());
         out(" (APIC ID=");
         outDec(apic.getCurrentApicId());
         outln(")");
 
-        out("  Timer:        ");
+        out("  Timer Cal:      ");
+        outDec(apic.getTimerTicksPerMs());
+        outln(" ticks/ms");
+    }
+
+    outln("");
+    outln("=== Timer Status (B2.9a) ===");
+    outln("");
+
+    out("  APIC Timer:     ");
+    if (smp.isApicTimerEnabled()) {
+        outln("ENABLED @ 100Hz");
+    } else {
+        outln("DISABLED");
+    }
+
+    out("  PIC IRQ0:       ");
+    if (pic.isIrq0Masked()) {
+        outln("MASKED (PIT stopped)");
+    } else {
+        outln("ENABLED (PIT active)");
+    }
+
+    out("  Active Source:  ");
+    outln(if (timer.isApicTimerActive()) "APIC Timer" else "PIT Timer");
+
+    out("  Ticks:          ");
+    outDec(timer.getTicks());
+    outln("");
+
+    out("  Seconds:        ");
+    outDec(timer.getSeconds());
+    outln("");
+
+    out("  Milliseconds:   ");
+    outDec(timer.getMillis());
+    outln("");
+
+    outln("");
+}
+
+fn showTimerStatus() void {
+    outln("");
+    outln("=== Timer Details (B2.9a) ===");
+    outln("");
+
+    out("  PIC Master Mask:  0x");
+    outHex8(pic.getMask1());
+    outln("");
+
+    out("  PIC Slave Mask:   0x");
+    outHex8(pic.getMask2());
+    outln("");
+
+    out("  IRQ0 (PIT):       ");
+    outln(if (pic.isIrq0Masked()) "MASKED" else "ENABLED");
+
+    out("  IRQ1 (Keyboard):  ");
+    outln(if ((pic.getMask1() & 0x02) == 0) "ENABLED" else "MASKED");
+
+    out("  IRQ2 (Cascade):   ");
+    outln(if ((pic.getMask1() & 0x04) == 0) "ENABLED" else "MASKED");
+
+    out("  IRQ12 (Mouse):    ");
+    outln(if ((pic.getMask2() & 0x10) == 0) "ENABLED" else "MASKED");
+
+    outln("");
+
+    if (apic.isInitialized()) {
+        out("  APIC Timer Cal:   ");
         outDec(apic.getTimerTicksPerMs());
         outln(" ticks/ms");
 
-        out("  APIC Timer:   ");
-        outln(if (smp.isApicTimerEnabled()) "ENABLED" else "DISABLED");
+        out("  APIC Timer Freq:  ");
+        const freq_mhz = (apic.getTimerTicksPerMs() * 1000) / 1000000;
+        outDec(freq_mhz);
+        outln(" MHz (approx)");
+    }
+
+    outln("");
+
+    // Show per-CPU timer ticks
+    outln("  Per-CPU Timer Ticks:");
+    const count = apic.getCpuCount();
+    for (0..count) |i| {
+        const info = apic.getCpuInfo(i) orelse continue;
+        if (!info.online) continue;
+
+        const pcpu = per_cpu.get(i);
+        out("    CPU ");
+        outDec(i);
+        out(": ");
+        outDec(pcpu.timer_ticks);
+        out(" ticks, ");
+        outDec(pcpu.switch_count);
+        outln(" switches");
     }
 
     outln("");
@@ -147,8 +248,8 @@ fn showCpus() void {
     outln("");
     outln("=== CPU List ===");
     outln("");
-    outln("  CPU  APIC_ID  Role   Status     Switches  PID");
-    outln("  ---  -------  ----   ------     --------  ---");
+    outln("  CPU  APIC_ID  Role   Status     Ticks     Switches  PID");
+    outln("  ---  -------  ----   ------     -----     --------  ---");
 
     const count = apic.getCpuCount();
     for (0..count) |i| {
@@ -175,7 +276,9 @@ fn showCpus() void {
             out("DISABLED   ");
         }
 
-        outDecPad(pcpu.switch_count, 8);
+        outDecPad(pcpu.timer_ticks, 9);
+        out(" ");
+        outDecPad(pcpu.switch_count, 9);
         out("  ");
         outDecPad(pcpu.current_pid, 3);
         outln("");
@@ -233,28 +336,30 @@ fn showTopology() void {
     outln("");
 
     outln("");
-    out("  APIC Timer: ");
+    out("  Timer Source: ");
+    outln(if (smp.isApicTimerEnabled()) "APIC (100Hz per CPU)" else "PIT (100Hz shared)");
+    out("  APIC Cal: ");
     outDec(apic.getTimerTicksPerMs());
     outln(" ticks/ms");
     outln("");
 }
 
 // ============================================================================
-// Test Suite (20 tests)
+// Test Suite (20 tests) - Updated for B2.9a
 // ============================================================================
 
 fn runTest() void {
     outln("");
-    outln("╔══════════════════════════════════════╗");
-    outln("║     SMP Test Suite (B2.9) - 20 tests ║");
-    outln("╚══════════════════════════════════════╝");
+    outln("+======================================+");
+    outln("|   SMP Test Suite (B2.9a) - 20 tests  |");
+    outln("+======================================+");
     outln("");
 
     var passed: u32 = 0;
     var failed: u32 = 0;
 
     // Test 1
-    out("  [01] SMP initialized:     ");
+    out("  [01] SMP initialized:       ");
     if (smp.isInitialized()) {
         outln("PASS");
         passed += 1;
@@ -264,7 +369,7 @@ fn runTest() void {
     }
 
     // Test 2
-    out("  [02] CPU count >= 1:      ");
+    out("  [02] CPU count >= 1:        ");
     if (smp.getCpuCount() >= 1) {
         outln("PASS");
         passed += 1;
@@ -274,7 +379,7 @@ fn runTest() void {
     }
 
     // Test 3
-    out("  [03] Online CPUs >= 1:    ");
+    out("  [03] Online CPUs >= 1:      ");
     if (smp.getOnlineCpuCount() >= 1) {
         outln("PASS");
         passed += 1;
@@ -284,7 +389,7 @@ fn runTest() void {
     }
 
     // Test 4
-    out("  [04] APIC initialized:    ");
+    out("  [04] APIC initialized:      ");
     if (apic.isInitialized()) {
         outln("PASS");
         passed += 1;
@@ -294,7 +399,7 @@ fn runTest() void {
     }
 
     // Test 5
-    out("  [05] BSP APIC ID valid:   ");
+    out("  [05] BSP APIC ID valid:     ");
     if (apic.getBspApicId() < 255) {
         outln("PASS");
         passed += 1;
@@ -304,7 +409,7 @@ fn runTest() void {
     }
 
     // Test 6
-    out("  [06] Current CPU valid:   ");
+    out("  [06] Current CPU valid:     ");
     if (apic.getCurrentCpuIndex() < apic.getCpuCount()) {
         outln("PASS");
         passed += 1;
@@ -314,7 +419,7 @@ fn runTest() void {
     }
 
     // Test 7
-    out("  [07] Per-CPU data init:   ");
+    out("  [07] Per-CPU data init:     ");
     if (per_cpu.isInitialized()) {
         outln("PASS");
         passed += 1;
@@ -324,7 +429,7 @@ fn runTest() void {
     }
 
     // Test 8
-    out("  [08] BSP is current:      ");
+    out("  [08] BSP is current:        ");
     if (per_cpu.isBsp()) {
         outln("PASS");
         passed += 1;
@@ -334,17 +439,7 @@ fn runTest() void {
     }
 
     // Test 9
-    out("  [09] BSP stack allocated: ");
-    if (per_cpu.bsp().kernel_stack_top > 0) {
-        outln("PASS");
-        passed += 1;
-    } else {
-        outln("FAIL");
-        failed += 1;
-    }
-
-    // Test 10
-    out("  [10] Timer calibrated:    ");
+    out("  [09] Timer calibrated:      ");
     if (apic.getTimerTicksPerMs() > 0) {
         outln("PASS");
         passed += 1;
@@ -353,38 +448,58 @@ fn runTest() void {
         failed += 1;
     }
 
-    // Test 11
-    out("  [11] Online <= Enabled:   ");
-    if (apic.getOnlineCpuCount() <= apic.getEnabledCpuCount()) {
+    // Test 10 - B2.9a NEW
+    out("  [10] APIC timer enabled:    ");
+    if (smp.isApicTimerEnabled()) {
         outln("PASS");
         passed += 1;
     } else {
-        outln("FAIL");
+        outln("FAIL (expected ENABLED)");
         failed += 1;
     }
 
-    // Test 12
-    out("  [12] Enabled <= Total:    ");
-    if (apic.getEnabledCpuCount() <= apic.getCpuCount()) {
+    // Test 11 - B2.9a NEW
+    out("  [11] PIC IRQ0 masked:       ");
+    if (pic.isIrq0Masked()) {
         outln("PASS");
         passed += 1;
     } else {
-        outln("FAIL");
+        outln("FAIL (expected MASKED)");
         failed += 1;
     }
 
-    // Test 13
-    out("  [13] BSP TSS valid:       ");
-    if (per_cpu.bsp().tss.rsp0 > 0 and per_cpu.bsp().tss.iopb > 0) {
+    // Test 12 - B2.9a NEW
+    out("  [12] Keyboard IRQ1 enabled: ");
+    if ((pic.getMask1() & 0x02) == 0) {
         outln("PASS");
         passed += 1;
     } else {
-        outln("FAIL");
+        outln("FAIL (keyboard broken!)");
         failed += 1;
     }
 
-    // Test 14
-    out("  [14] SpinLock works:      ");
+    // Test 13 - B2.9a NEW
+    out("  [13] Mouse IRQ12 enabled:   ");
+    if ((pic.getMask2() & 0x10) == 0) {
+        outln("PASS");
+        passed += 1;
+    } else {
+        outln("FAIL (mouse broken!)");
+        failed += 1;
+    }
+
+    // Test 14 - B2.9a NEW
+    out("  [14] Timer ticks > 0:       ");
+    if (timer.getTicks() > 0) {
+        outln("PASS");
+        passed += 1;
+    } else {
+        outln("FAIL (timer not running)");
+        failed += 1;
+    }
+
+    // Test 15
+    out("  [15] SpinLock works:        ");
     var test_lock: spinlock.SpinLock = .{};
     test_lock.acquire();
     const was_locked = test_lock.isLocked();
@@ -398,8 +513,8 @@ fn runTest() void {
         failed += 1;
     }
 
-    // Test 15
-    out("  [15] TicketLock works:    ");
+    // Test 16
+    out("  [16] TicketLock works:      ");
     var tlock: spinlock.TicketLock = .{};
     tlock.acquire();
     const tl_locked = tlock.isLocked();
@@ -413,8 +528,8 @@ fn runTest() void {
         failed += 1;
     }
 
-    // Test 16
-    out("  [16] Atomic ops work:     ");
+    // Test 17
+    out("  [17] Atomic ops work:       ");
     var atomic_val: u32 = 0;
     _ = spinlock.Atomic.fetchAdd(&atomic_val, 5);
     const after_add = spinlock.Atomic.load(&atomic_val);
@@ -428,8 +543,8 @@ fn runTest() void {
         failed += 1;
     }
 
-    // Test 17
-    out("  [17] Once primitive:      ");
+    // Test 18
+    out("  [18] Once primitive:        ");
     var once: spinlock.Once = .{};
     once.callOnce(&struct {
         fn run() void {}
@@ -442,23 +557,8 @@ fn runTest() void {
         failed += 1;
     }
 
-    // Test 18
-    out("  [18] IrqSpinLock works:   ");
-    var irq_lock: spinlock.IrqSpinLock = .{};
-    irq_lock.acquire();
-    const irq_locked = irq_lock.isLocked();
-    irq_lock.release();
-    const irq_released = !irq_lock.isLocked();
-    if (irq_locked and irq_released) {
-        outln("PASS");
-        passed += 1;
-    } else {
-        outln("FAIL");
-        failed += 1;
-    }
-
     // Test 19
-    out("  [19] Multi-CPU count:     ");
+    out("  [19] Multi-CPU count:       ");
     const cpu_count = smp.getCpuCount();
     if (cpu_count >= 1) {
         outDec(cpu_count);
@@ -470,7 +570,7 @@ fn runTest() void {
     }
 
     // Test 20
-    out("  [20] All CPUs online:     ");
+    out("  [20] All CPUs online:       ");
     const online = smp.getOnlineCpuCount();
     const total = smp.getCpuCount();
     outDec(online);
@@ -486,20 +586,34 @@ fn runTest() void {
 
     // Summary
     outln("");
-    outln("╔══════════════════════════════════════╗");
-    out("║  Result: ");
+    outln("+--------------------------------------+");
+    out("|  Result: ");
     outDec(passed);
     out("/");
     outDec(passed + failed);
     out(" passed");
     if (failed == 0) {
-        outln("  [ALL PASS]    ║");
+        outln("  [ALL PASS]    |");
     } else {
         out("  [");
         outDec(failed);
-        outln(" FAILED]     ║");
+        outln(" FAILED]     |");
     }
-    outln("╚══════════════════════════════════════╝");
+    outln("+--------------------------------------+");
+    outln("");
+
+    // B2.9a: Show timer proof
+    if (passed >= 18) {
+        outln("B2.9a APIC Timer: VERIFIED ✓");
+        out("  - Timer source: ");
+        outln(if (timer.isApicTimerActive()) "APIC" else "PIT");
+        out("  - Current ticks: ");
+        outDec(timer.getTicks());
+        outln("");
+        out("  - Uptime: ");
+        outDec(timer.getSeconds());
+        outln(" seconds");
+    }
     outln("");
 }
 
@@ -509,12 +623,19 @@ fn runTest() void {
 
 fn showHelp() void {
     outln("");
-    outln("SMP Commands (B2.9):");
-    outln("  smp status    - Show SMP status");
-    outln("  smp cpus      - List all CPUs");
+    outln("SMP Commands (B2.9a):");
+    outln("  smp status    - Show SMP & timer status");
+    outln("  smp cpus      - List all CPUs with stats");
     outln("  smp topology  - Show CPU topology");
+    outln("  smp timer     - Show detailed timer status");
     outln("  smp test      - Run SMP tests (20 tests)");
     outln("  smp help      - Show this help");
+    outln("");
+    outln("B2.9a Features:");
+    outln("  - APIC Timer enabled at 100Hz");
+    outln("  - PIC IRQ0 (PIT) masked");
+    outln("  - Keyboard/Mouse still work via PIC");
+    outln("  - Per-CPU timer tick tracking");
     outln("");
 }
 

@@ -251,6 +251,9 @@ export fn kernel_main() noreturn {
     scheduler.init();
     serial.writeString("[OK]   Scheduler ready\n");
 
+    // B2.9a: Now safe to call scheduler from APIC timer handler
+    smp.enableSchedulerCalls();
+
     ipc.init();
     serial.writeString("[OK]   IPC ready (F1)\n");
 
