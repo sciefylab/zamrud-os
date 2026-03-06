@@ -95,6 +95,9 @@ const acpi = @import("drivers/acpi/acpi.zig");
 
 const rtc = @import("drivers/timer/rtc.zig");
 
+const usb_core = @import("drivers/usb/usb.zig");
+const usb_hid = @import("drivers/usb/hid.zig");
+
 // ============================================================================
 // Limine Requests
 // ============================================================================
@@ -293,6 +296,28 @@ export fn kernel_main() noreturn {
 
     storage.init();
     serial.writeString("[OK]   Storage ready\n");
+
+    // === USB Subsystem (B2.11) ===
+    printLine();
+    serial.writeString("[USB]\n");
+
+    if (usb_core.init()) {
+        serial.writeString("[OK]   USB: ");
+        printDecSerial(usb_core.getControllerCount());
+        serial.writeString(" controller(s), ");
+        printDecSerial(usb_core.getDeviceCount());
+        serial.writeString(" device(s)\n");
+
+        // Initialize HID driver
+        usb_hid.init();
+        serial.writeString("[OK]   USB HID: ");
+        printDecSerial(usb_hid.getKeyboardCount());
+        serial.writeString(" keyboard(s), ");
+        printDecSerial(usb_hid.getMouseCount());
+        serial.writeString(" mouse(s)\n");
+    } else {
+        serial.writeString("[INFO] USB: No controllers found\n");
+    }
 
     fat32.init();
     if (fat32.isMounted()) {
@@ -772,6 +797,18 @@ fn printSystemSummary() void {
         serial.writeString(", blocks=");
         printDecSerial(chain.getBlockCount());
         serial.writeString(")\n");
+    } else {
+        serial.writeString("Not initialized\n");
+    }
+    serial.writeString("  USB(B2.11): ");
+    if (usb_core.isInitialized()) {
+        printDecSerial(usb_core.getControllerCount());
+        serial.writeString(" ctrl, ");
+        printDecSerial(usb_core.getDeviceCount());
+        serial.writeString(" dev");
+        if (usb_core.hasUhci()) serial.writeString(" [UHCI]");
+        if (usb_core.hasEhci()) serial.writeString(" [EHCI]");
+        serial.writeString("\n");
     } else {
         serial.writeString("Not initialized\n");
     }

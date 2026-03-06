@@ -39,6 +39,7 @@ const ceremony_cmd = @import("commands/ceremony.zig");
 const acpi_cmd = @import("commands/acpi.zig");
 const date_cmd = @import("commands/date.zig");
 const smp_cmd = @import("commands/smp.zig");
+const usb_cmd = @import("commands/usb.zig");
 
 // =============================================================================
 // Command Execution
@@ -404,6 +405,15 @@ pub fn execute(input: []const u8) void {
         smp_cmd.handleCommand("test");
     }
 
+    // USB (B2.11)
+    else if (helpers.strEql(command, "usb")) {
+        usb_cmd.execute(args);
+    } else if (helpers.strEql(command, "usbtest")) {
+        usb_cmd.execute("test");
+    } else if (helpers.strEql(command, "lsusb")) {
+        usb_cmd.execute("devices");
+    }
+
     // Test all
     else if (helpers.strEql(command, "testall")) {
         runAllTests();
@@ -540,6 +550,10 @@ fn runAllTests() void {
     // B2.9: SMP Tests
     shell.printInfoLine("=== SMP TESTS (B2.9) ===");
     smp_cmd.handleCommand("test");
+    shell.newLine();
+
+    shell.printInfoLine("=== USB TESTS (B2.11) ===");
+    usb_cmd.execute("test");
     shell.newLine();
 
     shell.printInfoLine("########################################");
