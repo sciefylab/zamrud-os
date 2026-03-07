@@ -697,6 +697,31 @@ fn handleE0Scancode(scancode: u8) void {
 }
 
 // =============================================================================
+// USB HID Integration (B2.11b)
+// =============================================================================
+
+/// Buffer a key from USB HID keyboard - called by hid.zig
+pub fn bufferUsbKey(key: u8) void {
+    bufferKey(key);
+}
+
+/// Update modifier state from USB HID keyboard
+pub fn setUsbModifiers(shift: bool, ctrl: bool, alt: bool) void {
+    shift_pressed = shift;
+    ctrl_pressed = ctrl;
+    alt_pressed = alt;
+}
+
+/// Get current modifier state for USB HID
+pub fn getModifierState() struct { shift: bool, ctrl: bool, alt: bool } {
+    return .{
+        .shift = shift_pressed,
+        .ctrl = ctrl_pressed,
+        .alt = alt_pressed,
+    };
+}
+
+// =============================================================================
 // Buffer Clear (Public) - Software + Hardware flush
 // =============================================================================
 

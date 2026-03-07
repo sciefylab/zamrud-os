@@ -527,6 +527,60 @@ fn ioDelay() void {
 }
 
 // =============================================================================
+// USB HID Integration (B2.11b)
+// =============================================================================
+
+/// Queue mouse event from USB HID - relative movement
+pub fn queueUsbEvent(dx: i16, dy: i16, btns: u8, scroll: i8) void {
+    // Update absolute position
+    mouse_x += dx;
+    mouse_y += dy;
+
+    // Clamp to screen bounds
+    if (mouse_x < 0) mouse_x = 0;
+    if (mouse_y < 0) mouse_y = 0;
+    if (mouse_x >= screen_width) mouse_x = screen_width - 1;
+    if (mouse_y >= screen_height) mouse_y = screen_height - 1;
+
+    buttons = btns;
+    scroll_delta = scroll;
+
+    queueEvent(.{
+        .x = mouse_x,
+        .y = mouse_y,
+        .dx = dx,
+        .dy = dy,
+        .buttons = btns,
+        .scroll = scroll,
+        .timestamp = timer.getTicks(),
+    });
+}
+
+/// Set absolute position from USB tablet device
+pub fn setUsbTabletPosition(abs_x: u16, abs_y: u16, btns: u8) void {
+    // USB tablet reports 0-32767, scale to screen
+    const new_x: i32 = @intCast((@as(u32, abs_x) * @as(u32, @intCast(screen_width))) / 32768);
+    const new_y: i32 = @intCast((@as(u32, abs_y) * @as(u32, @intCast(screen_height))) / 32768);
+
+    const dx: i16 = @truncate(new_x - mouse_x);
+    const dy: i16 = @truncate(new_y - mouse_y);
+
+    mouse_x = @max(0, @min(new_x, screen_width - 1));
+    mouse_y = @max(0, @min(new_y, screen_height - 1));
+    buttons = btns;
+
+    queueEvent(.{
+        .x = mouse_x,
+        .y = mouse_y,
+        .dx = dx,
+        .dy = dy,
+        .buttons = btns,
+        .scroll = 0,
+        .timestamp = timer.getTicks(),
+    });
+}
+
+// =============================================================================
 // Debug
 // =============================================================================
 

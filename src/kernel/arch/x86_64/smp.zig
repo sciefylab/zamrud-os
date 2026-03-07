@@ -15,6 +15,7 @@ const pic = @import("pic.zig");
 const terminal = @import("../../drivers/display/terminal.zig");
 const scheduler = @import("../../proc/scheduler.zig");
 const process = @import("../../proc/process.zig");
+const hid = @import("../../drivers/usb/hid.zig");
 
 pub export var smp_request: limine.SmpRequest linksection(".limine_requests") = .{};
 
@@ -270,6 +271,9 @@ pub fn handleApicTimer() void {
             scheduler.checkPreempt();
         }
     }
+
+    // B2.11b: USB HID polling trigger (non-blocking, just sets flag)
+    hid.timerTick();
 
     apic.sendEoi();
 }

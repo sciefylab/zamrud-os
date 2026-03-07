@@ -23,6 +23,8 @@ const sys_encrypt = @import("../crypto/sys_encrypt.zig");
 const auth = @import("../identity/auth.zig");
 const rtc = @import("../drivers/timer/rtc.zig");
 
+const hid = @import("../drivers/usb/hid.zig");
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -184,6 +186,9 @@ pub fn run() void {
     if (login_required) {
         // Login loop
         while (running) {
+            // B2.11b: Process USB HID events
+            hid.processPending();
+
             drawWelcome();
 
             // H.7: Load identities NOW (before login prompt)
@@ -603,6 +608,9 @@ fn loginPrompt() void {
 
             // Read password (hidden input)
             while (true) {
+                // B2.11b: Process USB HID events
+                hid.processPending();
+
                 if (keyboard.hasKey()) {
                     const key = keyboard.getKey() orelse continue;
                     if (key == 0) continue;
@@ -703,6 +711,10 @@ fn loginPrompt() void {
                     var pin_len: usize = 0;
 
                     while (true) {
+
+                        // B2.11b: Process USB HID events
+                        hid.processPending();
+
                         if (keyboard.hasKey()) {
                             const key = keyboard.getKey() orelse continue;
                             if (key == 0) continue;
@@ -893,6 +905,10 @@ pub fn getCurrentUser() []const u8 {
 
 fn readLoginInput() void {
     while (true) {
+
+        // B2.11b: Process USB HID events during login input
+        hid.processPending();
+
         if (keyboard.hasKey()) {
             const key = keyboard.getKey() orelse continue;
             if (key == 0) continue;
@@ -974,6 +990,9 @@ fn shellLoop() void {
     clearInputBuffer();
 
     while (running and logged_in) {
+        // B2.11b: Process USB HID events
+        hid.processPending();
+
         ui.drawStatusBar();
 
         drawPrompt();
@@ -1132,6 +1151,9 @@ fn readInput() void {
     last_was_tab = false;
 
     while (true) {
+        // B2.11b: Process USB HID events during input wait
+        hid.processPending();
+
         if (keyboard.hasKey()) {
             const key = keyboard.getKey() orelse continue;
 

@@ -3,7 +3,7 @@
 echo ============================================
 echo   Zamrud OS - QEMU Runner (SMP + USB + NIC)
 echo   B2.9: Auto-detect CPUs + APIC
-echo   B2.11: USB Controllers + Devices
+echo   B2.11b: USB HID (Keyboard + Tablet)
 echo ============================================
 
 set SCRIPT_DIR=%~dp0
@@ -35,14 +35,14 @@ echo   Guest CPUs: %CPU_CORES% (max 8)
 echo   Memory:     %MEM_MB%MB
 echo   APIC:       Enabled (multi-core scheduling)
 echo.
-echo USB Controllers + Devices (B2.11):
+echo USB Controllers + Devices (B2.11b):
 echo   usb-bus0: PIIX3 UHCI  (USB 1.1, 12 Mbps)
-echo     +-- USB Storage Test (if available)
+echo     +-- USB Keyboard      (boot protocol)
 echo   usb-bus1: ICH9 EHCI   (USB 2.0, 480 Mbps)
 echo     +-- USB Tablet        (absolute mouse)
 echo.
 echo Input:
-echo   Keyboard: PS/2 (default, working)
+echo   Keyboard: PS/2 + USB (both active)
 echo   Mouse:    PS/2 + USB Tablet
 echo.
 echo Network Interfaces:
@@ -77,14 +77,13 @@ qemu-system-x86_64 ^
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 ^
     -device piix3-usb-uhci,id=usb-bus0 ^
     -device usb-ehci,id=usb-bus1 ^
-    -device usb-tablet,bus=usb-bus1.0 ^
+    -device usb-kbd,bus=usb-bus1.0 ^
     -device e1000,netdev=net0,mac=52:54:00:12:34:56 ^
     -netdev user,id=net0,hostfwd=tcp::8080-:80 ^
     -device rtl8139,netdev=net1,mac=52:54:00:12:34:57 ^
     -netdev user,id=net1,hostfwd=tcp::8081-:81 ^
     -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58 ^
     -netdev user,id=net2,hostfwd=tcp::8082-:82
-
 
 REM ============================================
 REM B2.11 USB Configuration:
