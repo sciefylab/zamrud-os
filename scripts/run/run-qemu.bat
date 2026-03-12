@@ -3,7 +3,7 @@
 echo ============================================
 echo   Zamrud OS - QEMU Runner (SMP + USB + NIC)
 echo   B2.9: Auto-detect CPUs + APIC
-echo   B2.11b: USB HID (Keyboard + Tablet)
+echo   B2.11c: USB HID (Keyboard + Mouse)
 echo ============================================
 
 set SCRIPT_DIR=%~dp0
@@ -35,15 +35,19 @@ echo   Guest CPUs: %CPU_CORES% (max 8)
 echo   Memory:     %MEM_MB%MB
 echo   APIC:       Enabled (multi-core scheduling)
 echo.
-echo USB Controllers + Devices (B2.11b):
+echo USB Controllers + Devices (B2.11c):
 echo   usb-bus0: PIIX3 UHCI  (USB 1.1, 12 Mbps)
-echo     +-- USB Keyboard      (boot protocol)
+echo     +-- USB Mouse         (boot protocol, relative)
 echo   usb-bus1: ICH9 EHCI   (USB 2.0, 480 Mbps)
-echo     +-- USB Tablet        (absolute mouse)
+echo     +-- USB Keyboard      (boot protocol)
+echo.
+echo IMPORTANT: Only 1 HID device per controller (QEMU addr=0 limit)
+echo   PS/2 mouse active via IRQ12 (always works)
+echo   USB mouse on UHCI (separate from EHCI keyboard)
 echo.
 echo Input:
 echo   Keyboard: PS/2 + USB (both active)
-echo   Mouse:    PS/2 + USB Tablet
+echo   Mouse:    PS/2 (IRQ12) + USB Mouse (UHCI)
 echo.
 echo Network Interfaces:
 echo   eth0: Intel E1000     (Gigabit, MMIO)
@@ -78,6 +82,7 @@ qemu-system-x86_64 ^
     -device piix3-usb-uhci,id=usb-bus0 ^
     -device usb-ehci,id=usb-bus1 ^
     -device usb-kbd,bus=usb-bus1.0 ^
+    -device usb-mouse,bus=usb-bus0.0 ^
     -device e1000,netdev=net0,mac=52:54:00:12:34:56 ^
     -netdev user,id=net0,hostfwd=tcp::8080-:80 ^
     -device rtl8139,netdev=net1,mac=52:54:00:12:34:57 ^
@@ -86,22 +91,26 @@ qemu-system-x86_64 ^
     -netdev user,id=net2,hostfwd=tcp::8082-:82
 
 REM ============================================
-REM B2.11 USB Configuration:
-REM   piix3-usb-uhci: USB 1.1 controller (UHCI)
-REM   usb-ehci:       USB 2.0 controller (EHCI)
+REM B2.11c USB Configuration:
 REM
-REM To add virtual USB devices for testing:
-REM   -device usb-kbd,bus=usb0.0      (USB Keyboard)
-REM   -device usb-mouse,bus=usb0.0    (USB Mouse)
-REM   -device usb-tablet,bus=usb1.0   (USB Tablet - absolute positioning)
-REM   -device usb-storage,drive=usbdisk (USB Flash Drive)
+REM QEMU ADDR=0 LIMITATION:
+REM   All devices on same EHCI share address 0
+REM   Only 1 HID device per controller allowed!
+REM   Multiple HID on same bus = duplicate input
 REM
-REM Example with USB keyboard and mouse:
-REM   qemu-system-x86_64 ... ^
-REM     -device piix3-usb-uhci,id=usb0 ^
-REM     -device usb-kbd,bus=usb0.0 ^
-REM     -device usb-mouse,bus=usb0.0
+REM Layout:
+REM   UHCI (usb-bus0): usb-mouse (boot protocol)
+REM   EHCI (usb-bus1): usb-kbd   (boot protocol)
 REM
+REM DO NOT add usb-tablet to usb-bus1!
+REM   It shares addr=0 with usb-kbd → double keystrokes
+REM
+REM USB Tablet testing:
+REM   Replace usb-kbd with usb-tablet to test tablet mode:
+REM   -device usb-tablet,bus=usb-bus1.0
+REM   (loses USB keyboard, PS/2 keyboard still works)
+REM
+REM Real hardware: SET_ADDRESS works → multi-device OK
 REM ============================================
 REM B2.9 SMP Auto-Detection:
 REM   Uses %NUMBER_OF_PROCESSORS% from Windows

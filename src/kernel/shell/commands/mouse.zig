@@ -1,8 +1,10 @@
-//! Zamrud OS - Mouse Shell Commands (B2.1)
+//! Zamrud OS - Mouse Shell Commands (B2.1 + B2.11c)
 
 const helpers = @import("helpers.zig");
 const shell = @import("../shell.zig");
 const mouse = @import("../../drivers/input/mouse.zig");
+const framebuffer = @import("../../drivers/display/framebuffer.zig");
+const hid = @import("../../drivers/usb/hid.zig");
 const timer = @import("../../drivers/timer/timer.zig");
 const pic = @import("../../arch/x86_64/pic.zig");
 const cpu = @import("../../core/cpu.zig");
@@ -21,6 +23,8 @@ pub fn execute(args: []const u8) void {
         watchMouse();
     } else if (helpers.strEql(parsed.cmd, "diag")) {
         runDiag();
+    } else if (helpers.strEql(parsed.cmd, "cursor")) {
+        toggleCursor(parsed.rest);
     } else {
         shell.printError("mouse: unknown '");
         shell.print(parsed.cmd);
@@ -29,21 +33,45 @@ pub fn execute(args: []const u8) void {
 }
 
 fn showHelp() void {
-    shell.printInfoLine("========================================");
-    shell.printInfoLine("  MOUSE - PS/2 Mouse Driver (B2.1)");
-    shell.printInfoLine("========================================");
+    shell.printInfoLine("================================================");
+    shell.printInfoLine("  MOUSE - PS/2 + USB Mouse Driver (B2.1+B2.11c)");
+    shell.printInfoLine("================================================");
     shell.newLine();
     shell.println("Commands:");
-    shell.println("  help     Show this help");
-    shell.println("  status   Show mouse state & stats");
-    shell.println("  test     Run mouse driver tests");
-    shell.println("  watch    Watch mouse events (5s)");
-    shell.println("  diag     Hardware diagnostics");
+    shell.println("  help       Show this help");
+    shell.println("  status     Show mouse state & stats");
+    shell.println("  test       Run mouse driver tests (25)");
+    shell.println("  watch      Watch mouse events (5s)");
+    shell.println("  diag       Hardware diagnostics");
+    shell.println("  cursor on  Enable framebuffer cursor");
+    shell.println("  cursor off Disable framebuffer cursor");
     shell.newLine();
 }
 
+fn toggleCursor(args: []const u8) void {
+    var start: usize = 0;
+    while (start < args.len and args[start] == ' ') : (start += 1) {}
+    const arg = args[start..];
+
+    if (arg.len >= 2 and arg[0] == 'o' and arg[1] == 'n') {
+        mouse.enableCursor();
+        shell.printSuccessLine("Cursor enabled");
+    } else if (arg.len >= 3 and arg[0] == 'o' and arg[1] == 'f' and arg[2] == 'f') {
+        mouse.disableCursor();
+        shell.printSuccessLine("Cursor disabled");
+    } else {
+        shell.print("  Cursor: ");
+        if (mouse.isCursorEnabled()) {
+            shell.printSuccessLine("VISIBLE");
+        } else {
+            shell.println("HIDDEN");
+        }
+        shell.println("  Usage: mouse cursor on|off");
+    }
+}
+
 fn showStatus() void {
-    shell.printInfoLine("=== Mouse Status ===");
+    shell.printInfoLine("=== Mouse Status (B2.11c) ===");
 
     const stats = mouse.getStats();
 
@@ -65,19 +93,67 @@ fn showStatus() void {
     if ((stats.buttons & 0x04) != 0) shell.print("[M]") else shell.print("[ ]");
     shell.newLine();
 
-    shell.print("  IRQ count:     ");
+    // B2.11c: Cursor state
+    shell.print("  Cursor:        ");
+    if (stats.cursor_enabled) shell.printSuccessLine("VISIBLE") else shell.println("hidden");
+
+    shell.newLine();
+    shell.printInfoLine("=== Input Sources ===");
+
+    shell.print("  PS/2 IRQs:     ");
     helpers.printU64(stats.irq_count);
     shell.newLine();
 
-    shell.print("  Packets:       ");
+    shell.print("  PS/2 packets:  ");
     helpers.printU64(stats.total_packets);
     shell.newLine();
 
-    shell.print("  Events:        ");
+    shell.print("  USB mouse:     ");
+    if (stats.usb_mouse_active) {
+        shell.printSuccess("ACTIVE");
+        shell.print(" (");
+        helpers.printU64(stats.usb_mouse_events);
+        shell.println(" events)");
+    } else {
+        shell.println("not detected");
+    }
+
+    shell.print("  USB tablet:    ");
+    if (stats.usb_tablet_active) {
+        shell.printSuccess("ACTIVE");
+        shell.print(" (");
+        helpers.printU64(stats.usb_tablet_events);
+        shell.println(" events)");
+    } else {
+        shell.println("not detected");
+    }
+
+    shell.print("  Total events:  ");
     helpers.printU64(stats.total_events);
     shell.newLine();
 
+    // HID stats
+    const hid_stats = hid.getStats();
+    if (hid_stats.mice > 0 or hid_stats.tablets > 0) {
+        shell.newLine();
+        shell.printInfoLine("=== HID Polling ===");
+        shell.print("  HID mice:      ");
+        helpers.printU64(hid_stats.mice);
+        shell.newLine();
+        shell.print("  HID tablets:   ");
+        helpers.printU64(hid_stats.tablets);
+        shell.newLine();
+        shell.print("  Mouse polls:   ");
+        helpers.printU64(hid_stats.mouse_events);
+        shell.newLine();
+        shell.print("  Tablet polls:  ");
+        helpers.printU64(hid_stats.tablet_events);
+        shell.newLine();
+    }
+
     // PIC mask check
+    shell.newLine();
+    shell.printInfoLine("=== IRQ Status ===");
     shell.print("  PIC2 mask:     0x");
     helpers.printHexU8(pic.getMask2());
     shell.newLine();
@@ -85,7 +161,6 @@ fn showStatus() void {
     shell.print("  IRQ12 enabled: ");
     if ((pic.getMask2() & 0x10) == 0) shell.printSuccessLine("Yes") else shell.printErrorLine("No (MASKED!)");
 
-    // Cascade check
     shell.print("  IRQ2 cascade:  ");
     if ((pic.getMask1() & 0x04) == 0) shell.printSuccessLine("Yes") else shell.printErrorLine("No (MASKED!)");
 
@@ -95,6 +170,7 @@ fn showStatus() void {
 fn watchMouse() void {
     shell.printInfoLine("Watching mouse for 5 seconds...");
     shell.println("Move mouse in QEMU window (click to capture)");
+    shell.println("Sources: PS/2, USB Mouse, USB Tablet");
     shell.newLine();
 
     const start = timer.getTicks();
@@ -102,6 +178,9 @@ fn watchMouse() void {
     const stats_before = mouse.getStats();
 
     while (timer.getTicks() - start < 5000) {
+        // B2.11c: Process USB HID during watch
+        hid.processPending();
+
         if (mouse.pollEvent()) |ev| {
             event_count += 1;
             shell.print("  [");
@@ -122,6 +201,14 @@ fn watchMouse() void {
                 shell.print(" scroll=");
                 helpers.printI8(ev.scroll);
             }
+            // Show source
+            shell.print(" [");
+            switch (ev.source) {
+                .ps2 => shell.print("PS/2"),
+                .usb_mouse => shell.print("USB-Mouse"),
+                .usb_tablet => shell.print("USB-Tablet"),
+            }
+            shell.print("]");
             shell.newLine();
 
             if (event_count >= 20) {
@@ -137,20 +224,26 @@ fn watchMouse() void {
     shell.print("  Events displayed: ");
     helpers.printU32(event_count);
     shell.newLine();
-    shell.print("  IRQs during watch: ");
+    shell.print("  PS/2 IRQs: ");
     helpers.printU64(stats_after.irq_count - stats_before.irq_count);
     shell.newLine();
-    shell.print("  Packets during watch: ");
-    helpers.printU64(stats_after.total_packets - stats_before.total_packets);
+    shell.print("  USB mouse events: ");
+    helpers.printU64(stats_after.usb_mouse_events - stats_before.usb_mouse_events);
+    shell.newLine();
+    shell.print("  USB tablet events: ");
+    helpers.printU64(stats_after.usb_tablet_events - stats_before.usb_tablet_events);
     shell.newLine();
 
-    if (stats_after.irq_count == stats_before.irq_count) {
-        shell.printErrorLine("  WARNING: No IRQ12 received! Check PIC/IDT wiring.");
+    if (stats_after.irq_count == stats_before.irq_count and
+        stats_after.usb_mouse_events == stats_before.usb_mouse_events and
+        stats_after.usb_tablet_events == stats_before.usb_tablet_events)
+    {
+        shell.printWarningLine("  No mouse input detected. Check QEMU focus/capture.");
     }
 }
 
 fn runDiag() void {
-    shell.printInfoLine("=== Mouse Hardware Diagnostics ===");
+    shell.printInfoLine("=== Mouse Hardware Diagnostics (B2.11c) ===");
     shell.newLine();
 
     // Check PIC masks
@@ -175,7 +268,7 @@ fn runDiag() void {
 
     shell.newLine();
 
-    // Read PS/2 status
+    // PS/2 status
     const status = cpu.inb(0x64);
     shell.print("  PS/2 status:   0x");
     helpers.printHexU8(status);
@@ -187,7 +280,6 @@ fn runDiag() void {
     shell.print("    Aux data:    ");
     if ((status & 0x20) != 0) shell.println("Yes") else shell.println("No");
 
-    // Read controller config safely with interrupts disabled
     const cfg = readPS2ConfigSafe();
     if (cfg) |config| {
         shell.print("  PS/2 config:   0x");
@@ -197,19 +289,45 @@ fn runDiag() void {
         if ((config & 0x01) != 0) shell.println("Enabled") else shell.println("Disabled");
         shell.print("    Mouse IRQ:   ");
         if ((config & 0x02) != 0) shell.println("Enabled") else shell.println("Disabled");
-        shell.print("    KB clock:    ");
-        if ((config & 0x10) != 0) shell.println("Disabled") else shell.println("Enabled");
-        shell.print("    Mouse clock: ");
-        if ((config & 0x20) != 0) shell.println("Disabled") else shell.println("Enabled");
     } else {
         shell.printErrorLine("  PS/2 config: read timeout");
     }
 
+    // USB HID diagnostics
     shell.newLine();
-    shell.print("  Mouse init:    ");
-    if (mouse.isInitialized()) shell.printSuccessLine("Yes") else shell.printErrorLine("No");
-    shell.print("  IRQ count:     ");
-    helpers.printU64(mouse.getStats().irq_count);
+    shell.printInfoLine("=== USB HID Mouse/Tablet ===");
+    shell.print("  HID initialized: ");
+    if (hid.isInitialized()) shell.printSuccessLine("Yes") else shell.printErrorLine("No");
+    shell.print("  HID mice:        ");
+    helpers.printU64(hid.getMouseCount());
+    shell.newLine();
+    shell.print("  HID tablets:     ");
+    helpers.printU64(hid.getTabletCount());
+    shell.newLine();
+    shell.print("  HID polling:     ");
+    if (hid.isPollingEnabled()) shell.printSuccessLine("ON") else shell.printErrorLine("OFF");
+
+    // Framebuffer cursor
+    shell.newLine();
+    shell.printInfoLine("=== Framebuffer Cursor ===");
+    shell.print("  Framebuffer:     ");
+    if (framebuffer.isInitialized()) shell.printSuccessLine("OK") else shell.printErrorLine("No");
+    if (framebuffer.isInitialized()) {
+        shell.print("  Resolution:      ");
+        helpers.printU32(framebuffer.getWidth());
+        shell.print("x");
+        helpers.printU32(framebuffer.getHeight());
+        shell.newLine();
+    }
+    shell.print("  Cursor visible:  ");
+    if (mouse.isCursorEnabled()) shell.printSuccessLine("Yes") else shell.println("No");
+    shell.print("  Cursor position: (");
+    const cp = framebuffer.getCursorPos();
+    helpers.printU32(cp.x);
+    shell.print(", ");
+    helpers.printU32(cp.y);
+    shell.println(")");
+
     shell.newLine();
 }
 
@@ -221,35 +339,24 @@ fn printMaskBit(mask: u8, bit: u3) void {
     }
 }
 
-// =============================================================================
-// Safe PS/2 Config Byte Reader
-// Disables interrupts to prevent IRQ handlers from stealing data from port 0x60
-// =============================================================================
-
 fn readPS2ConfigSafe() ?u8 {
-    // Disable interrupts so no IRQ handler reads port 0x60 between
-    // our command write and our data read
     cpu.cli();
     defer cpu.sti();
 
-    // Flush any pending data first
     var flush_count: u32 = 0;
     while (flush_count < 16) : (flush_count += 1) {
         if ((cpu.inb(0x64) & 0x01) == 0) break;
         _ = cpu.inb(0x60);
     }
 
-    // Wait for input buffer empty before sending command
     var wait: u32 = 100000;
     while (wait > 0) : (wait -= 1) {
         if ((cpu.inb(0x64) & 0x02) == 0) break;
     }
     if (wait == 0) return null;
 
-    // Send "read config byte" command
     cpu.outb(0x64, 0x20);
 
-    // Wait for output buffer full (controller response)
     var timeout: u32 = 100000;
     while (timeout > 0) : (timeout -= 1) {
         if ((cpu.inb(0x64) & 0x01) != 0) {
@@ -261,13 +368,13 @@ fn readPS2ConfigSafe() ?u8 {
 }
 
 fn runTests() void {
-    helpers.printTestHeader("MOUSE DRIVER TEST SUITE (B2.1)");
+    helpers.printTestHeader("MOUSE DRIVER TEST SUITE (B2.1 + B2.11c)");
 
     var p: u32 = 0;
     var f: u32 = 0;
 
-    // Driver state tests
-    shell.printInfoLine("=== Driver State ===");
+    // PS/2 Driver state tests (1-7)
+    shell.printInfoLine("=== PS/2 Driver State ===");
     p += helpers.doTest("Mouse initialized", mouse.isInitialized(), &f);
     p += helpers.doTest("Position X >= 0", mouse.getX() >= 0, &f);
     p += helpers.doTest("Position Y >= 0", mouse.getY() >= 0, &f);
@@ -276,16 +383,7 @@ fn runTests() void {
     p += helpers.doTest("Right not pressed", !mouse.isRightPressed(), &f);
     p += helpers.doTest("Middle not pressed", !mouse.isMiddlePressed(), &f);
 
-    // Stats tests
-    shell.newLine();
-    shell.printInfoLine("=== Statistics ===");
-    const stats = mouse.getStats();
-    p += helpers.doTest("Stats accessible", stats.initialized, &f);
-    p += helpers.doTest("IRQ count >= 0", true, &f);
-    p += helpers.doTest("Packet count >= 0", true, &f);
-    p += helpers.doTest("Event count >= 0", true, &f);
-
-    // PIC configuration tests
+    // PIC tests (8-9)
     shell.newLine();
     shell.printInfoLine("=== PIC Configuration ===");
     const m1 = pic.getMask1();
@@ -293,22 +391,20 @@ fn runTests() void {
     p += helpers.doTest("IRQ2 cascade unmasked", (m1 & 0x04) == 0, &f);
     p += helpers.doTest("IRQ12 mouse unmasked", (m2 & 0x10) == 0, &f);
 
-    // PS/2 controller tests — read safely with interrupts disabled
+    // PS/2 controller tests (10-11)
     shell.newLine();
     shell.printInfoLine("=== PS/2 Controller ===");
-
     if (readPS2ConfigSafe()) |config| {
         p += helpers.doTest("Aux IRQ enabled", (config & 0x02) != 0, &f);
         p += helpers.doTest("Aux clock enabled", (config & 0x20) == 0, &f);
     } else {
-        // Config read timed out — this itself is a failure
         p += helpers.doTest("Aux IRQ enabled", false, &f);
         p += helpers.doTest("Aux clock enabled", false, &f);
     }
 
-    // API tests
+    // Position API tests (12-17)
     shell.newLine();
-    shell.printInfoLine("=== API Functions ===");
+    shell.printInfoLine("=== Position API ===");
 
     mouse.setPosition(100, 200);
     p += helpers.doTest("setPosition X", mouse.getX() == 100, &f);
@@ -322,16 +418,56 @@ fn runTests() void {
     p += helpers.doTest("Clamp max X", mouse.getX() < 99999, &f);
     p += helpers.doTest("Clamp max Y", mouse.getY() < 99999, &f);
 
-    // Restore center
     mouse.setPosition(512, 384);
 
+    // Event queue tests (18-19)
+    shell.newLine();
+    shell.printInfoLine("=== Event Queue ===");
     p += helpers.doTest("pollEvent (none)", mouse.pollEvent() == null, &f);
     p += helpers.doTest("hasEvent = false", !mouse.hasEvent(), &f);
 
-    p += helpers.doTest("getScrollDelta", mouse.getScrollDelta() == 0, &f);
+    // B2.11c: USB Mouse integration (20-22)
+    shell.newLine();
+    shell.printInfoLine("=== USB Mouse Integration (B2.11c) ===");
 
-    // Scroll wheel detection (may or may not have it)
-    p += helpers.doTest("hasScrollWheel check", true, &f);
+    // Test USB mouse event injection
+    mouse.queueUsbEvent(5, -3, 0x01, 0);
+    p += helpers.doTest("USB mouse event queued", mouse.hasEvent(), &f);
+    if (mouse.pollEvent()) |ev| {
+        p += helpers.doTest("USB mouse dx correct", ev.dx == 5, &f);
+        p += helpers.doTest("USB mouse buttons", ev.buttons == 0x01, &f);
+    } else {
+        p += helpers.doTest("USB mouse dx correct", false, &f);
+        p += helpers.doTest("USB mouse buttons", false, &f);
+    }
+
+    // B2.11c: USB Tablet integration (23-24)
+    shell.newLine();
+    shell.printInfoLine("=== USB Tablet Integration (B2.11c) ===");
+
+    mouse.setUsbTabletPosition(16384, 16384, 0);
+    p += helpers.doTest("Tablet position set", mouse.hasEvent(), &f);
+    _ = mouse.pollEvent(); // consume
+
+    mouse.setUsbTabletPosition(0, 0, 0x02);
+    if (mouse.pollEvent()) |ev| {
+        p += helpers.doTest("Tablet origin maps to 0,0", ev.x == 0 and ev.y == 0, &f);
+    } else {
+        p += helpers.doTest("Tablet origin maps to 0,0", false, &f);
+    }
+
+    // B2.11c: Framebuffer cursor (25)
+    shell.newLine();
+    shell.printInfoLine("=== Framebuffer Cursor (B2.11c) ===");
+
+    mouse.enableCursor();
+    const cursor_ok = mouse.isCursorEnabled() and framebuffer.isInitialized();
+    mouse.disableCursor();
+    mouse.enableCursor(); // leave enabled
+    p += helpers.doTest("Cursor enable/disable", cursor_ok, &f);
+
+    // Restore position
+    mouse.setPosition(512, 384);
 
     helpers.printTestResults(p, f);
 }

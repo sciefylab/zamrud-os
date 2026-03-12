@@ -1,5 +1,6 @@
-//! Zamrud OS - USB HID Driver (B2.11b)
+//! Zamrud OS - USB HID Driver (B2.11b + B2.11c)
 //! Uses GET_REPORT control transfers for reliable QEMU compatibility
+//! B2.11c: Mouse/tablet reports + dedup protection for QEMU addr=0
 
 const serial = @import("../../drivers/serial/serial.zig");
 const usb = @import("usb.zig");
@@ -40,8 +41,12 @@ const HidDevice = struct {
     device_type: HidDeviceType = .none,
     interface_num: u8 = 0,
     report_size: u8 = 8,
+    controller_index: u8 = 0,
     last_report: [MAX_REPORT_SIZE]u8 = [_]u8{0} ** MAX_REPORT_SIZE,
     active: bool = false,
+    poll_count: u64 = 0,
+    success_count: u64 = 0,
+    error_count: u64 = 0,
 };
 
 var hid_devices: [MAX_HID_DEVICES]HidDevice = [_]HidDevice{.{}} ** MAX_HID_DEVICES;
@@ -56,6 +61,8 @@ var stats_total_polls: u64 = 0;
 var stats_successful_polls: u64 = 0;
 var stats_keyboard_events: u64 = 0;
 var stats_mouse_events: u64 = 0;
+var stats_tablet_events: u64 = 0;
+var stats_duplicates_skipped: u64 = 0;
 
 // Keycode tables
 const HID_TO_ASCII = [_]u8{
@@ -101,7 +108,7 @@ fn hidToSpecialKey(keycode: u8) ?u8 {
 }
 
 pub fn init() void {
-    serial.writeString("[USB-HID] Initializing HID driver...\n");
+    serial.writeString("[USB-HID] Initializing HID driver (B2.11c)...\n");
 
     hid_lock.acquire();
     defer hid_lock.release();
@@ -114,6 +121,8 @@ pub fn init() void {
     stats_successful_polls = 0;
     stats_keyboard_events = 0;
     stats_mouse_events = 0;
+    stats_tablet_events = 0;
+    stats_duplicates_skipped = 0;
     poll_pending = false;
     poll_tick_counter = 0;
 
@@ -124,7 +133,19 @@ pub fn init() void {
 
     serial.writeString("[USB-HID] HID driver initialized (");
     printU8(@intCast(hid_device_count));
-    serial.writeString(" devices, GET_REPORT mode)\n");
+    serial.writeString(" devices: ");
+    printU8(@intCast(getKeyboardCount()));
+    serial.writeString(" kbd, ");
+    printU8(@intCast(getMouseCount()));
+    serial.writeString(" mouse, ");
+    printU8(@intCast(getTabletCount()));
+    serial.writeString(" tablet, GET_REPORT mode)\n");
+
+    if (stats_duplicates_skipped > 0) {
+        serial.writeString("[USB-HID] Skipped ");
+        printU8(@intCast(stats_duplicates_skipped));
+        serial.writeString(" duplicate(s) (QEMU addr=0 dedup)\n");
+    }
 }
 
 fn scanForHidDevices() void {
@@ -136,11 +157,22 @@ fn scanForHidDevices() void {
     }
 }
 
+/// QEMU addr=0 dedup: check if we already have this device type on this controller
+fn hasDuplicateOnController(ctrl_index: u8, dtype: HidDeviceType) bool {
+    for (hid_devices[0..hid_device_count]) |hid| {
+        if (hid.active and hid.controller_index == ctrl_index and hid.device_type == dtype) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn registerDevice(usb_dev: *usb.UsbDevice) void {
     if (hid_device_count >= MAX_HID_DEVICES) return;
 
     var hid = &hid_devices[hid_device_count];
     hid.usb_device = usb_dev;
+    hid.controller_index = usb_dev.controller_index;
 
     for (usb_dev.interfaces[0..usb_dev.num_interfaces]) |iface| {
         if (!iface.active) continue;
@@ -151,25 +183,50 @@ fn registerDevice(usb_dev: *usb.UsbDevice) void {
         if (iface.subclass == usb.USB_HID_SUBCLASS_BOOT) {
             switch (iface.protocol) {
                 usb.USB_HID_PROTOCOL_KEYBOARD => {
+                    // QEMU addr=0 dedup: skip if already have keyboard on this controller
+                    if (hasDuplicateOnController(usb_dev.controller_index, .keyboard)) {
+                        serial.writeString("[USB-HID] SKIP duplicate keyboard (addr=0 dedup, ctrl=");
+                        printU8(usb_dev.controller_index);
+                        serial.writeString(")\n");
+                        stats_duplicates_skipped += 1;
+                        return;
+                    }
                     hid.device_type = .keyboard;
                     hid.report_size = 8;
                     hid.active = true;
                     hid_device_count += 1;
-                    serial.writeString("[USB-HID] Boot keyboard registered\n");
+                    serial.writeString("[USB-HID] Boot keyboard registered (ctrl=");
+                    printU8(usb_dev.controller_index);
+                    serial.writeString(")\n");
                     return;
                 },
                 usb.USB_HID_PROTOCOL_MOUSE => {
+                    // QEMU addr=0 dedup: skip if already have mouse on this controller
+                    if (hasDuplicateOnController(usb_dev.controller_index, .mouse)) {
+                        serial.writeString("[USB-HID] SKIP duplicate mouse (addr=0 dedup, ctrl=");
+                        printU8(usb_dev.controller_index);
+                        serial.writeString(")\n");
+                        stats_duplicates_skipped += 1;
+                        return;
+                    }
                     hid.device_type = .mouse;
                     hid.report_size = 4;
                     hid.active = true;
                     hid_device_count += 1;
-                    serial.writeString("[USB-HID] Boot mouse registered\n");
+                    serial.writeString("[USB-HID] Boot mouse registered (ctrl=");
+                    printU8(usb_dev.controller_index);
+                    serial.writeString(")\n");
                     return;
                 },
                 else => {},
             }
         }
 
+        // Generic HID — also dedup
+        if (hasDuplicateOnController(usb_dev.controller_index, .other)) {
+            stats_duplicates_skipped += 1;
+            return;
+        }
         hid.device_type = .other;
         hid.report_size = 8;
         hid.active = true;
@@ -178,13 +235,29 @@ fn registerDevice(usb_dev: *usb.UsbDevice) void {
         return;
     }
 
-    // QEMU tablet fallback
+    // QEMU tablet fallback: VID:PID 0627:0001
     if (usb_dev.vendor_id == 0x0627 and usb_dev.product_id == 0x0001) {
+        // Check dedup — QEMU tablet at addr=0 looks same as keyboard
+        if (hasDuplicateOnController(usb_dev.controller_index, .tablet)) {
+            stats_duplicates_skipped += 1;
+            return;
+        }
+        // Also skip if we already have a keyboard on this controller
+        // (QEMU addr=0: tablet and keyboard return same data)
+        if (hasDuplicateOnController(usb_dev.controller_index, .keyboard)) {
+            serial.writeString("[USB-HID] SKIP tablet (keyboard already on ctrl=");
+            printU8(usb_dev.controller_index);
+            serial.writeString(", addr=0 conflict)\n");
+            stats_duplicates_skipped += 1;
+            return;
+        }
         hid.device_type = .tablet;
         hid.report_size = 6;
         hid.active = true;
         hid_device_count += 1;
-        serial.writeString("[USB-HID] QEMU Tablet registered\n");
+        serial.writeString("[USB-HID] QEMU Tablet registered (ctrl=");
+        printU8(usb_dev.controller_index);
+        serial.writeString(")\n");
     }
 }
 
@@ -214,6 +287,7 @@ pub fn processPending() void {
 
         var report: [MAX_REPORT_SIZE]u8 = [_]u8{0} ** MAX_REPORT_SIZE;
         stats_total_polls += 1;
+        hid.poll_count += 1;
 
         // Use GET_REPORT control transfer (works reliably on QEMU)
         const setup = usb.SetupPacket{
@@ -225,10 +299,12 @@ pub fn processPending() void {
         };
 
         if (!ehci.controlTransfer(dev, &setup, report[0..hid.report_size], true)) {
+            hid.error_count += 1;
             continue;
         }
 
         stats_successful_polls += 1;
+        hid.success_count += 1;
 
         // Check if report changed
         var changed = false;
@@ -309,7 +385,7 @@ fn handleKeyPress(keycode: u8, modifiers: u8) void {
 fn processMouseReport(hid: *HidDevice, report: []const u8) void {
     if (report.len < 3) return;
 
-    const buttons = report[0] & 0x07;
+    const btns = report[0] & 0x07;
     const dx: i8 = @bitCast(report[1]);
     const dy: i8 = @bitCast(report[2]);
     var scroll: i8 = 0;
@@ -319,8 +395,8 @@ fn processMouseReport(hid: *HidDevice, report: []const u8) void {
 
     const last_buttons = hid.last_report[0] & 0x07;
 
-    if (dx != 0 or dy != 0 or buttons != last_buttons or scroll != 0) {
-        mouse.queueUsbEvent(@intCast(dx), @intCast(-dy), buttons, scroll);
+    if (dx != 0 or dy != 0 or btns != last_buttons or scroll != 0) {
+        mouse.queueUsbEvent(@intCast(dx), @intCast(-dy), btns, scroll);
         stats_mouse_events += 1;
     }
 }
@@ -328,7 +404,7 @@ fn processMouseReport(hid: *HidDevice, report: []const u8) void {
 fn processTabletReport(hid: *HidDevice, report: []const u8) void {
     if (report.len < 6) return;
 
-    const buttons = report[0] & 0x07;
+    const btns = report[0] & 0x07;
     const abs_x: u16 = @as(u16, report[1]) | (@as(u16, report[2]) << 8);
     const abs_y: u16 = @as(u16, report[3]) | (@as(u16, report[4]) << 8);
 
@@ -336,8 +412,9 @@ fn processTabletReport(hid: *HidDevice, report: []const u8) void {
     const last_x: u16 = @as(u16, hid.last_report[1]) | (@as(u16, hid.last_report[2]) << 8);
     const last_y: u16 = @as(u16, hid.last_report[3]) | (@as(u16, hid.last_report[4]) << 8);
 
-    if (abs_x != last_x or abs_y != last_y or buttons != last_buttons) {
-        mouse.setUsbTabletPosition(abs_x, abs_y, buttons);
+    if (abs_x != last_x or abs_y != last_y or btns != last_buttons) {
+        mouse.setUsbTabletPosition(abs_x, abs_y, btns);
+        stats_tablet_events += 1;
         stats_mouse_events += 1;
     }
 }
@@ -383,6 +460,21 @@ pub fn getTabletCount() usize {
     return count;
 }
 
+pub fn getDuplicatesSkipped() u64 {
+    return stats_duplicates_skipped;
+}
+
+pub fn getDeviceType(index: usize) ?HidDeviceType {
+    if (index >= hid_device_count) return null;
+    return hid_devices[index].device_type;
+}
+
+pub fn getDeviceStats(index: usize) ?struct { polls: u64, successes: u64, errors: u64 } {
+    if (index >= hid_device_count) return null;
+    const d = &hid_devices[index];
+    return .{ .polls = d.poll_count, .successes = d.success_count, .errors = d.error_count };
+}
+
 pub const HidStats = struct {
     device_count: usize,
     keyboards: usize,
@@ -392,6 +484,8 @@ pub const HidStats = struct {
     successful_polls: u64,
     keyboard_events: u64,
     mouse_events: u64,
+    tablet_events: u64,
+    duplicates_skipped: u64,
     polling_enabled: bool,
 };
 
@@ -405,6 +499,8 @@ pub fn getStats() HidStats {
         .successful_polls = stats_successful_polls,
         .keyboard_events = stats_keyboard_events,
         .mouse_events = stats_mouse_events,
+        .tablet_events = stats_tablet_events,
+        .duplicates_skipped = stats_duplicates_skipped,
         .polling_enabled = polling_enabled,
     };
 }
@@ -421,15 +517,24 @@ pub fn disablePolling() void {
 }
 
 pub fn printStatus() void {
-    serial.writeString("\n[USB-HID] Status:\n");
+    serial.writeString("\n[USB-HID] Status (B2.11c):\n");
     serial.writeString("  Devices: ");
     printU8(@intCast(hid_device_count));
     serial.writeString(" (");
     printU8(@intCast(getKeyboardCount()));
-    serial.writeString(" kbd)\n");
+    serial.writeString(" kbd, ");
+    printU8(@intCast(getMouseCount()));
+    serial.writeString(" mouse, ");
+    printU8(@intCast(getTabletCount()));
+    serial.writeString(" tablet)\n");
     serial.writeString("  Mode: GET_REPORT (control transfers)\n");
     serial.writeString("  Polling: ");
     serial.writeString(if (polling_enabled) "ENABLED\n" else "DISABLED\n");
+    if (stats_duplicates_skipped > 0) {
+        serial.writeString("  Dedup: ");
+        printU8(@intCast(stats_duplicates_skipped));
+        serial.writeString(" skipped (QEMU addr=0)\n");
+    }
 }
 
 fn printU8(val: u8) void {

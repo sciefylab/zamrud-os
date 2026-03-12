@@ -1,5 +1,6 @@
 //! Zamrud OS - Framebuffer Driver
 //! Low-level framebuffer access — text rendering moved to terminal.zig
+//! B2.11c: Hardware cursor rendering for USB mouse/tablet
 
 const limine = @import("../../core/limine.zig");
 const serial = @import("../serial/serial.zig");
@@ -14,6 +15,44 @@ var fb_height: u32 = 0;
 var fb_pitch: u32 = 0;
 var fb_bpp: u16 = 0;
 var initialized: bool = false;
+
+// ============================================================================
+// B2.11c: Cursor State
+// ============================================================================
+
+const CURSOR_W: u32 = 12;
+const CURSOR_H: u32 = 16;
+
+var cursor_visible: bool = false;
+var cursor_x: u32 = 0;
+var cursor_y: u32 = 0;
+var cursor_drawn: bool = false;
+
+// Save/restore buffer for pixels under cursor
+var cursor_save: [CURSOR_W * CURSOR_H]u32 = [_]u32{0} ** (CURSOR_W * CURSOR_H);
+var cursor_save_x: u32 = 0;
+var cursor_save_y: u32 = 0;
+
+// Arrow cursor bitmap (1=white, 2=black outline, 0=transparent)
+// 12x16 classic arrow pointer
+const cursor_bitmap: [CURSOR_H][CURSOR_W]u2 = .{
+    .{ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    .{ 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    .{ 2, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    .{ 2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0 },
+    .{ 2, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0 },
+    .{ 2, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0 },
+    .{ 2, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0 },
+    .{ 2, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0 },
+    .{ 2, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0 },
+    .{ 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0 },
+    .{ 2, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 0 },
+    .{ 2, 1, 1, 2, 1, 1, 2, 0, 0, 0, 0, 0 },
+    .{ 2, 1, 2, 0, 2, 1, 1, 2, 0, 0, 0, 0 },
+    .{ 2, 2, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0 },
+    .{ 2, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0 },
+    .{ 0, 0, 0, 0, 0, 2, 2, 2, 0, 0, 0, 0 },
+};
 
 // ============================================================================
 // Initialization
@@ -106,6 +145,19 @@ pub fn putPixel(x: u32, y: u32, color: u32) void {
     }
 }
 
+/// Read a pixel value at (x, y)
+pub fn getPixel(x: u32, y: u32) u32 {
+    if (!initialized) return 0;
+    if (x >= fb_width or y >= fb_height) return 0;
+
+    if (fb_addr) |addr| {
+        const offset = y * fb_pitch + x * (fb_bpp / 8);
+        const pixel: *const u32 = @ptrCast(@alignCast(addr + offset));
+        return pixel.*;
+    }
+    return 0;
+}
+
 pub fn fillRect(x: u32, y: u32, width: u32, height: u32, color: u32) void {
     if (!initialized) return;
 
@@ -133,6 +185,128 @@ pub fn clear(color: u32) void {
             }
         }
     }
+}
+
+// ============================================================================
+// B2.11c: Cursor Rendering
+// ============================================================================
+
+/// Enable cursor display
+pub fn showCursor() void {
+    cursor_visible = true;
+    drawCursor();
+}
+
+/// Disable cursor display
+pub fn hideCursor() void {
+    if (cursor_drawn) {
+        restoreUnderCursor();
+    }
+    cursor_visible = false;
+}
+
+/// Update cursor position (called from mouse event handler)
+pub fn updateCursor(x: u32, y: u32) void {
+    if (!initialized) return;
+
+    // Only redraw if position actually changed
+    if (x == cursor_x and y == cursor_y and cursor_drawn) return;
+
+    // Erase old cursor
+    if (cursor_drawn) {
+        restoreUnderCursor();
+    }
+
+    // Update position
+    cursor_x = @min(x, fb_width -| 1);
+    cursor_y = @min(y, fb_height -| 1);
+
+    // Draw at new position
+    if (cursor_visible) {
+        drawCursor();
+    }
+}
+
+/// Get cursor visibility state
+pub fn isCursorVisible() bool {
+    return cursor_visible;
+}
+
+/// Get cursor position
+pub fn getCursorPos() struct { x: u32, y: u32 } {
+    return .{ .x = cursor_x, .y = cursor_y };
+}
+
+fn drawCursor() void {
+    if (!initialized or !cursor_visible) return;
+
+    // Save pixels under cursor
+    saveUnderCursor();
+
+    // Draw cursor bitmap
+    for (0..CURSOR_H) |row| {
+        const py = cursor_y + @as(u32, @intCast(row));
+        if (py >= fb_height) break;
+
+        for (0..CURSOR_W) |col| {
+            const px = cursor_x + @as(u32, @intCast(col));
+            if (px >= fb_width) break;
+
+            const pixel_type = cursor_bitmap[row][col];
+            switch (pixel_type) {
+                1 => putPixel(px, py, 0x00FFFFFF), // White fill
+                2 => putPixel(px, py, 0x00000000), // Black outline
+                else => {}, // Transparent
+            }
+        }
+    }
+
+    cursor_drawn = true;
+}
+
+fn saveUnderCursor() void {
+    cursor_save_x = cursor_x;
+    cursor_save_y = cursor_y;
+
+    for (0..CURSOR_H) |row| {
+        const py = cursor_y + @as(u32, @intCast(row));
+        if (py >= fb_height) {
+            // Fill rest with black
+            for (row..CURSOR_H) |r| {
+                for (0..CURSOR_W) |c| {
+                    cursor_save[r * CURSOR_W + c] = 0;
+                }
+            }
+            break;
+        }
+
+        for (0..CURSOR_W) |col| {
+            const px = cursor_x + @as(u32, @intCast(col));
+            if (px >= fb_width) {
+                cursor_save[row * CURSOR_W + col] = 0;
+            } else {
+                cursor_save[row * CURSOR_W + col] = getPixel(px, py);
+            }
+        }
+    }
+}
+
+fn restoreUnderCursor() void {
+    if (!cursor_drawn) return;
+
+    for (0..CURSOR_H) |row| {
+        const py = cursor_save_y + @as(u32, @intCast(row));
+        if (py >= fb_height) break;
+
+        for (0..CURSOR_W) |col| {
+            const px = cursor_save_x + @as(u32, @intCast(col));
+            if (px >= fb_width) continue;
+
+            putPixel(px, py, cursor_save[row * CURSOR_W + col]);
+        }
+    }
+
+    cursor_drawn = false;
 }
 
 // ============================================================================

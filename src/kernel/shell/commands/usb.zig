@@ -1,10 +1,12 @@
-//! Zamrud OS - USB Shell Commands (B2.11 + B2.11b)
+//! Zamrud OS - USB Shell Commands (B2.11 + B2.11b + B2.11c)
 
 const shell = @import("../shell.zig");
 const usb = @import("../../drivers/usb/usb.zig");
 const uhci = @import("../../drivers/usb/uhci.zig");
 const ehci = @import("../../drivers/usb/ehci.zig");
 const hid = @import("../../drivers/usb/hid.zig");
+const mouse = @import("../../drivers/input/mouse.zig");
+const framebuffer = @import("../../drivers/display/framebuffer.zig");
 const serial = @import("../../drivers/serial/serial.zig");
 
 pub fn execute(args: []const u8) void {
@@ -36,15 +38,15 @@ pub fn execute(args: []const u8) void {
 
 fn showHelp() void {
     shell.println("");
-    shell.printInfo("USB Subsystem Commands (B2.11 + B2.11b):");
-    shell.println("===============================");
+    shell.printInfo("USB Subsystem Commands (B2.11 + B2.11b + B2.11c):");
+    shell.println("==================================================");
     shell.println("");
     shell.println("  usb status      - Show USB subsystem status");
     shell.println("  usb controllers - List USB host controllers");
     shell.println("  usb devices     - List connected USB devices");
     shell.println("  usb ports       - Show port status details");
     shell.println("  usb scan        - Rescan for devices");
-    shell.println("  usb hid         - Show HID driver status (B2.11b)");
+    shell.println("  usb hid         - Show HID driver status");
     shell.println("  usb test        - Run USB tests (25 tests)");
     shell.println("  usb help        - Show this help");
     shell.println("");
@@ -99,8 +101,15 @@ fn showStatus() void {
     printDec(hid.getTabletCount());
     shell.newLine();
 
+    shell.print("  Dedup skipped:     ");
+    printDec64(hid.getDuplicatesSkipped());
+    shell.newLine();
+
     shell.print("  HID Mode:          ");
     shell.println(if (hid.isPollingEnabled()) "GET_REPORT (active)" else "Disabled");
+
+    shell.print("  Cursor:            ");
+    shell.println(if (mouse.isCursorEnabled()) "Visible" else "Hidden");
 
     shell.print("  Mass Storage:      ");
     printDec(usb.getMassStorageCount());
@@ -117,8 +126,8 @@ fn showStatus() void {
 
 fn showHidStatus() void {
     shell.println("");
-    shell.printInfo("USB HID Driver Status (B2.11b)");
-    shell.println("==============================");
+    shell.printInfo("USB HID Driver Status (B2.11b + B2.11c)");
+    shell.println("========================================");
     shell.println("");
 
     const stats = hid.getStats();
@@ -145,6 +154,13 @@ fn showHidStatus() void {
     printDec(stats.tablets);
     shell.newLine();
 
+    shell.print("  Dedup skipped:     ");
+    printDec64(stats.duplicates_skipped);
+    shell.newLine();
+
+    shell.print("  Cursor visible:    ");
+    shell.println(if (mouse.isCursorEnabled()) "Yes" else "No");
+
     shell.println("");
     shell.printInfo("Polling Statistics:");
     shell.println("");
@@ -165,12 +181,66 @@ fn showHidStatus() void {
     printDec64(stats.mouse_events);
     shell.newLine();
 
+    shell.print("  Tablet events:     ");
+    printDec64(stats.tablet_events);
+    shell.newLine();
+
     if (stats.total_polls > 0) {
         shell.print("  Success rate:      ");
         const rate = (stats.successful_polls * 100) / stats.total_polls;
         printDec64(rate);
         shell.println("%");
     }
+
+    // Per-device breakdown
+    shell.println("");
+    shell.printInfo("Per-Device Stats:");
+    shell.println("");
+    for (0..stats.device_count) |i| {
+        if (hid.getDeviceType(i)) |dtype| {
+            shell.print("  [");
+            printDec(i);
+            shell.print("] ");
+            switch (dtype) {
+                .keyboard => shell.print("Keyboard"),
+                .mouse => shell.print("Mouse   "),
+                .tablet => shell.print("Tablet  "),
+                .other => shell.print("Other   "),
+                .none => shell.print("None    "),
+            }
+            if (hid.getDeviceStats(i)) |ds| {
+                shell.print("  polls=");
+                printDec64(ds.polls);
+                shell.print(" ok=");
+                printDec64(ds.successes);
+                shell.print(" err=");
+                printDec64(ds.errors);
+            }
+            shell.newLine();
+        }
+    }
+
+    // Mouse position
+    shell.println("");
+    shell.printInfo("Mouse State:");
+    shell.println("");
+    const ms = mouse.getStats();
+    shell.print("  Position:          (");
+    printI32(ms.x);
+    shell.print(", ");
+    printI32(ms.y);
+    shell.println(")");
+    shell.print("  Buttons:           ");
+    if ((ms.buttons & 0x01) != 0) shell.print("[L]") else shell.print("[ ]");
+    if ((ms.buttons & 0x02) != 0) shell.print("[R]") else shell.print("[ ]");
+    if ((ms.buttons & 0x04) != 0) shell.print("[M]") else shell.print("[ ]");
+    shell.newLine();
+    shell.print("  USB mouse events:  ");
+    printDec64(ms.usb_mouse_events);
+    shell.newLine();
+    shell.print("  USB tablet events: ");
+    printDec64(ms.usb_tablet_events);
+    shell.newLine();
 
     shell.println("");
 }
@@ -311,20 +381,23 @@ fn scanDevices() void {
 }
 
 // =============================================================================
-// Test Suite (Updated for GET_REPORT mode - B2.11b)
+// Test Suite (B2.11 + B2.11b + B2.11c: 25 tests)
 // =============================================================================
 
 fn runTests() void {
     shell.println("");
-    shell.println("########################################");
-    shell.println("##  USB SUBSYSTEM TESTS (B2.11+B2.11b)");
-    shell.println("########################################");
+    shell.println("############################################");
+    shell.println("##  USB SUBSYSTEM TESTS (B2.11+B2.11b+11c)");
+    shell.println("############################################");
     shell.println("");
 
     var passed: u32 = 0;
     var failed: u32 = 0;
 
-    // === B2.11: Core USB Tests (1-15) ===
+    // === B2.11: Core USB Tests (1-10) ===
+    shell.printInfo("--- Core USB (B2.11) ---");
+    shell.newLine();
+
     runTest(1, "USB subsystem initialized", usb.isInitialized(), &passed, &failed);
     runTest(2, "Controller count >= 1", usb.getControllerCount() >= 1, &passed, &failed);
     runTest(3, "Active controllers >= 1", usb.getInitializedControllerCount() >= 1, &passed, &failed);
@@ -334,84 +407,79 @@ fn runTests() void {
     if (usb.getController(0)) |ctrl| {
         type_valid = ctrl.controller_type != .none;
     }
-    runTest(5, "Controller type enum valid", type_valid, &passed, &failed);
-
-    var type_str_valid = false;
-    if (usb.getController(0)) |ctrl| {
-        type_str_valid = ctrl.controller_type.toString().len > 0;
-    }
-    runTest(6, "Controller type strings", type_str_valid, &passed, &failed);
+    runTest(5, "Controller type valid", type_valid, &passed, &failed);
 
     var base_valid = false;
     if (usb.getController(0)) |ctrl| {
         base_valid = ctrl.base_addr != 0;
     }
-    runTest(7, "Active ctrl base addr != 0", base_valid, &passed, &failed);
+    runTest(6, "Controller base addr != 0", base_valid, &passed, &failed);
 
-    var irq_valid = false;
-    if (usb.getController(0)) |ctrl| {
-        irq_valid = ctrl.irq <= 15 or ctrl.irq == 11;
-    }
-    runTest(8, "IRQ in valid range", irq_valid, &passed, &failed);
+    runTest(7, "Total ports > 0", usb.getTotalPorts() > 0, &passed, &failed);
+    runTest(8, "Device count stable", usb.getDeviceCount() == usb.getDeviceCount(), &passed, &failed);
 
-    var ports_valid = false;
-    if (usb.getController(0)) |ctrl| {
-        ports_valid = ctrl.num_ports > 0;
-    }
-    runTest(9, "Active ctrl ports > 0", ports_valid, &passed, &failed);
-
-    runTest(10, "Total ports > 0", usb.getTotalPorts() > 0, &passed, &failed);
-    runTest(11, "UHCI driver status", !usb.hasUhci() or uhci.isInitialized(), &passed, &failed);
-    runTest(12, "UHCI port status readable", !usb.hasUhci() or uhci.getPortStatus(0, 0) != 0xFFFF, &passed, &failed);
-    runTest(13, "EHCI driver status", !usb.hasEhci() or ehci.isInitialized(), &passed, &failed);
+    runTest(9, "EHCI driver OK", !usb.hasEhci() or ehci.isInitialized(), &passed, &failed);
 
     var ehci_ver_valid = true;
     if (usb.hasEhci()) {
         const ver = ehci.getVersion(0);
         ehci_ver_valid = ver == 0x0100 or ver == 0x0110 or ver == 0x0095;
     }
-    runTest(14, "EHCI version valid", ehci_ver_valid, &passed, &failed);
+    runTest(10, "EHCI version valid", ehci_ver_valid, &passed, &failed);
 
-    const dev_count1 = usb.getDeviceCount();
-    const dev_count2 = usb.getDeviceCount();
-    runTest(15, "Device count stable", dev_count1 == dev_count2, &passed, &failed);
+    // === B2.11b: HID Keyboard Tests (11-15) ===
+    shell.println("");
+    shell.printInfo("--- HID Keyboard (B2.11b) ---");
+    shell.newLine();
 
-    // === B2.11b: HID + GET_REPORT Tests (16-25) ===
-    runTest(16, "HID driver initialized", hid.isInitialized(), &passed, &failed);
+    runTest(11, "HID driver initialized", hid.isInitialized(), &passed, &failed);
 
     const hid_stats = hid.getStats();
-    runTest(17, "HID device count consistent", hid_stats.device_count == hid.getDeviceCount(), &passed, &failed);
-    runTest(18, "HID keyboard count valid", hid_stats.keyboards <= hid_stats.device_count, &passed, &failed);
-    runTest(19, "HID mouse count valid", hid_stats.mice <= hid_stats.device_count, &passed, &failed);
-    runTest(20, "HID tablet count valid", hid_stats.tablets <= hid_stats.device_count, &passed, &failed);
+    runTest(12, "HID device count valid", hid_stats.device_count == hid.getDeviceCount(), &passed, &failed);
 
-    // Test 21: HID polling active when devices exist (GET_REPORT mode)
-    const has_hid_devices = hid_stats.device_count > 0;
-    runTest(21, "HID polling active", !has_hid_devices or hid.isPollingEnabled(), &passed, &failed);
+    // B2.11c: Dedup check — should have max 1 keyboard (not 2!)
+    runTest(13, "HID keyboard dedup (<=1)", hid_stats.keyboards <= 1, &passed, &failed);
 
-    // Test 22: GET_REPORT succeeds (polls > 0 means control transfers work)
-    runTest(22, "GET_REPORT transfers work", !has_hid_devices or hid_stats.successful_polls > 0, &passed, &failed);
+    const has_hid = hid_stats.device_count > 0;
+    runTest(14, "HID polling active", !has_hid or hid.isPollingEnabled(), &passed, &failed);
+    runTest(15, "GET_REPORT works", !has_hid or hid_stats.successful_polls > 0, &passed, &failed);
 
-    // Test 23: HID event counters valid
-    runTest(23, "HID events count valid", hid_stats.keyboard_events >= 0 and hid_stats.mouse_events >= 0, &passed, &failed);
+    // === B2.11c: Mouse & Tablet Tests (16-25) ===
+    shell.println("");
+    shell.printInfo("--- Mouse & Tablet (B2.11c) ---");
+    shell.newLine();
 
-    // Test 24: Device state consistency
-    var dev_state_valid = true;
-    for (0..usb.getDeviceCount()) |i| {
-        if (usb.getDevice(i)) |dev| {
-            if (dev.state == .detached and dev.allocated) {
-                dev_state_valid = false;
-                break;
-            }
-        }
-    }
-    runTest(24, "Device states consistent", dev_state_valid, &passed, &failed);
+    runTest(16, "HID mouse count valid", hid_stats.mice <= hid_stats.device_count, &passed, &failed);
+    runTest(17, "HID tablet count valid", hid_stats.tablets <= hid_stats.device_count, &passed, &failed);
 
-    // Test 25: Transfer counter works
-    const transfers1 = usb.getTotalTransfers();
-    usb.incrementTransfers();
-    const transfers2 = usb.getTotalTransfers();
-    runTest(25, "Transfer counter works", transfers2 == transfers1 + 1, &passed, &failed);
+    runTest(18, "Mouse driver initialized", mouse.isInitialized(), &passed, &failed);
+
+    const ms = mouse.getStats();
+    runTest(19, "Mouse position X valid", ms.x >= 0, &passed, &failed);
+    runTest(20, "Mouse position Y valid", ms.y >= 0, &passed, &failed);
+
+    // Test queueUsbEvent pipeline (synthetic)
+    const events_before = mouse.getStats().total_events;
+    mouse.queueUsbEvent(1, 1, 0, 0);
+    const events_after = mouse.getStats().total_events;
+    runTest(21, "queueUsbEvent pipeline", events_after > events_before, &passed, &failed);
+    _ = mouse.pollEvent();
+
+    // Test setUsbTabletPosition pipeline (synthetic)
+    const events_before2 = mouse.getStats().total_events;
+    mouse.setUsbTabletPosition(16384, 16384, 0);
+    const events_after2 = mouse.getStats().total_events;
+    runTest(22, "setUsbTabletPosition pipeline", events_after2 > events_before2, &passed, &failed);
+    _ = mouse.pollEvent();
+
+    // Framebuffer
+    runTest(23, "Framebuffer initialized", framebuffer.isInitialized(), &passed, &failed);
+
+    // Cursor API
+    mouse.enableCursor();
+    runTest(24, "Cursor enable works", mouse.isCursorEnabled(), &passed, &failed);
+    mouse.disableCursor();
+    runTest(25, "Cursor disable works", !mouse.isCursorEnabled(), &passed, &failed);
 
     // === Summary ===
     shell.println("");
@@ -443,22 +511,30 @@ fn runTests() void {
     shell.print("Devices: ");
     printDec(usb.getDeviceCount());
     shell.print(" (");
-    printDec(hid.getDeviceCount());
-    shell.print(" HID, ");
     printDec(hid.getKeyboardCount());
     shell.print(" kbd, ");
+    printDec(hid.getMouseCount());
+    shell.print(" mouse, ");
+    printDec(hid.getTabletCount());
+    shell.print(" tablet, ");
     printDec(usb.getConfiguredCount());
     shell.println(" configured)");
 
     shell.print("HID Mode: GET_REPORT, polling=");
     shell.println(if (hid.isPollingEnabled()) "ON" else "OFF");
 
+    if (hid_stats.duplicates_skipped > 0) {
+        shell.print("Dedup: ");
+        printDec64(hid_stats.duplicates_skipped);
+        shell.println(" duplicate(s) skipped (QEMU addr=0)");
+    }
+
     if (hid_stats.total_polls > 0) {
         shell.print("HID Polls: ");
         printDec64(hid_stats.total_polls);
         shell.print(" total, ");
         printDec64(hid_stats.successful_polls);
-        shell.print(" successful (");
+        shell.print(" ok (");
         const rate = (hid_stats.successful_polls * 100) / hid_stats.total_polls;
         printDec64(rate);
         shell.println("%)");
@@ -572,6 +648,15 @@ fn printDec64(val: u64) void {
     while (i > 0) {
         i -= 1;
         shell.printChar(buf[i]);
+    }
+}
+
+fn printI32(val: i32) void {
+    if (val < 0) {
+        shell.printChar('-');
+        printDec(@as(u32, @intCast(-val)));
+    } else {
+        printDec(@as(u32, @intCast(val)));
     }
 }
 

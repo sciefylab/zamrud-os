@@ -1,10 +1,12 @@
-//! Zamrud OS - PS/2 Mouse Driver (B2.1)
+//! Zamrud OS - PS/2 + USB Mouse Driver (B2.1 + B2.11c)
 //! Supports: 3-button mouse, scroll wheel (IntelliMouse), absolute position tracking
+//! B2.11c: USB mouse/tablet integration with framebuffer cursor
 //! IRQ12 via slave PIC, integrates with input_api.zig
 
 const cpu = @import("../../core/cpu.zig");
 const serial = @import("../serial/serial.zig");
 const timer = @import("../timer/timer.zig");
+const framebuffer = @import("../display/framebuffer.zig");
 
 // =============================================================================
 // PS/2 Controller Ports
@@ -29,13 +31,24 @@ var scroll_delta: i8 = 0;
 var initialized: bool = false;
 var has_scroll_wheel: bool = false;
 
+// B2.11c: Cursor state (default OFF — enable with 'mouse cursor on')
+var cursor_auto_enabled: bool = false;
+var usb_mouse_active: bool = false;
+var usb_tablet_active: bool = false;
+
 // Packet assembly state
 var packet: [4]u8 = [_]u8{0} ** 4;
 var packet_index: u8 = 0;
 var packet_size: u8 = 3; // 3 for standard, 4 for IntelliMouse
 
 // Event queue
-const EVENT_QUEUE_SIZE: usize = 32;
+const EVENT_QUEUE_SIZE: usize = 64;
+
+pub const MouseSource = enum(u8) {
+    ps2 = 0,
+    usb_mouse = 1,
+    usb_tablet = 2,
+};
 
 const MouseEvent = struct {
     x: i32 = 0,
@@ -45,6 +58,7 @@ const MouseEvent = struct {
     buttons: u8 = 0,
     scroll: i8 = 0,
     timestamp: u64 = 0,
+    source: MouseSource = .ps2,
 };
 
 var event_queue: [EVENT_QUEUE_SIZE]MouseEvent = [_]MouseEvent{.{}} ** EVENT_QUEUE_SIZE;
@@ -55,6 +69,8 @@ var queue_tail: usize = 0;
 var total_packets: u64 = 0;
 var total_events: u64 = 0;
 var irq_count: u64 = 0;
+var usb_mouse_events: u64 = 0;
+var usb_tablet_events: u64 = 0;
 
 // =============================================================================
 // Initialization
@@ -235,6 +251,13 @@ pub fn init() void {
     packet_index = 0;
     queue_head = 0;
     queue_tail = 0;
+
+    // B2.11c: Initialize screen dimensions from framebuffer
+    if (framebuffer.isInitialized()) {
+        screen_width = @intCast(framebuffer.getWidth());
+        screen_height = @intCast(framebuffer.getHeight());
+    }
+
     mouse_x = @divTrunc(screen_width, 2);
     mouse_y = @divTrunc(screen_height, 2);
 
@@ -249,7 +272,7 @@ pub fn init() void {
     } else {
         serial.writeString("3-byte standard");
     }
-    serial.writeString(")\n");
+    serial.writeString(", B2.11c cursor-ready)\n");
 }
 
 // =============================================================================
@@ -264,8 +287,6 @@ pub fn handleInterrupt() void {
     if ((status & 0x01) == 0) return; // No data available
 
     // Bit 5 should be set for aux (mouse) data
-    // Some emulators don't set this properly, so we read regardless
-    // but log if it's not aux data
     const data = cpu.inb(DATA_PORT);
 
     // If bit 5 is NOT set, this might be keyboard data leaking — skip
@@ -355,6 +376,7 @@ fn processPacket() void {
             .buttons = new_buttons,
             .scroll = scroll,
             .timestamp = timer.getTicks(),
+            .source = .ps2,
         });
     }
 }
@@ -371,6 +393,9 @@ fn queueEvent(event: MouseEvent) void {
         total_events += 1;
     }
     // else: queue full, drop event
+
+    // B2.11c: Update framebuffer cursor only if manually enabled
+    updateFramebufferCursor();
 }
 
 /// Poll for mouse event. Returns null if no events pending.
@@ -385,6 +410,50 @@ pub fn pollEvent() ?MouseEvent {
 /// Check if events are available
 pub fn hasEvent() bool {
     return queue_head != queue_tail;
+}
+
+// =============================================================================
+// B2.11c: Framebuffer Cursor Integration
+// Cursor is OFF by default. Enable with 'mouse cursor on' command.
+// This avoids visual artifacts in text-mode terminal.
+// Stage F6 (GUI) will auto-enable cursor.
+// =============================================================================
+
+/// Update the framebuffer cursor to match mouse position
+/// Only updates if cursor was manually enabled via enableCursor()
+fn updateFramebufferCursor() void {
+    if (!framebuffer.isInitialized()) return;
+    if (!cursor_auto_enabled) return;
+
+    framebuffer.updateCursor(
+        @intCast(@max(0, mouse_x)),
+        @intCast(@max(0, mouse_y)),
+    );
+}
+
+/// Enable cursor rendering (called by 'mouse cursor on' command)
+pub fn enableCursor() void {
+    if (framebuffer.isInitialized()) {
+        cursor_auto_enabled = true;
+        framebuffer.showCursor();
+        framebuffer.updateCursor(
+            @intCast(@max(0, mouse_x)),
+            @intCast(@max(0, mouse_y)),
+        );
+    }
+}
+
+/// Disable cursor rendering (called by 'mouse cursor off' command)
+pub fn disableCursor() void {
+    cursor_auto_enabled = false;
+    if (framebuffer.isInitialized()) {
+        framebuffer.hideCursor();
+    }
+}
+
+/// Check if cursor is visible
+pub fn isCursorEnabled() bool {
+    return cursor_auto_enabled;
 }
 
 // =============================================================================
@@ -448,11 +517,16 @@ pub const MouseStats = struct {
     total_packets: u64,
     total_events: u64,
     irq_count: u64,
+    usb_mouse_events: u64,
+    usb_tablet_events: u64,
     x: i32,
     y: i32,
     buttons: u8,
     has_scroll: bool,
     initialized: bool,
+    cursor_enabled: bool,
+    usb_mouse_active: bool,
+    usb_tablet_active: bool,
 };
 
 pub fn getStats() MouseStats {
@@ -460,11 +534,16 @@ pub fn getStats() MouseStats {
         .total_packets = total_packets,
         .total_events = total_events,
         .irq_count = irq_count,
+        .usb_mouse_events = usb_mouse_events,
+        .usb_tablet_events = usb_tablet_events,
         .x = mouse_x,
         .y = mouse_y,
         .buttons = buttons,
         .has_scroll = has_scroll_wheel,
         .initialized = initialized,
+        .cursor_enabled = cursor_auto_enabled,
+        .usb_mouse_active = usb_mouse_active,
+        .usb_tablet_active = usb_tablet_active,
     };
 }
 
@@ -527,11 +606,13 @@ fn ioDelay() void {
 }
 
 // =============================================================================
-// USB HID Integration (B2.11b)
+// USB HID Integration (B2.11b + B2.11c)
 // =============================================================================
 
 /// Queue mouse event from USB HID - relative movement
 pub fn queueUsbEvent(dx: i16, dy: i16, btns: u8, scroll: i8) void {
+    usb_mouse_active = true;
+
     // Update absolute position
     mouse_x += dx;
     mouse_y += dy;
@@ -544,6 +625,7 @@ pub fn queueUsbEvent(dx: i16, dy: i16, btns: u8, scroll: i8) void {
 
     buttons = btns;
     scroll_delta = scroll;
+    usb_mouse_events += 1;
 
     queueEvent(.{
         .x = mouse_x,
@@ -553,11 +635,14 @@ pub fn queueUsbEvent(dx: i16, dy: i16, btns: u8, scroll: i8) void {
         .buttons = btns,
         .scroll = scroll,
         .timestamp = timer.getTicks(),
+        .source = .usb_mouse,
     });
 }
 
 /// Set absolute position from USB tablet device
 pub fn setUsbTabletPosition(abs_x: u16, abs_y: u16, btns: u8) void {
+    usb_tablet_active = true;
+
     // USB tablet reports 0-32767, scale to screen
     const new_x: i32 = @intCast((@as(u32, abs_x) * @as(u32, @intCast(screen_width))) / 32768);
     const new_y: i32 = @intCast((@as(u32, abs_y) * @as(u32, @intCast(screen_height))) / 32768);
@@ -568,6 +653,7 @@ pub fn setUsbTabletPosition(abs_x: u16, abs_y: u16, btns: u8) void {
     mouse_x = @max(0, @min(new_x, screen_width - 1));
     mouse_y = @max(0, @min(new_y, screen_height - 1));
     buttons = btns;
+    usb_tablet_events += 1;
 
     queueEvent(.{
         .x = mouse_x,
@@ -577,6 +663,7 @@ pub fn setUsbTabletPosition(abs_x: u16, abs_y: u16, btns: u8) void {
         .buttons = btns,
         .scroll = 0,
         .timestamp = timer.getTicks(),
+        .source = .usb_tablet,
     });
 }
 
