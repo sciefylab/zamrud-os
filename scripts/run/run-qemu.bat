@@ -3,6 +3,7 @@
 echo ============================================
 echo   Zamrud OS - QEMU Runner (SMP + USB + NIC)
 echo   B2.9: Auto-detect CPUs + APIC
+echo   B2.10: AC97 Audio (dsound)
 echo   B2.11c: USB HID (Keyboard + Mouse)
 echo ============================================
 
@@ -41,10 +42,6 @@ echo     +-- USB Mouse         (boot protocol, relative)
 echo   usb-bus1: ICH9 EHCI   (USB 2.0, 480 Mbps)
 echo     +-- USB Keyboard      (boot protocol)
 echo.
-echo IMPORTANT: Only 1 HID device per controller (QEMU addr=0 limit)
-echo   PS/2 mouse active via IRQ12 (always works)
-echo   USB mouse on UHCI (separate from EHCI keyboard)
-echo.
 echo Input:
 echo   Keyboard: PS/2 + USB (both active)
 echo   Mouse:    PS/2 (IRQ12) + USB Mouse (UHCI)
@@ -53,6 +50,10 @@ echo Network Interfaces:
 echo   eth0: Intel E1000     (Gigabit, MMIO)
 echo   eth1: Realtek RTL8139 (Fast Ethernet, I/O Port)
 echo   eth2: VirtIO-Net      (Paravirtualized, High Performance)
+echo.
+echo Audio (B2.10):
+echo   AC97: Intel ICH (PCI, I/O Port, IRQ10)
+echo   Backend: DirectSound (host speaker output)
 echo.
 
 REM Check if disk exists
@@ -88,29 +89,33 @@ qemu-system-x86_64 ^
     -device rtl8139,netdev=net1,mac=52:54:00:12:34:57 ^
     -netdev user,id=net1,hostfwd=tcp::8081-:81 ^
     -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58 ^
-    -netdev user,id=net2,hostfwd=tcp::8082-:82
+    -netdev user,id=net2,hostfwd=tcp::8082-:82 ^
+    -device AC97,audiodev=audio0 ^
+    -audiodev dsound,id=audio0
 
+REM ============================================
+REM AUDIO BACKEND OPTIONS:
+REM
+REM   DirectSound (Windows, live speaker):
+REM     -audiodev dsound,id=audio0
+REM
+REM   SDL (Windows/Linux, live speaker):
+REM     -audiodev sdl,id=audio0
+REM
+REM   WAV file (record to file, no speaker):
+REM     -audiodev wav,id=audio0,path=audio_out.wav
+REM
+REM   PulseAudio (Linux):
+REM     -audiodev pa,id=audio0
+REM
 REM ============================================
 REM B2.11c USB Configuration:
 REM
-REM QEMU ADDR=0 LIMITATION:
-REM   All devices on same EHCI share address 0
-REM   Only 1 HID device per controller allowed!
-REM   Multiple HID on same bus = duplicate input
-REM
-REM Layout:
 REM   UHCI (usb-bus0): usb-mouse (boot protocol)
 REM   EHCI (usb-bus1): usb-kbd   (boot protocol)
 REM
-REM DO NOT add usb-tablet to usb-bus1!
-REM   It shares addr=0 with usb-kbd → double keystrokes
+REM   Only 1 HID device per controller (QEMU addr=0 limit)
 REM
-REM USB Tablet testing:
-REM   Replace usb-kbd with usb-tablet to test tablet mode:
-REM   -device usb-tablet,bus=usb-bus1.0
-REM   (loses USB keyboard, PS/2 keyboard still works)
-REM
-REM Real hardware: SET_ADDRESS works → multi-device OK
 REM ============================================
 REM B2.9 SMP Auto-Detection:
 REM   Uses %NUMBER_OF_PROCESSORS% from Windows

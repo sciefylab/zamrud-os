@@ -1,5 +1,6 @@
 //! Zamrud OS - SMP (Symmetric Multiprocessing) Bootstrap
 //! B2.9b: Multi-CPU Scheduler - STABLE VERSION
+//! B2.10: Audio timer poll integration
 //! APs online with timer but idle until full scheduler integration
 
 const cpu = @import("../../core/cpu.zig");
@@ -16,6 +17,7 @@ const terminal = @import("../../drivers/display/terminal.zig");
 const scheduler = @import("../../proc/scheduler.zig");
 const process = @import("../../proc/process.zig");
 const hid = @import("../../drivers/usb/hid.zig");
+const audio = @import("../../drivers/audio/audio.zig");
 
 pub export var smp_request: limine.SmpRequest linksection(".limine_requests") = .{};
 
@@ -35,7 +37,7 @@ pub const IPI_HALT_VECTOR: u8 = 50;
 
 // B2.9b: APIC Timer - BSP only for stability
 const ENABLE_APIC_TIMER_BSP: bool = true;
-const ENABLE_APIC_TIMER_AP: bool = false; // Disabled for stability
+const ENABLE_APIC_TIMER_AP: bool = false;
 const APIC_TIMER_HZ: u32 = 100;
 
 // Time-keeping
@@ -153,13 +155,11 @@ pub fn init() bool {
     return true;
 }
 
-/// Called after scheduler.init()
 pub fn enableSchedulerCalls() void {
     @atomicStore(bool, &scheduler_ready, true, .release);
     serial.writeString("[SMP] Scheduler calls ENABLED\n");
 }
 
-/// Called after full system init
 pub fn enableApScheduling() void {
     @atomicStore(bool, &aps_can_schedule, true, .release);
     serial.writeString("[SMP] AP scheduling flag SET (APs remain idle for now)\n");
@@ -194,7 +194,7 @@ fn setupBspApicTimer() void {
 }
 
 // ============================================================================
-// AP Entry Point (B2.9b STABLE: No timer, no scheduler loop)
+// AP Entry Point
 // ============================================================================
 
 fn apEntry(smp_info: *limine.SmpInfo) callconv(.c) noreturn {
@@ -205,26 +205,20 @@ fn apEntry(smp_info: *limine.SmpInfo) callconv(.c) noreturn {
 
     ap_boot_lock.acquire();
 
-    // Basic CPU setup
     cpu.enableSSE();
     apic.enableLocalApicAP();
 
-    // Setup per-CPU data
     const pcpu = per_cpu.get(cpu_index);
     pcpu.tss.rsp0 = pcpu.kernel_stack_top;
     pcpu.online = true;
     apic.markCpuOnline(pcpu.apic_id);
-
-    // B2.9b STABLE: Do NOT start APIC timer on APs
-    // This prevents race conditions during boot
 
     _ = spinlock.Atomic.fetchAdd(&aps_online, 1);
     @atomicStore(bool, &ap_boot_complete[cpu_index], true, .release);
 
     ap_boot_lock.release();
 
-    // AP idle loop - interrupts DISABLED for stability
-    // Future B2.9b+ will enable per-AP scheduling
+    // AP idle loop — interrupts disabled for stability
     cpu.cli();
     while (true) {
         cpu.hlt();
@@ -232,11 +226,12 @@ fn apEntry(smp_info: *limine.SmpInfo) callconv(.c) noreturn {
 }
 
 // ============================================================================
-// APIC Timer Handler (BSP only for now)
+// APIC Timer Handler (BSP only)
+// B2.10: audio.timerPoll() for zero-gap continuous playback
 // ============================================================================
 
 pub fn handleApicTimer() void {
-    // Increment tick counters (BSP only increments global)
+    // Increment global tick counters
     _ = spinlock.Atomic.fetchAdd64(&apic_ticks, 1);
 
     const ticks = spinlock.Atomic.load64(&apic_ticks);
@@ -264,16 +259,20 @@ pub fn handleApicTimer() void {
         if (terminal.isInitialized()) {
             terminal.tick();
         }
-
         scheduler.tick();
-
         if (scheduler.isRunning()) {
             scheduler.checkPreempt();
         }
     }
 
-    // B2.11b: USB HID polling trigger (non-blocking, just sets flag)
+    // B2.11b: USB HID polling trigger (non-blocking, sets flag only)
     hid.timerTick();
+
+    // B2.10: Audio DMA poll — every 2nd tick (50Hz)
+    // poll() has re-entrancy guard — safe from IRQ context
+    if ((ticks & 1) == 0) {
+        audio.timerPoll();
+    }
 
     apic.sendEoi();
 }
@@ -310,14 +309,11 @@ pub fn sendHaltIpiAll() void {
     apic.sendIpiAllExSelf(IPI_HALT_VECTOR);
 }
 
-/// Wake up a specific AP
 pub fn wakeApForWork(cpu_index: usize) void {
     if (!initialized or !smp_ready) return;
     if (cpu_index == 0) return;
-
     const info = apic.getCpuInfo(cpu_index) orelse return;
     if (!info.online) return;
-
     apic.sendIpi(info.apic_id, IPI_RESCHEDULE_VECTOR);
 }
 
@@ -338,7 +334,7 @@ pub fn getMillis() u64 {
 }
 
 // ============================================================================
-// Status Functions
+// Status
 // ============================================================================
 
 fn findCpuIndex(lapic_id: u32) ?usize {
@@ -395,15 +391,13 @@ pub fn printStatus() void {
     printDec(getSeconds());
     serial.writeString("\n");
 
-    // Per-CPU stats
-    serial.writeString("[SMP] Per-CPU:\n");
     const cpu_count = apic.getCpuCount();
+    serial.writeString("[SMP] Per-CPU:\n");
     for (0..cpu_count) |i| {
         const info = apic.getCpuInfo(i) orelse continue;
         if (!info.online) continue;
 
         const pcpu = per_cpu.get(i);
-
         serial.writeString("  CPU");
         printDec(i);
         serial.writeString(": ticks=");

@@ -432,7 +432,6 @@ fn setupIoApic() void {
 
     const ioapic_virt = hhdm_offset + ioapics[0].address;
 
-    // Read I/O APIC version & max redirection entries
     const ver = ioapicRead(ioapic_virt, IOAPIC_REG_VER);
     const max_redir = ((ver >> 16) & 0xFF) + 1;
 
@@ -446,19 +445,28 @@ fn setupIoApic() void {
     for (0..max_redir) |i| {
         const reg_lo: u32 = IOAPIC_REG_REDTBL_BASE + @as(u32, @intCast(i)) * 2;
         const reg_hi: u32 = reg_lo + 1;
-
         ioapicWrite(ioapic_virt, reg_lo, @as(u32, @truncate(IOAPIC_MASKED)) | @as(u32, @intCast(32 + i)));
         ioapicWrite(ioapic_virt, reg_hi, @as(u32, @intCast(bsp_apic_id)) << 24);
     }
 
-    // Route standard ISA IRQs (respecting ISO overrides)
-    routeIrq(0, 32); // Timer
-    routeIrq(1, 33); // Keyboard
-    routeIrq(2, 34); // Cascade (masked)
-    routeIrq(11, 43); // AHCI
-    routeIrq(12, 44); // Mouse
+    // Route standard ISA IRQs
+    routeIrq(0, 32); // IRQ0  - PIT Timer
+    routeIrq(1, 33); // IRQ1  - Keyboard
+    routeIrq(2, 34); // IRQ2  - Cascade (masked, tapi di-route supaya tidak spurious)
+    routeIrq(5, 37); // IRQ5  - AC97 Audio ← TAMBAH INI
+    routeIrq(9, 41); // IRQ9  - AC97 Audio (ACPI) ← TAMBAH INI
+    routeIrq(10, 42); // IRQ10 - AC97 Audio (PCI) ← TAMBAH INI
+    routeIrq(11, 43); // IRQ11 - AHCI/SATA
+    routeIrq(12, 44); // IRQ12 - Mouse
 
     serial.writeString("[APIC] I/O APIC routing configured\n");
+    serial.writeString("[APIC]   IRQ0  -> vector 32 (Timer)\n");
+    serial.writeString("[APIC]   IRQ1  -> vector 33 (Keyboard)\n");
+    serial.writeString("[APIC]   IRQ5  -> vector 37 (Audio)\n");
+    serial.writeString("[APIC]   IRQ9  -> vector 41 (Audio)\n");
+    serial.writeString("[APIC]   IRQ10 -> vector 42 (Audio)\n");
+    serial.writeString("[APIC]   IRQ11 -> vector 43 (AHCI)\n");
+    serial.writeString("[APIC]   IRQ12 -> vector 44 (Mouse)\n");
 }
 
 /// Route an ISA IRQ to a vector, checking for ISO overrides

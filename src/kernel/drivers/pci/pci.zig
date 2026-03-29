@@ -405,6 +405,13 @@ pub fn getSubclassName(class_code: u8, subclass: u8) []const u8 {
             0x08 => "NVM",
             else => "Unknown",
         },
+        CLASS_MULTIMEDIA => switch (subclass) {
+            0x00 => "Video",
+            0x01 => "Audio",
+            0x02 => "Telephony",
+            0x03 => "Audio Device",
+            else => "Unknown",
+        },
         else => "Unknown",
     };
 }

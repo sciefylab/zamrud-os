@@ -98,6 +98,8 @@ const rtc = @import("drivers/timer/rtc.zig");
 const usb_core = @import("drivers/usb/usb.zig");
 const usb_hid = @import("drivers/usb/hid.zig");
 
+const audio = @import("drivers/audio/audio.zig");
+
 // ============================================================================
 // Limine Requests
 // ============================================================================
@@ -317,6 +319,18 @@ export fn kernel_main() noreturn {
         serial.writeString(" mouse(s)\n");
     } else {
         serial.writeString("[INFO] USB: No controllers found\n");
+    }
+
+    // === Audio Subsystem (B2.10) ===
+    printLine();
+    serial.writeString("[AUDIO]\n");
+
+    if (audio.init()) {
+        serial.writeString("[OK]   Audio: ");
+        serial.writeString(audio.getBackendName());
+        serial.writeString(" backend\n");
+    } else {
+        serial.writeString("[INFO] Audio: No sound device found\n");
     }
 
     fat32.init();
@@ -811,6 +825,17 @@ fn printSystemSummary() void {
         serial.writeString("\n");
     } else {
         serial.writeString("Not initialized\n");
+    }
+    serial.writeString("  Audio(B2.10):");
+    if (audio.isInitialized()) {
+        serial.writeString(audio.getBackendName());
+        serial.writeString(" (");
+        if (audio.isPlaying()) serial.writeString("PLAYING") else serial.writeString("idle");
+        serial.writeString(", vol=");
+        printDecSerial(audio.getVolumePercent());
+        serial.writeString("%)\n");
+    } else {
+        serial.writeString("Not found\n");
     }
     serial.writeString("  Config:     ");
     if (config_store.isInitialized()) {

@@ -40,6 +40,7 @@ const acpi_cmd = @import("commands/acpi.zig");
 const date_cmd = @import("commands/date.zig");
 const smp_cmd = @import("commands/smp.zig");
 const usb_cmd = @import("commands/usb.zig");
+const audio_cmd = @import("commands/audio.zig");
 
 // =============================================================================
 // Command Execution
@@ -414,6 +415,13 @@ pub fn execute(input: []const u8) void {
         usb_cmd.execute("devices");
     }
 
+    // Audio (B2.10)
+    else if (helpers.strEql(command, "audio")) {
+        audio_cmd.execute(args);
+    } else if (helpers.strEql(command, "audiotest")) {
+        audio_cmd.execute("test");
+    }
+
     // Test all
     else if (helpers.strEql(command, "testall")) {
         runAllTests();
@@ -554,6 +562,10 @@ fn runAllTests() void {
 
     shell.printInfoLine("=== USB TESTS (B2.11) ===");
     usb_cmd.execute("test");
+    shell.newLine();
+
+    shell.printInfoLine("=== AUDIO TESTS (B2.10) ===");
+    audio_cmd.execute("test");
     shell.newLine();
 
     shell.printInfoLine("########################################");

@@ -24,6 +24,7 @@ const auth = @import("../identity/auth.zig");
 const rtc = @import("../drivers/timer/rtc.zig");
 
 const hid = @import("../drivers/usb/hid.zig");
+const audio = @import("../drivers/audio/audio.zig");
 
 // =============================================================================
 // Constants
@@ -650,6 +651,12 @@ fn loginPrompt() void {
                         }
                     }
                 }
+
+                // B2.10: Poll audio
+                if (audio.needsPoll()) {
+                    audio.poll();
+                }
+
                 asm volatile ("pause");
             }
 
@@ -749,6 +756,12 @@ fn loginPrompt() void {
                                 }
                             }
                         }
+
+                        // B2.10: Poll audio
+                        if (audio.needsPoll()) {
+                            audio.poll();
+                        }
+
                         asm volatile ("pause");
                     }
 
@@ -944,6 +957,12 @@ fn readLoginInput() void {
                 }
             }
         }
+
+        // B2.10: Poll audio while waiting for login input
+        if (audio.needsPoll()) {
+            audio.poll();
+        }
+
         asm volatile ("pause");
     }
 }
@@ -992,6 +1011,11 @@ fn shellLoop() void {
     while (running and logged_in) {
         // B2.11b: Process USB HID events
         hid.processPending();
+
+        // B2.10: Poll audio for continuous playback
+        if (audio.needsPoll()) {
+            audio.poll();
+        }
 
         ui.drawStatusBar();
 
@@ -1086,6 +1110,12 @@ fn drawWelcome() void {
 // =============================================================================
 
 fn drawPrompt() void {
+
+    // B2.10: Keep audio alive during prompt drawing
+    if (audio.needsPoll()) {
+        audio.poll();
+    }
+
     if (terminal.isInitialized()) {
         prompt_row = terminal.getCursorRow();
         const col_before = terminal.getCursorCol();
@@ -1305,6 +1335,14 @@ fn readInput() void {
                 insertChar(key);
                 last_was_tab = false;
             }
+        }
+
+        // B2.10: Poll audio while waiting for input (aggressive)
+        if (audio.needsPoll()) {
+            audio.poll();
+            // Don't pause too long — audio needs frequent polling
+            asm volatile ("pause");
+            continue;
         }
 
         asm volatile ("pause");
@@ -1528,6 +1566,12 @@ fn loadHistoryEntry(idx: usize) void {
 // =============================================================================
 
 fn redrawInput() void {
+
+    // B2.10: Keep audio alive during prompt drawing
+    if (audio.needsPoll()) {
+        audio.poll();
+    }
+
     if (!terminal.isInitialized()) return;
     terminal.setCursor(0, prompt_row);
     var display_path_buf: [128]u8 = undefined;
