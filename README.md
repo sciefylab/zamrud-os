@@ -1,3 +1,6 @@
+# ZAMRUD OS
+
+```PlainText
 ┌─────────────────────────────────────────────────────────────────┐
 │  ZAMRUD OS - GLOBAL PROJECT STATUS                              │
 │  "Security = Identity × Integrity × Isolation × Blockchain"     │
@@ -268,6 +271,7 @@
 │  Total B2 tests: 278+ tests                                     │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
+```
 
 ## Mode UI (default)
 
