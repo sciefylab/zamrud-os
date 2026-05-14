@@ -1,5 +1,6 @@
 //! Zamrud OS - Cryptography Module
 //! H.1 + H.2: Security Hardened
+//! H.11: Added One-Time Pad (OTP) Streaming Cipher
 
 const serial = @import("../drivers/serial/serial.zig");
 
@@ -10,6 +11,7 @@ pub const signature = @import("signature.zig");
 pub const aes = @import("aes.zig");
 pub const constant_time = @import("constant_time.zig");
 pub const entropy = @import("entropy.zig");
+pub const otp = @import("otp.zig"); // H.11
 
 // Hash re-exports
 pub const Sha256 = hash.Sha256;
@@ -44,6 +46,9 @@ pub const secureZero64 = constant_time.secureZero64;
 pub const getSecureBytes = entropy.getSecureBytes;
 pub const addEventEntropy = entropy.addEventEntropy;
 
+// H.11: OTP re-exports
+pub const OtpStream = otp.OtpStream;
+
 pub fn init() void {
     serial.writeString("[CRYPTO] Initializing...\n");
     random.init();
@@ -57,7 +62,7 @@ pub fn isInitialized() bool {
 
 pub fn runTests() bool {
     serial.writeString("\n========================================\n");
-    serial.writeString("  CRYPTO TEST SUITE (HARDENED)\n");
+    serial.writeString("  CRYPTO TEST SUITE (HARDENED + OTP)\n");
     serial.writeString("========================================\n\n");
 
     var passed: u32 = 0;
@@ -149,13 +154,24 @@ pub fn runTests() bool {
         failed += 1;
         serial.writeString("[DEBUG] Entropy test FAILED\n");
     }
+    serial.writeString("\n");
+
+    // Test 9: One-Time Pad (H.11)
+    serial.writeString("[DEBUG] Starting OTP cipher test (H.11)...\n");
+    if (otp.test_otp()) {
+        passed += 1;
+        serial.writeString("[DEBUG] OTP cipher test completed OK\n");
+    } else {
+        failed += 1;
+        serial.writeString("[DEBUG] OTP cipher test FAILED\n");
+    }
 
     serial.writeString("\n========================================\n");
     serial.writeString("  RESULTS: ");
     printU32(passed);
     serial.writeString(" passed, ");
     printU32(failed);
-    serial.writeString(" failed (of 8 suites)\n");
+    serial.writeString(" failed (of 9 suites)\n");
     serial.writeString("========================================\n");
 
     if (failed == 0) {
