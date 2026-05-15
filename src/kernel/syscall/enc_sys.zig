@@ -251,6 +251,7 @@ fn sysExecElf(data_ptr: u64, data_len: u64, name_ptr: u64, name_len_raw: u64) i6
         .TooManyProcesses => numbers.EAGAIN,
         .InvalidEntry => numbers.EINVAL,
         .NotInitialized => numbers.ENODEV,
+        .ProductionLockdown => numbers.EPERM, // 🆕 FIX: Tolak karena mode Production
     };
 }
 
@@ -291,5 +292,6 @@ fn sysExecZam(data_ptr: u64, data_len: u64, name_ptr: u64, name_len_raw: u64) i6
         .TooManyProcesses => numbers.EAGAIN,
         .InvalidEntry => numbers.EINVAL,
         .NotInitialized => numbers.ENODEV,
+        .ProductionLockdown => numbers.EPERM, // 🆕 FIX: Tolak karena mode Production
     };
 }

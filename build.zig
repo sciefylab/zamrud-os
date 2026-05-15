@@ -2,9 +2,11 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     // ========================================================================
-    // Build Options (Default: Server/tanpa UI)
+    // Build Options
     // ========================================================================
     const with_ui = b.option(bool, "with_ui", "Enable UI/Graphics subsystem") orelse false;
+    // 🆕 OPSI PRODUCTION (Default: false / Development Mode)
+    const is_prod = b.option(bool, "prod", "Enable Strict Production Mode (Disables DevKey)") orelse false;
 
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
@@ -16,10 +18,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // ========================================================================
-    // Build-time Configuration
+    // Build-time Configuration (disuntikkan ke modul 'config' di Kernel)
     // ========================================================================
     const config = b.addOptions();
     config.addOption(bool, "enable_ui", with_ui);
+    config.addOption(bool, "is_production", is_prod); // 🆕 Tersedia di Kernel sebagai config.is_production
 
     const kernel_mod = b.createModule(.{
         .root_source_file = b.path("src/kernel/main.zig"),
@@ -88,9 +91,20 @@ pub fn build(b: *std.Build) void {
     clean_step.dependOn(&clean_cmd.step);
 
     // Print mode
+    std.debug.print("\n========================================\n", .{});
+    std.debug.print("[BUILD] Zamrud OS \n", .{});
+    std.debug.print("========================================\n", .{});
+
     if (with_ui) {
-        std.debug.print("\n[BUILD] Zamrud OS - UI Mode Enabled\n\n", .{});
+        std.debug.print(" -> Subsystem: UI/Graphics\n", .{});
     } else {
-        std.debug.print("\n[BUILD] Zamrud OS - Server Mode (No UI)\n\n", .{});
+        std.debug.print(" -> Subsystem: Server (No UI)\n", .{});
     }
+
+    if (is_prod) {
+        std.debug.print(" -> Env: PRODUCTION (DevKey REJECTED)\n", .{});
+    } else {
+        std.debug.print(" -> Env: DEVELOPMENT (DevKey ALLOWED)\n", .{});
+    }
+    std.debug.print("========================================\n\n", .{});
 }

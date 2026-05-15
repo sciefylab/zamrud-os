@@ -1,35 +1,29 @@
-//! Zamrud OS - ELF Process Execution (F5.2)
+//! Zamrud OS - ELF Process Execution (F5.2 & E3.6)
 //! Creates and runs processes from loaded ELF binaries
-//!
-//! Flow: .zam file → parse → verify → load segments → create process → run
-//!
-//! Supports:
-//!   - Create process from loaded ELF segments
-//!   - Binary verification (E3.3) on load
-//!   - Capability assignment from ZAM header
-//!   - Entry point setup with loaded segment memory
-//!   - Process cleanup on exit
+//! 🆕 E3.6: Strict Production checking, Physical Proof of Presence, & Session-Bound Dev Trust
 
 const serial = @import("../drivers/serial/serial.zig");
 const process = @import("../proc/process.zig");
 const scheduler = @import("../proc/scheduler.zig");
 const capability = @import("../security/capability.zig");
 const binaryverify = @import("../security/binaryverify.zig");
+const violation = @import("../security/violation.zig");
 const zam_header = @import("zam_header.zig");
 const elf_parser = @import("elf_parser.zig");
 const segment_loader = @import("segment_loader.zig");
 const loader = @import("loader.zig");
 
+const config = @import("config");
+const terminal = @import("../drivers/display/terminal.zig");
+const keyboard = @import("../drivers/input/keyboard.zig");
+const ct = @import("../crypto/constant_time.zig"); // Untuk komparasi key
+
 // ============================================================================
-// Constants
+// Constants & Error Types
 // ============================================================================
 
-/// Maximum simultaneous ELF processes tracked
 pub const MAX_ELF_PROCESSES: usize = 16;
-
-// ============================================================================
-// Error types
-// ============================================================================
+pub const MAX_TRUSTED_DEV_SESSIONS: usize = 4; // Maksimal DevKey yang di-Auto-Run dalam 1 sesi
 
 pub const ExecError = enum(u8) {
     None = 0,
@@ -41,6 +35,7 @@ pub const ExecError = enum(u8) {
     TooManyProcesses = 6,
     InvalidEntry = 7,
     NotInitialized = 8,
+    ProductionLockdown = 9,
 };
 
 pub fn execErrorName(err: ExecError) []const u8 {
@@ -54,6 +49,7 @@ pub fn execErrorName(err: ExecError) []const u8 {
         .TooManyProcesses => "TooManyProcesses",
         .InvalidEntry => "InvalidEntry",
         .NotInitialized => "NotInitialized",
+        .ProductionLockdown => "ProductionLockdown",
     };
 }
 
@@ -94,9 +90,9 @@ var elf_processes: [MAX_ELF_PROCESSES]ElfProcess = undefined;
 var elf_proc_count: usize = 0;
 var initialized: bool = false;
 
-// ============================================================================
-// Init
-// ============================================================================
+// 🆕 Tabel Sesi Auto-Run untuk DevKey
+var trusted_dev_keys: [MAX_TRUSTED_DEV_SESSIONS][zam_header.PUBKEY_SIZE]u8 = undefined;
+var trusted_dev_active: [MAX_TRUSTED_DEV_SESSIONS]bool = [_]bool{false} ** MAX_TRUSTED_DEV_SESSIONS;
 
 pub fn init() void {
     serial.writeString("[ELFEXEC] Initializing ELF executor...\n");
@@ -104,6 +100,12 @@ pub fn init() void {
     var i: usize = 0;
     while (i < MAX_ELF_PROCESSES) : (i += 1) {
         elf_processes[i] = ElfProcess.init();
+    }
+
+    // Bersihkan sesi DevKey
+    i = 0;
+    while (i < MAX_TRUSTED_DEV_SESSIONS) : (i += 1) {
+        trusted_dev_active[i] = false;
     }
 
     elf_proc_count = 0;
@@ -117,46 +119,125 @@ pub fn isInitialized() bool {
 }
 
 // ============================================================================
+// 🆕 E3.6: Session-Bound Dev Trust (Auto-Run Cache)
+// ============================================================================
+
+fn isDevKeyAutoTrusted(pubkey: *const [zam_header.PUBKEY_SIZE]u8) bool {
+    var i: usize = 0;
+    while (i < MAX_TRUSTED_DEV_SESSIONS) : (i += 1) {
+        if (trusted_dev_active[i]) {
+            // Kita asumsikan ada fungsi constant_time komparasi, atau bandingkan manual
+            var match = true;
+            var j: usize = 0;
+            while (j < zam_header.PUBKEY_SIZE) : (j += 1) {
+                if (trusted_dev_keys[i][j] != pubkey[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return true;
+        }
+    }
+    return false;
+}
+
+fn addDevKeyToAutoTrust(pubkey: *const [zam_header.PUBKEY_SIZE]u8) void {
+    var i: usize = 0;
+    while (i < MAX_TRUSTED_DEV_SESSIONS) : (i += 1) {
+        if (!trusted_dev_active[i]) {
+            var j: usize = 0;
+            while (j < zam_header.PUBKEY_SIZE) : (j += 1) {
+                trusted_dev_keys[i][j] = pubkey[j];
+            }
+            trusted_dev_active[i] = true;
+            serial.writeString("[SECURITY] DevKey added to Session Auto-Run Cache.\n");
+            return;
+        }
+    }
+    serial.writeString("[SECURITY] Warning: DevKey Session Cache is full!\n");
+}
+
+// ============================================================================
+// 🆕 E3.6: Physical Approval (Proof of Presence)
+// ============================================================================
+
+/// Meminta input fisik dari user, menawarkan fitur Auto-Run Sesi
+fn requestPhysicalApproval(zam: *const zam_header.ZamHeader, app_name: []const u8, requested_caps: u32) bool {
+    // 1. Cek apakah kunci ini sudah di-Allow untuk sesi ini
+    if (isDevKeyAutoTrusted(&zam.signer_pubkey)) {
+        serial.writeString("[SECURITY] DevKey is in Auto-Run Session. Bypassing physical prompt.\n");
+        return true;
+    }
+
+    serial.writeString("\n[SECURITY] Awaiting physical approval for DevKey execution...\n");
+
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(0xFFAA00); // Kuning Peringatan
+        terminal.println("\n==============================================");
+        terminal.println(" ZAMRUD SECURITY: DEV-KEY EXECUTION ATTEMPT");
+        terminal.println("==============================================");
+        terminal.setFgColor(0xFFFFFF);
+
+        terminal.print(" App Name : ");
+        terminal.println(app_name);
+        terminal.print(" Caps Req : 0x");
+        printHex32ToTerminal(requested_caps);
+        terminal.println("");
+
+        terminal.println("\n This binary is signed with an untrusted Local DevKey.");
+        terminal.println(" [Y] - ALLOW once (Sandboxed)");
+        terminal.println(" [A] - ALLOW ALL for this session (Fast Dev Mode)");
+        terminal.println(" [N] - BLOCK execution");
+        terminal.print(" > ");
+
+        while (true) {
+            if (keyboard.hasKey()) {
+                const key = keyboard.getKey();
+                if (key == 'y' or key == 'Y') {
+                    terminal.setFgColor(0x55FF55);
+                    terminal.println("Y -> APPROVED ONCE.");
+                    terminal.setFgColor(0xFFFFFF);
+                    return true;
+                } else if (key == 'a' or key == 'A') {
+                    terminal.setFgColor(0x55FF55);
+                    terminal.println("A -> AUTO-RUN ACTIVATED FOR THIS SESSION.");
+                    terminal.setFgColor(0xFFFFFF);
+                    addDevKeyToAutoTrust(&zam.signer_pubkey);
+                    return true;
+                } else {
+                    terminal.setFgColor(0xFF5555);
+                    terminal.println("N -> BLOCKED BY USER.");
+                    terminal.setFgColor(0xFFFFFF);
+                    return false;
+                }
+            }
+        }
+    }
+
+    serial.writeString("[SECURITY] Terminal not ready. Auto-denying DevKey.\n");
+    return false;
+}
+
+// ============================================================================
 // Capability mapping from ZAM trust level
 // ============================================================================
 
-/// Map ZAM trust level to kernel capabilities
 fn trustLevelToCaps(trust_level: u8, zam_caps: u32) u32 {
-    // Start with ZAM-requested caps
     var caps: u32 = zam_caps;
-
-    // Restrict based on trust level
     switch (trust_level) {
-        zam_header.TRUST_KERNEL => {
-            // Kernel trust = all caps allowed
-            caps = capability.CAP_ALL;
-        },
+        zam_header.TRUST_KERNEL => caps = capability.CAP_ALL,
         zam_header.TRUST_SYSTEM => {
-            // System trust = most caps, no ADMIN
             caps = caps & ~capability.CAP_ADMIN;
             caps |= capability.CAP_EXEC | capability.CAP_FS_READ |
                 capability.CAP_FS_WRITE | capability.CAP_NET;
         },
-        zam_header.TRUST_USER => {
-            // User trust = limited caps
-            caps = caps & (capability.CAP_FS_READ | capability.CAP_FS_WRITE |
-                capability.CAP_IPC | capability.CAP_GRAPHICS | capability.CAP_EXEC);
-        },
-        zam_header.TRUST_UNTRUSTED => {
-            // Untrusted = minimal caps
-            caps = capability.CAP_FS_READ;
-        },
-        else => {
-            caps = capability.CAP_MINIMAL;
-        },
+        zam_header.TRUST_USER => caps = caps & (capability.CAP_FS_READ | capability.CAP_FS_WRITE |
+            capability.CAP_IPC | capability.CAP_GRAPHICS | capability.CAP_EXEC),
+        zam_header.TRUST_UNTRUSTED => caps = capability.CAP_FS_READ,
+        else => caps = capability.CAP_MINIMAL,
     }
-
     return caps;
 }
-
-// ============================================================================
-// Find free tracking slot
-// ============================================================================
 
 fn findFreeSlot() ?usize {
     var i: usize = 0;
@@ -190,7 +271,6 @@ pub const ExecResult = struct {
 // Main API: Execute from raw .zam data
 // ============================================================================
 
-/// Execute a .zam binary: parse → verify → load → create process
 pub fn execZam(data: []const u8, name: []const u8) ExecResult {
     var result = ExecResult{
         .err = .None,
@@ -209,7 +289,6 @@ pub fn execZam(data: []const u8, name: []const u8) ExecResult {
     serialPrintStr(name);
     serial.writeString(" ===\n");
 
-    // Step 1: Find tracking slot
     const slot = findFreeSlot() orelse {
         serial.writeString("[ELFEXEC] No free process slot\n");
         result.err = .TooManyProcesses;
@@ -234,8 +313,6 @@ pub fn execZam(data: []const u8, name: []const u8) ExecResult {
             return result;
         }
         serial.writeString("[ELFEXEC] Binary verification: OK\n");
-    } else {
-        serial.writeString("[ELFEXEC] Binary verification: SKIPPED (not initialized)\n");
     }
 
     // Step 4: Verify integrity (hash check)
@@ -247,14 +324,47 @@ pub fn execZam(data: []const u8, name: []const u8) ExecResult {
     }
     serial.writeString("[ELFEXEC] Integrity: OK\n");
 
-    // Step 5: Determine capabilities
+    // Step 5: Determine capabilities (E3.6 DEVKEY LOGIC)
     serial.writeString("[ELFEXEC] Step 4: Capability assignment...\n");
-    const caps = trustLevelToCaps(parsed.zam.trust_level, parsed.zam.required_caps);
+    var caps = trustLevelToCaps(parsed.zam.trust_level, parsed.zam.required_caps);
+
+    if (parsed.zam.isDevKey()) {
+        serial.writeString("[SECURITY] DEVKEY Signature Detected.\n");
+
+        // HARD BLOCK JIKA INI SERVER PRODUCTION
+        if (config.is_production) {
+            serial.writeString("[SECURITY] CRITICAL: Attempted to run DevKey binary on PRODUCTION server. BLOCKED!\n");
+            if (violation.isInitialized()) {
+                _ = violation.reportViolation(.{
+                    .violation_type = .binary_untrusted,
+                    .severity = .critical,
+                    .pid = 0,
+                    .source_ip = 0,
+                    .detail = "DevKey Exec Attempt in Prod",
+                });
+            }
+            result.err = .ProductionLockdown;
+            return result;
+        }
+
+        // Minta ijin interaktif via Hardware (Atau gunakan Auto-Run Sesi)
+        if (!requestPhysicalApproval(&parsed.zam, name, caps)) {
+            serial.writeString("[SECURITY] Physical approval denied. Execution aborted.\n");
+            result.err = .CapabilityDenied;
+            return result;
+        }
+
+        // Eksekusi diizinkan, tapi downgrade hak aksesnya secara paksa!
+        caps &= ~capability.CAP_ADMIN;
+        serial.writeString("[SECURITY] DevKey allowed. Sandboxing enforced (CAP_ADMIN stripped).\n");
+    } else {
+        serial.writeString("[SECURITY] AUTHORITY Signature Detected. Proceeding with global trust.\n");
+    }
+
     serial.writeString("[ELFEXEC] Caps granted: 0x");
     printHex32(caps);
     serial.writeString("\n");
 
-    // Check if process has CAP_EXEC to spawn
     const current_pid = process.getCurrentPid();
     if (capability.isInitialized()) {
         if (!capability.check(current_pid, capability.CAP_EXEC)) {
@@ -305,7 +415,6 @@ pub fn execZam(data: []const u8, name: []const u8) ExecResult {
     elf_processes[slot].trust_level = parsed.zam.trust_level;
     elf_processes[slot].active = true;
 
-    // Copy name
     const nlen = @min(name.len, 32);
     var ni: usize = 0;
     while (ni < nlen) : (ni += 1) {
@@ -315,7 +424,6 @@ pub fn execZam(data: []const u8, name: []const u8) ExecResult {
 
     elf_proc_count += 1;
 
-    // Fill result
     result.pid = pid;
     result.entry_point = entry;
     result.caps_granted = caps;
@@ -328,23 +436,12 @@ pub fn execZam(data: []const u8, name: []const u8) ExecResult {
     serial.writeString("[ELFEXEC] Entry: 0x");
     printHex64(entry);
     serial.writeString("\n");
-    serial.writeString("[ELFEXEC] Pages: ");
-    printDec(load_result.total_pages_used);
-    serial.writeString("\n");
 
     return result;
 }
 
-/// Execute from raw ELF data (no .zam wrapper) — for testing
 pub fn execRawElf(elf_data: []const u8, name: []const u8, caps: u32) ExecResult {
-    var result = ExecResult{
-        .err = .None,
-        .pid = 0,
-        .entry_point = 0,
-        .caps_granted = 0,
-        .pages_used = 0,
-    };
-
+    var result = ExecResult{ .err = .None, .pid = 0, .entry_point = 0, .caps_granted = 0, .pages_used = 0 };
     if (!initialized) {
         result.err = .NotInitialized;
         return result;
@@ -354,19 +451,15 @@ pub fn execRawElf(elf_data: []const u8, name: []const u8, caps: u32) ExecResult 
     serialPrintStr(name);
     serial.writeString(" ===\n");
 
-    // Find slot
     const slot = findFreeSlot() orelse {
         result.err = .TooManyProcesses;
         return result;
     };
-
-    // Parse ELF
     const parsed = elf_parser.parseElf(elf_data) orelse {
         result.err = .ParseFailed;
         return result;
     };
 
-    // Binary verification
     if (binaryverify.isInitialized()) {
         if (!binaryverify.checkExec(elf_data)) {
             result.err = .VerifyFailed;
@@ -374,7 +467,6 @@ pub fn execRawElf(elf_data: []const u8, name: []const u8, caps: u32) ExecResult 
         }
     }
 
-    // Load segments (kernel mode for now)
     var load_result = segment_loader.loadSegments(&parsed, elf_data, false);
     if (load_result.err != .None) {
         result.err = .LoadFailed;
@@ -382,15 +474,12 @@ pub fn execRawElf(elf_data: []const u8, name: []const u8, caps: u32) ExecResult 
     }
 
     const entry = load_result.entry_point;
-
-    // Create process
     const pid = process.createWithCaps(name, entry, 0, caps) orelse {
         segment_loader.cleanupAllSegments(&load_result);
         result.err = .ProcessCreateFailed;
         return result;
     };
 
-    // Track
     elf_processes[slot].pid = pid;
     elf_processes[slot].load_result = load_result;
     elf_processes[slot].entry_point = entry;
@@ -400,9 +489,7 @@ pub fn execRawElf(elf_data: []const u8, name: []const u8, caps: u32) ExecResult 
 
     const nlen = @min(name.len, 32);
     var ni: usize = 0;
-    while (ni < nlen) : (ni += 1) {
-        elf_processes[slot].name[ni] = name[ni];
-    }
+    while (ni < nlen) : (ni += 1) elf_processes[slot].name[ni] = name[ni];
     elf_processes[slot].name_len = @intCast(nlen);
     elf_proc_count += 1;
 
@@ -410,48 +497,28 @@ pub fn execRawElf(elf_data: []const u8, name: []const u8, caps: u32) ExecResult 
     result.entry_point = entry;
     result.caps_granted = caps;
     result.pages_used = load_result.total_pages_used;
-
     return result;
 }
 
 // ============================================================================
-// Process cleanup
+// Process cleanup & Queries
 // ============================================================================
 
-/// Cleanup an ELF process (free segments, remove tracking)
 pub fn cleanupProcess(pid: u32) bool {
     const slot = findByPid(pid) orelse return false;
-
-    serial.writeString("[ELFEXEC] Cleaning up PID ");
-    printDec(pid);
-    serial.writeString("\n");
-
-    // Free loaded segments
     segment_loader.cleanupAllSegments(&elf_processes[slot].load_result);
-
-    // Terminate the kernel process
     _ = process.terminate(pid);
-
-    // Clear tracking
     elf_processes[slot] = ElfProcess.init();
     if (elf_proc_count > 0) elf_proc_count -= 1;
-
     return true;
 }
 
-/// Cleanup all ELF processes
 pub fn cleanupAll() void {
     var i: usize = 0;
     while (i < MAX_ELF_PROCESSES) : (i += 1) {
-        if (elf_processes[i].active) {
-            _ = cleanupProcess(elf_processes[i].pid);
-        }
+        if (elf_processes[i].active) _ = cleanupProcess(elf_processes[i].pid);
     }
 }
-
-// ============================================================================
-// Query functions
-// ============================================================================
 
 pub fn getProcessCount() usize {
     return elf_proc_count;
@@ -493,6 +560,17 @@ pub fn isElfProcess(pid: u32) bool {
 // Print helpers
 // ============================================================================
 
+fn printHex32ToTerminal(val: u32) void {
+    if (!terminal.isInitialized()) return;
+    const hex = "0123456789ABCDEF";
+    var i: u5 = 28;
+    while (true) {
+        terminal.printChar(hex[@intCast((val >> i) & 0xF)]);
+        if (i == 0) break;
+        i -= 4;
+    }
+}
+
 fn printHex32(val: u32) void {
     const hex = "0123456789ABCDEF";
     var i: u5 = 28;
@@ -533,7 +611,5 @@ fn printDec(val: anytype) void {
 }
 
 fn serialPrintStr(s: []const u8) void {
-    for (s) |c| {
-        serial.writeChar(c);
-    }
+    for (s) |c| serial.writeChar(c);
 }

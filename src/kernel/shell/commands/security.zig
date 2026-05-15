@@ -1,6 +1,6 @@
 //! Zamrud OS - Security Commands
 //! Security management, firewall control, threat monitoring
-//! Updated: H.8 Threat Scoring & Auto-Response integration + E3.3 Binary Verify Test
+//! Updated: H.8 Threat Scoring & E3.3/E3.6 Anti-Quantum Binary Verify Tests
 
 const helpers = @import("helpers.zig");
 const shell = @import("../shell.zig");
@@ -12,7 +12,7 @@ const blacklist = @import("../../security/blacklist.zig");
 const threat_log = @import("../../security/threat_log.zig");
 const threat_score = @import("../../security/threat_score.zig");
 
-// 🆕 E3.3 & Integrity imports
+// E3.3 & Integrity imports
 const binaryverify = @import("../../security/binaryverify.zig");
 const registry = @import("../../integrity/registry.zig");
 
@@ -159,7 +159,7 @@ fn showHelp() void {
     shell.println("  test                Run all security tests");
     shell.println("  test quick          Quick health check");
     shell.println("  test h8             Run H.8 threat scoring tests");
-    shell.println("  test binary         Run E3.3 Binary Verification tests"); // 🆕 Ditambahkan di sini
+    shell.println("  test binary         Run E3.3/E3.6 Binary Verif tests");
     shell.newLine();
     shell.println("+===========================================================+");
     shell.newLine();
@@ -967,7 +967,6 @@ pub fn runTest(args: []const u8) void {
     } else if (helpers.strEql(opt, "h8")) {
         threat_cmd.runTest();
     } else if (helpers.strEql(opt, "binary")) {
-        // 🆕 Panggilan test E3.3
         var dummy_failed: u32 = 0;
         const passed = testBinaryVerification(&dummy_failed);
         shell.print("  Binary test: ");
@@ -1032,7 +1031,7 @@ fn runAllTests() void {
     passed += testStateMachine(&failed);
     passed += testIntegration(&failed);
     passed += testThreatScoring(&failed);
-    passed += testBinaryVerification(&failed); // 🆕 Test ke-11 ditambahkan
+    passed += testBinaryVerification(&failed); // 🆕 Test Kategori 11
 
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
@@ -1135,8 +1134,7 @@ fn runQuickTest() void {
         }
     }
 
-    // 🆕 Cek singkat E3.3
-    shell.print("  Binary Verify (E3.3):     ");
+    shell.print("  Binary Verify (E3.3/E3.6):");
     if (binaryverify.isInitialized()) {
         shell.printSuccessLine("PASS");
     } else {
@@ -1547,9 +1545,9 @@ fn testThreatScoring(failed: *u32) u32 {
     return passed;
 }
 
-// 🆕 Test Kategori 11: E3.3 Binary Verify Simulation
+// 🆕 Test Kategori 11: E3.3 & E3.6 Anti-Quantum Binary Verify Simulation
 fn testBinaryVerification(failed: *u32) u32 {
-    helpers.printTestCategory(11, 11, "E3.3 Binary Verify");
+    helpers.printTestCategory(11, 11, "E3.3/E3.6 Binary Verify & Quantum Sign");
     var passed: u32 = 0;
 
     if (!binaryverify.isInitialized()) {

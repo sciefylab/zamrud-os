@@ -1,5 +1,6 @@
 //! Zamrud OS - F5.0 Tests: ZAM Header & ELF64 Parser
 //! 25 tests covering header parsing, validation, and error rejection
+//! Updated: Supports 4096-byte Anti-Quantum Header
 
 const serial = @import("../drivers/serial/serial.zig");
 const zam_header = @import("../loader/zam_header.zig");
@@ -105,7 +106,6 @@ fn buildMinimalElf(buf: []u8) usize {
     writeU64(buf, 112, 0x1000);
 
     // Small "code" after program header (offset 120)
-    // x86_64: mov eax, 60; xor edi, edi; syscall (exit(0))
     buf[120] = 0xB8; // mov eax, imm32
     buf[121] = 0x3C;
     buf[122] = 0x00;
@@ -123,7 +123,6 @@ fn buildMinimalElf(buf: []u8) usize {
 fn buildTestZam(buf: []u8, sign: bool) usize {
     if (buf.len < zam_header.ZAM_HEADER_SIZE + 136) return 0;
 
-    // Build ELF payload after header
     var elf_buf: [256]u8 = [_]u8{0} ** 256;
     const elf_size = buildMinimalElf(&elf_buf);
     if (elf_size == 0) return 0;
@@ -131,7 +130,6 @@ fn buildTestZam(buf: []u8, sign: bool) usize {
     var flags: u32 = 0;
     if (sign) flags |= zam_header.FLAG_SIGNED;
 
-    // Build header
     const hdr_size = zam_header.buildHeader(
         buf,
         elf_buf[0..elf_size],
@@ -143,7 +141,6 @@ fn buildTestZam(buf: []u8, sign: bool) usize {
 
     if (hdr_size == 0) return 0;
 
-    // Copy ELF payload after header
     var i: usize = 0;
     while (i < elf_size) : (i += 1) {
         buf[hdr_size + i] = elf_buf[i];
@@ -157,7 +154,7 @@ fn buildTestZam(buf: []u8, sign: bool) usize {
 // ============================================================================
 
 fn t01_zam_header_parse_valid() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
 
     if (size == 0) {
@@ -177,7 +174,7 @@ fn t01_zam_header_parse_valid() void {
 }
 
 fn t02_zam_magic_validation() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
     if (size == 0) {
         fail("T02: ZAM magic validation (build failed)");
@@ -198,7 +195,7 @@ fn t02_zam_magic_validation() void {
 }
 
 fn t03_zam_version_check() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
     if (size == 0) {
         fail("T03: ZAM version check (build)");
@@ -217,7 +214,7 @@ fn t03_zam_version_check() void {
 }
 
 fn t04_zam_hash_verification() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
     if (size == 0) {
         fail("T04: ZAM hash verification (build)");
@@ -242,10 +239,7 @@ fn t04_zam_hash_verification() void {
 }
 
 fn t05_zam_signature_verification() void {
-    // Generate keypair for signing
-    signature.KeyPair.generate();
-
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, true);
     if (size == 0) {
         fail("T05: ZAM signature verification (build)");
@@ -270,7 +264,7 @@ fn t05_zam_signature_verification() void {
 }
 
 fn t06_zam_caps_extraction() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
     if (size == 0) {
         fail("T06: ZAM caps extraction (build)");
@@ -289,7 +283,7 @@ fn t06_zam_caps_extraction() void {
 }
 
 fn t07_zam_trust_level_extraction() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
     if (size == 0) {
         fail("T07: ZAM trust level (build)");
@@ -308,7 +302,7 @@ fn t07_zam_trust_level_extraction() void {
 }
 
 fn t08_zam_reject_invalid_magic() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
     if (size == 0) {
         fail("T08: ZAM reject invalid magic (build)");
@@ -330,7 +324,7 @@ fn t08_zam_reject_invalid_magic() void {
 }
 
 fn t09_zam_reject_corrupt_header() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
     if (size == 0) {
         fail("T09: ZAM reject corrupt header (build)");
@@ -353,7 +347,7 @@ fn t09_zam_reject_corrupt_header() void {
 }
 
 fn t10_zam_reject_hash_mismatch() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
     if (size == 0) {
         fail("T10: ZAM reject hash mismatch (build)");
@@ -361,7 +355,6 @@ fn t10_zam_reject_hash_mismatch() void {
     }
 
     if (zam_header.parse(buf[0..size])) |hdr| {
-        // Corrupt ELF payload to cause hash mismatch
         const elf_start = hdr.elf_offset;
         buf[elf_start + 10] ^= 0xFF;
 
@@ -393,14 +386,8 @@ fn t11_elf_magic_validation() void {
     }
 
     if (elf_parser.parseHeader(&buf)) |hdr| {
-        if (hdr.hasValidMagic()) {
-            pass("T11: ELF magic validation");
-        } else {
-            fail("T11: ELF magic validation (bad)");
-        }
-    } else {
-        fail("T11: ELF magic validation (null)");
-    }
+        if (hdr.hasValidMagic()) pass("T11: ELF magic validation") else fail("T11: ELF magic validation (bad)");
+    } else fail("T11: ELF magic validation (null)");
 }
 
 fn t12_elf_class_64bit() void {
@@ -408,14 +395,8 @@ fn t12_elf_class_64bit() void {
     _ = buildMinimalElf(&buf);
 
     if (elf_parser.parseHeader(&buf)) |hdr| {
-        if (hdr.is64Bit()) {
-            pass("T12: ELF class 64-bit check");
-        } else {
-            fail("T12: ELF class 64-bit check");
-        }
-    } else {
-        fail("T12: ELF class 64-bit check (null)");
-    }
+        if (hdr.is64Bit()) pass("T12: ELF class 64-bit check") else fail("T12: ELF class 64-bit check");
+    } else fail("T12: ELF class 64-bit check (null)");
 }
 
 fn t13_elf_type_exec() void {
@@ -423,14 +404,8 @@ fn t13_elf_type_exec() void {
     _ = buildMinimalElf(&buf);
 
     if (elf_parser.parseHeader(&buf)) |hdr| {
-        if (hdr.isExecutable()) {
-            pass("T13: ELF type EXEC check");
-        } else {
-            fail("T13: ELF type EXEC check");
-        }
-    } else {
-        fail("T13: ELF type EXEC (null)");
-    }
+        if (hdr.isExecutable()) pass("T13: ELF type EXEC check") else fail("T13: ELF type EXEC check");
+    } else fail("T13: ELF type EXEC (null)");
 }
 
 fn t14_elf_machine_x86_64() void {
@@ -438,14 +413,8 @@ fn t14_elf_machine_x86_64() void {
     _ = buildMinimalElf(&buf);
 
     if (elf_parser.parseHeader(&buf)) |hdr| {
-        if (hdr.isX86_64()) {
-            pass("T14: ELF machine x86_64 check");
-        } else {
-            fail("T14: ELF machine x86_64 check");
-        }
-    } else {
-        fail("T14: ELF machine x86_64 (null)");
-    }
+        if (hdr.isX86_64()) pass("T14: ELF machine x86_64 check") else fail("T14: ELF machine x86_64 check");
+    } else fail("T14: ELF machine x86_64 (null)");
 }
 
 fn t15_elf_entry_point() void {
@@ -453,14 +422,8 @@ fn t15_elf_entry_point() void {
     _ = buildMinimalElf(&buf);
 
     if (elf_parser.parseHeader(&buf)) |hdr| {
-        if (hdr.entry == 0x400000) {
-            pass("T15: ELF entry point extraction");
-        } else {
-            fail("T15: ELF entry point extraction (wrong)");
-        }
-    } else {
-        fail("T15: ELF entry point (null)");
-    }
+        if (hdr.entry == 0x400000) pass("T15: ELF entry point extraction") else fail("T15: ELF entry point extraction (wrong)");
+    } else fail("T15: ELF entry point (null)");
 }
 
 fn t16_elf_program_header_parse() void {
@@ -468,14 +431,8 @@ fn t16_elf_program_header_parse() void {
     _ = buildMinimalElf(&buf);
 
     if (elf_parser.parseElf(&buf)) |parsed| {
-        if (parsed.phdr_count == 1) {
-            pass("T16: ELF program header parse");
-        } else {
-            fail("T16: ELF program header parse (count)");
-        }
-    } else {
-        fail("T16: ELF program header parse (null)");
-    }
+        if (parsed.phdr_count == 1) pass("T16: ELF program header parse") else fail("T16: ELF program header parse (count)");
+    } else fail("T16: ELF program header parse (null)");
 }
 
 fn t17_elf_pt_load_segment() void {
@@ -485,20 +442,10 @@ fn t17_elf_pt_load_segment() void {
     if (elf_parser.parseElf(&buf)) |parsed| {
         if (parsed.load_count == 1) {
             if (parsed.getLoadSegment(0)) |seg| {
-                if (seg.vaddr == 0x400000 and seg.isLoad()) {
-                    pass("T17: ELF PT_LOAD segment extraction");
-                } else {
-                    fail("T17: ELF PT_LOAD (wrong values)");
-                }
-            } else {
-                fail("T17: ELF PT_LOAD (no segment)");
-            }
-        } else {
-            fail("T17: ELF PT_LOAD (count)");
-        }
-    } else {
-        fail("T17: ELF PT_LOAD (null)");
-    }
+                if (seg.vaddr == 0x400000 and seg.isLoad()) pass("T17: ELF PT_LOAD segment extraction") else fail("T17: ELF PT_LOAD (wrong values)");
+            } else fail("T17: ELF PT_LOAD (no segment)");
+        } else fail("T17: ELF PT_LOAD (count)");
+    } else fail("T17: ELF PT_LOAD (null)");
 }
 
 fn t18_elf_segment_flags() void {
@@ -507,82 +454,48 @@ fn t18_elf_segment_flags() void {
 
     if (elf_parser.parseElf(&buf)) |parsed| {
         if (parsed.getLoadSegment(0)) |seg| {
-            if (seg.isReadable() and seg.isExecutable() and !seg.isWritable()) {
-                pass("T18: ELF segment flags (RX)");
-            } else {
-                fail("T18: ELF segment flags (wrong)");
-            }
-        } else {
-            fail("T18: ELF segment flags (no seg)");
-        }
-    } else {
-        fail("T18: ELF segment flags (null)");
-    }
+            if (seg.isReadable() and seg.isExecutable() and !seg.isWritable()) pass("T18: ELF segment flags (RX)") else fail("T18: ELF segment flags (wrong)");
+        } else fail("T18: ELF segment flags (no seg)");
+    } else fail("T18: ELF segment flags (null)");
 }
 
 fn t19_elf_reject_32bit() void {
     var buf: [256]u8 = [_]u8{0} ** 256;
     _ = buildMinimalElf(&buf);
-
-    // Change class to 32-bit
     buf[4] = elf_parser.ELFCLASS32;
 
     if (elf_parser.parseHeader(&buf)) |hdr| {
-        if (hdr.validate() == .Not64Bit) {
-            pass("T19: ELF reject 32-bit");
-        } else {
-            fail("T19: ELF reject 32-bit (wrong error)");
-        }
-    } else {
-        fail("T19: ELF reject 32-bit (null)");
-    }
+        if (hdr.validate() == .Not64Bit) pass("T19: ELF reject 32-bit") else fail("T19: ELF reject 32-bit (wrong error)");
+    } else fail("T19: ELF reject 32-bit (null)");
 }
 
 fn t20_elf_reject_bad_magic() void {
     var buf: [256]u8 = [_]u8{0} ** 256;
     _ = buildMinimalElf(&buf);
-
     buf[0] = 0x00;
 
     if (elf_parser.parseHeader(&buf)) |hdr| {
-        if (hdr.validate() == .BadMagic) {
-            pass("T20: ELF reject bad magic");
-        } else {
-            fail("T20: ELF reject bad magic (wrong error)");
-        }
-    } else {
-        fail("T20: ELF reject bad magic (null)");
-    }
+        if (hdr.validate() == .BadMagic) pass("T20: ELF reject bad magic") else fail("T20: ELF reject bad magic (wrong error)");
+    } else fail("T20: ELF reject bad magic (null)");
 }
 
 fn t21_elf_reject_non_x86_64() void {
     var buf: [256]u8 = [_]u8{0} ** 256;
     _ = buildMinimalElf(&buf);
-
-    // Change machine to ARM
     writeU16(&buf, 18, elf_parser.EM_ARM);
 
     if (elf_parser.parseHeader(&buf)) |hdr| {
-        if (hdr.validate() == .NotX86_64) {
-            pass("T21: ELF reject non-x86_64");
-        } else {
-            fail("T21: ELF reject non-x86_64 (wrong error)");
-        }
-    } else {
-        fail("T21: ELF reject non-x86_64 (null)");
-    }
+        if (hdr.validate() == .NotX86_64) pass("T21: ELF reject non-x86_64") else fail("T21: ELF reject non-x86_64 (wrong error)");
+    } else fail("T21: ELF reject non-x86_64 (null)");
 }
 
 fn t22_elf_reject_truncated() void {
     var buf: [256]u8 = [_]u8{0} ** 256;
     _ = buildMinimalElf(&buf);
 
-    // Try parsing with only 30 bytes (too small for 64-byte header)
     if (elf_parser.parseHeader(buf[0..30])) |_| {
         fail("T22: ELF reject truncated (accepted)");
-    } else {
-        pass("T22: ELF reject truncated file");
-    }
+    } else pass("T22: ELF reject truncated file");
 }
 
 // ============================================================================
@@ -590,7 +503,7 @@ fn t22_elf_reject_truncated() void {
 // ============================================================================
 
 fn t23_combined_zam_elf_parse() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
     if (size == 0) {
         fail("T23: Combined ZAM+ELF parse (build)");
@@ -598,46 +511,34 @@ fn t23_combined_zam_elf_parse() void {
     }
 
     if (loader.parseZamFile(buf[0..size])) |parsed| {
-        if (parsed.zam.hasValidMagic() and
-            parsed.elf.header.hasValidMagic() and
-            parsed.elf.load_count >= 1)
-        {
+        if (parsed.zam.hasValidMagic() and parsed.elf.header.hasValidMagic() and parsed.elf.load_count >= 1) {
             pass("T23: Combined ZAM+ELF parse");
-        } else {
-            fail("T23: Combined ZAM+ELF parse (bad fields)");
-        }
-    } else {
-        fail("T23: Combined ZAM+ELF parse (null)");
-    }
+        } else fail("T23: Combined ZAM+ELF parse (bad fields)");
+    } else fail("T23: Combined ZAM+ELF parse (null)");
 }
 
 fn t24_full_validation_pipeline() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
     if (size == 0) {
         fail("T24: Full validation pipeline (build)");
         return;
     }
 
-    // Parse ZAM
     const zam = zam_header.parseAndValidate(buf[0..size]) orelse {
         fail("T24: Full validation pipeline (zam parse)");
         return;
     };
-
-    // Get ELF payload
     const elf_data = zam_header.getElfPayload(buf[0..size]) orelse {
         fail("T24: Full validation pipeline (elf payload)");
         return;
     };
 
-    // Validate hash
     if (!zam.verifyHash(elf_data)) {
         fail("T24: Full validation pipeline (hash)");
         return;
     }
 
-    // Validate ELF
     const elf_err = elf_parser.validateFull(elf_data);
     if (elf_err != .None) {
         fail("T24: Full validation pipeline (elf validate)");
@@ -648,23 +549,21 @@ fn t24_full_validation_pipeline() void {
 }
 
 fn t25_integrity_verification() void {
-    var buf: [512]u8 = [_]u8{0} ** 512;
+    var buf: [8192]u8 = [_]u8{0} ** 8192;
     const size = buildTestZam(&buf, false);
     if (size == 0) {
         fail("T25: Integrity verification (build)");
         return;
     }
 
-    // Verify integrity (should pass)
     if (!loader.verifyZamIntegrity(buf[0..size])) {
         fail("T25: Integrity verification (valid rejected)");
         return;
     }
 
-    // Corrupt a byte in ELF payload
+    // Memodifikasi byte di dalam payload ELF yang aman
     buf[zam_header.ZAM_HEADER_SIZE + 5] ^= 0xFF;
 
-    // Should now fail
     if (loader.verifyZamIntegrity(buf[0..size])) {
         fail("T25: Integrity verification (corrupt accepted)");
         return;
@@ -674,7 +573,7 @@ fn t25_integrity_verification() void {
 }
 
 // ============================================================================
-// Byte helpers for test data construction
+// Byte helpers
 // ============================================================================
 
 fn writeU16(buf: []u8, offset: usize, val: u16) void {
@@ -701,15 +600,13 @@ fn writeU64(buf: []u8, offset: usize, val: u64) void {
 // ============================================================================
 
 pub fn runTests() void {
-    serial.writeString("\n");
-    serial.writeString("========================================\n");
+    serial.writeString("\n========================================\n");
     serial.writeString("  F5.0: ZAM Header & ELF64 Parser Tests\n");
     serial.writeString("========================================\n\n");
 
     tests_passed = 0;
     tests_failed = 0;
 
-    // ZAM Header tests (T01-T10)
     serial.writeString("--- ZAM Header Tests ---\n");
     t01_zam_header_parse_valid();
     t02_zam_magic_validation();
@@ -722,7 +619,6 @@ pub fn runTests() void {
     t09_zam_reject_corrupt_header();
     t10_zam_reject_hash_mismatch();
 
-    // ELF Parser tests (T11-T22)
     serial.writeString("\n--- ELF Parser Tests ---\n");
     t11_elf_magic_validation();
     t12_elf_class_64bit();
@@ -737,13 +633,11 @@ pub fn runTests() void {
     t21_elf_reject_non_x86_64();
     t22_elf_reject_truncated();
 
-    // Combined tests (T23-T25)
     serial.writeString("\n--- Combined Tests ---\n");
     t23_combined_zam_elf_parse();
     t24_full_validation_pipeline();
     t25_integrity_verification();
 
-    // Summary
     serial.writeString("\n========================================\n");
     serial.writeString("  Results: ");
     printDec(tests_passed);
