@@ -1,10 +1,11 @@
 //! Zamrud OS - Binary Verification System (E3.3)
-//! Hash-based binary whitelist enforcement
+//! Hash-based binary whitelist enforcement via Registry
 //! E3.6: Wired to violation.zig unified pipeline
 
 const serial = @import("../drivers/serial/serial.zig");
 const hash = @import("../crypto/hash.zig");
 const violation = @import("violation.zig");
+const registry = @import("../integrity/registry.zig"); // 🆕 Integrasi Registry Ledger
 
 // =============================================================================
 // Constants
@@ -15,7 +16,7 @@ pub const HASH_SIZE: usize = 32;
 pub const MAX_NAME: usize = 32;
 
 // =============================================================================
-// Trust Entry
+// Trust Entry (Local Cache)
 // =============================================================================
 
 pub const TrustEntry = struct {
@@ -97,9 +98,9 @@ pub fn isInitialized() bool {
 pub fn setEnforce(enforce: bool) void {
     enforce_mode = enforce;
     if (enforce) {
-        serial.writeString("[BINVERIFY] Mode: ENFORCING (unsigned = blocked)\n");
+        serial.writeString("[BINVERIFY] Mode: ENFORCING (unsigned/unregistered = blocked)\n");
     } else {
-        serial.writeString("[BINVERIFY] Mode: WARN (unsigned = allowed with warning)\n");
+        serial.writeString("[BINVERIFY] Mode: WARN (unsigned/unregistered = allowed with warning)\n");
     }
 }
 
@@ -132,7 +133,7 @@ pub fn trustHash(bin_hash: *const [HASH_SIZE]u8, name: []const u8, pid: u32, tim
             trust_table[i].active = true;
             trust_count += 1;
 
-            serial.writeString("[BINVERIFY] Trusted: ");
+            serial.writeString("[BINVERIFY] Cached locally: ");
             serialPrintStr(name);
             serial.writeString(" hash=");
             printHashShort(bin_hash);
@@ -160,7 +161,7 @@ pub fn untrustHash(bin_hash: *const [HASH_SIZE]u8) bool {
     while (i < MAX_TRUSTED) : (i += 1) {
         if (trust_table[i].active) {
             if (hash.hashEqual(&trust_table[i].hash_buf, bin_hash)) {
-                serial.writeString("[BINVERIFY] Untrusted: ");
+                serial.writeString("[BINVERIFY] Untrusted from cache: ");
                 serialPrintStr(trust_table[i].getName());
                 serial.writeString("\n");
 
@@ -201,10 +202,10 @@ pub fn untrustByIndex(index: usize) bool {
 }
 
 // =============================================================================
-// Verification — E3.6: Reports untrusted to unified pipeline
+// Verification — E3.3 Check and E3.6 Reporting
 // =============================================================================
 
-/// Verify binary data against trust whitelist
+/// Verify binary data against trust whitelist and Ledger
 pub fn verifyBinary(data: []const u8) VerifyResult {
     if (!initialized) return .Error;
 
@@ -216,35 +217,36 @@ pub fn verifyBinary(data: []const u8) VerifyResult {
     return verifyHash(&bin_hash);
 }
 
-/// Verify a pre-computed hash against whitelist
+/// Verify a pre-computed hash against Local Cache & Blockchain Registry
 pub fn verifyHash(bin_hash: *const [HASH_SIZE]u8) VerifyResult {
     if (!initialized) return .Error;
 
-    // Empty whitelist = nothing trusted
-    if (trust_count == 0) {
-        if (enforce_mode) {
-            block_count += 1;
-            reportBinaryViolation(bin_hash, true);
-            return .Untrusted;
-        }
-        allow_count += 1;
-        return .Untrusted;
-    }
-
-    // Search whitelist
+    // 1. CEK CACHE LOKAL (Jalur Cepat - Fast Path)
     if (findByHash(bin_hash) != null) {
         allow_count += 1;
         return .Trusted;
     }
 
+    // 2. CEK BLOCKCHAIN REGISTRY (Jalur Otoritas - Slow Path)
+    serial.writeString("[BINVERIFY] Cache miss. Querying Blockchain Registry...\n");
+    if (registry.isInitialized() and registry.isRegistered(bin_hash)) {
+        // Jika sah di Blockchain, masukkan ke cache lokal agar eksekusi berikutnya instan
+        _ = trustHash(bin_hash, "chain-approved", 0, 0);
+
+        allow_count += 1;
+        serial.writeString("[BINVERIFY] ALLOWED: Validated by Blockchain Ledger.\n");
+        return .Trusted;
+    }
+
+    // 3. JIKA DITOLAK (Violation Gate)
     if (enforce_mode) {
         block_count += 1;
-        serial.writeString("[BINVERIFY] BLOCKED: unsigned binary hash=");
+        serial.writeString("[BINVERIFY] BLOCKED: Unregistered binary hash=");
         printHashShort(bin_hash);
         serial.writeString("\n");
-        reportBinaryViolation(bin_hash, true);
+        reportBinaryViolation(bin_hash, true); // E3.6 Violation handler
     } else {
-        serial.writeString("[BINVERIFY] WARN: unsigned binary hash=");
+        serial.writeString("[BINVERIFY] WARN: Unregistered binary hash=");
         printHashShort(bin_hash);
         serial.writeString("\n");
         reportBinaryViolation(bin_hash, false);
@@ -451,22 +453,4 @@ fn printHashShort(h: *const [HASH_SIZE]u8) void {
         serial.writeChar(hex[h[i] & 0xF]);
     }
     serial.writeString("...");
-}
-
-fn printDec32(val: u32) void {
-    if (val == 0) {
-        serial.writeChar('0');
-        return;
-    }
-    var v: u32 = val;
-    var started = false;
-    const divs = [_]u32{ 1000000000, 100000000, 10000000, 1000000, 100000, 10000, 1000, 100, 10, 1 };
-    for (divs) |d| {
-        var digit: u8 = 0;
-        while (v >= d) : (digit += 1) v -= d;
-        if (digit > 0 or started) {
-            serial.writeChar('0' + digit);
-            started = true;
-        }
-    }
 }

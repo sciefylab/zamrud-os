@@ -1,6 +1,6 @@
 //! Zamrud OS - Security Commands
 //! Security management, firewall control, threat monitoring
-//! Updated: H.8 Threat Scoring & Auto-Response integration
+//! Updated: H.8 Threat Scoring & Auto-Response integration + E3.3 Binary Verify Test
 
 const helpers = @import("helpers.zig");
 const shell = @import("../shell.zig");
@@ -11,6 +11,10 @@ const firewall = @import("../../net/firewall.zig");
 const blacklist = @import("../../security/blacklist.zig");
 const threat_log = @import("../../security/threat_log.zig");
 const threat_score = @import("../../security/threat_score.zig");
+
+// 🆕 E3.3 & Integrity imports
+const binaryverify = @import("../../security/binaryverify.zig");
+const registry = @import("../../integrity/registry.zig");
 
 // H.8: Delegate to threat commands
 const threat_cmd = @import("threat.zig");
@@ -155,6 +159,7 @@ fn showHelp() void {
     shell.println("  test                Run all security tests");
     shell.println("  test quick          Quick health check");
     shell.println("  test h8             Run H.8 threat scoring tests");
+    shell.println("  test binary         Run E3.3 Binary Verification tests"); // 🆕 Ditambahkan di sini
     shell.newLine();
     shell.println("+===========================================================+");
     shell.newLine();
@@ -961,6 +966,15 @@ pub fn runTest(args: []const u8) void {
         runQuickTest();
     } else if (helpers.strEql(opt, "h8")) {
         threat_cmd.runTest();
+    } else if (helpers.strEql(opt, "binary")) {
+        // 🆕 Panggilan test E3.3
+        var dummy_failed: u32 = 0;
+        const passed = testBinaryVerification(&dummy_failed);
+        shell.print("  Binary test: ");
+        helpers.printU32(passed);
+        shell.print(" passed, ");
+        helpers.printU32(dummy_failed);
+        shell.println(" failed");
     } else if (helpers.strEql(opt, "rules")) {
         var dummy_failed: u32 = 0;
         const passed = testRuleManagement(&dummy_failed);
@@ -994,7 +1008,7 @@ pub fn runTest(args: []const u8) void {
         helpers.printU32(dummy_failed);
         shell.println(" failed");
     } else {
-        shell.println("Usage: security test [all|quick|h8|rules|filter|blacklist|ratelimit]");
+        shell.println("Usage: security test [all|quick|h8|binary|rules|filter|blacklist|ratelimit]");
     }
 }
 
@@ -1018,6 +1032,7 @@ fn runAllTests() void {
     passed += testStateMachine(&failed);
     passed += testIntegration(&failed);
     passed += testThreatScoring(&failed);
+    passed += testBinaryVerification(&failed); // 🆕 Test ke-11 ditambahkan
 
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
@@ -1046,7 +1061,7 @@ fn runAllTests() void {
 fn runQuickTest() void {
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
-    shell.println("|              SECURITY QUICK TEST                          |");
+    shell.println("|               SECURITY QUICK TEST                         |");
     shell.println("+-----------------------------------------------------------+");
     shell.newLine();
 
@@ -1120,6 +1135,15 @@ fn runQuickTest() void {
         }
     }
 
+    // 🆕 Cek singkat E3.3
+    shell.print("  Binary Verify (E3.3):     ");
+    if (binaryverify.isInitialized()) {
+        shell.printSuccessLine("PASS");
+    } else {
+        shell.printErrorLine("FAIL");
+        ok = false;
+    }
+
     shell.newLine();
     shell.print("  Quick Test Result: ");
     if (ok) {
@@ -1137,7 +1161,7 @@ fn runQuickTest() void {
 // =============================================================================
 
 fn testInitialization(failed: *u32) u32 {
-    helpers.printTestCategory(1, 10, "Initialization");
+    helpers.printTestCategory(1, 11, "Initialization");
     var passed: u32 = 0;
 
     passed += helpers.doTest("Firewall initialized", firewall.isInitialized(), failed);
@@ -1153,7 +1177,7 @@ fn testInitialization(failed: *u32) u32 {
 }
 
 fn testRuleManagement(failed: *u32) u32 {
-    helpers.printTestCategory(2, 10, "Rule Management");
+    helpers.printTestCategory(2, 11, "Rule Management");
     var passed: u32 = 0;
 
     const initial_count = firewall.getRuleCount();
@@ -1204,7 +1228,7 @@ fn testRuleManagement(failed: *u32) u32 {
 }
 
 fn testPacketFiltering(failed: *u32) u32 {
-    helpers.printTestCategory(3, 10, "Packet Filtering");
+    helpers.printTestCategory(3, 11, "Packet Filtering");
     var passed: u32 = 0;
 
     const lo_ip = net_driver.ipToU32(127, 0, 0, 1);
@@ -1246,7 +1270,7 @@ fn testPacketFiltering(failed: *u32) u32 {
 }
 
 fn testBlacklistSystem(failed: *u32) u32 {
-    helpers.printTestCategory(4, 10, "Blacklist System");
+    helpers.printTestCategory(4, 11, "Blacklist System");
     var passed: u32 = 0;
 
     const test_ip = net_driver.ipToU32(192, 168, 99, 99);
@@ -1285,7 +1309,7 @@ fn testBlacklistSystem(failed: *u32) u32 {
 }
 
 fn testRateLimiting(failed: *u32) u32 {
-    helpers.printTestCategory(5, 10, "Rate Limiting");
+    helpers.printTestCategory(5, 11, "Rate Limiting");
     var passed: u32 = 0;
 
     if (!firewall.config.enable_rate_limit) {
@@ -1315,7 +1339,7 @@ fn testRateLimiting(failed: *u32) u32 {
 }
 
 fn testPortScanDetection(failed: *u32) u32 {
-    helpers.printTestCategory(6, 10, "Port Scan Detection");
+    helpers.printTestCategory(6, 11, "Port Scan Detection");
     var passed: u32 = 0;
 
     const scanner_ip = net_driver.ipToU32(192, 168, 77, 77);
@@ -1356,7 +1380,7 @@ fn testPortScanDetection(failed: *u32) u32 {
 }
 
 fn testConnectionTracking(failed: *u32) u32 {
-    helpers.printTestCategory(7, 10, "Connection Tracking");
+    helpers.printTestCategory(7, 11, "Connection Tracking");
     var passed: u32 = 0;
 
     const local_ip = net_driver.ipToU32(10, 0, 2, 15);
@@ -1381,7 +1405,7 @@ fn testConnectionTracking(failed: *u32) u32 {
 }
 
 fn testStateMachine(failed: *u32) u32 {
-    helpers.printTestCategory(8, 10, "State Machine");
+    helpers.printTestCategory(8, 11, "State Machine");
     var passed: u32 = 0;
 
     const original_state = firewall.state;
@@ -1434,7 +1458,7 @@ fn testStateMachine(failed: *u32) u32 {
 }
 
 fn testIntegration(failed: *u32) u32 {
-    helpers.printTestCategory(9, 10, "Integration");
+    helpers.printTestCategory(9, 11, "Integration");
     var passed: u32 = 0;
 
     passed += helpers.doTest("Security init", security.isInitialized(), failed);
@@ -1479,10 +1503,9 @@ fn testIntegration(failed: *u32) u32 {
 }
 
 fn testThreatScoring(failed: *u32) u32 {
-    helpers.printTestCategory(10, 10, "H.8 Threat Scoring");
+    helpers.printTestCategory(10, 11, "H.8 Threat Scoring");
     var passed: u32 = 0;
 
-    // Initialize if needed
     if (!threat_score.isInitialized()) {
         threat_score.init();
     }
@@ -1492,43 +1515,80 @@ fn testThreatScoring(failed: *u32) u32 {
     const ts_stats = threat_score.getStats();
     passed += helpers.doTest("Stats accessible", ts_stats.total_events >= 0, failed);
 
-    // Test score for non-existent IP should be 0
     const zero_score = threat_score.getScore(net_driver.ipToU32(1, 1, 1, 1));
     passed += helpers.doTest("Zero score default", zero_score == 0, failed);
 
-    // Test level for non-existent IP should be normal
     const normal_level = threat_score.getLevel(net_driver.ipToU32(1, 1, 1, 2));
     passed += helpers.doTest("Normal level default", normal_level == .normal, failed);
 
-    // Test recording an event
     const test_ip = net_driver.ipToU32(192, 168, 88, 88);
     const result = threat_score.recordEvent(test_ip, .port_scan, .medium);
     passed += helpers.doTest("Record event", result.score > 0, failed);
 
-    // Test getScore returns non-zero for tracked IP
     const tracked_score = threat_score.getScore(test_ip);
     passed += helpers.doTest("Score tracked", tracked_score > 0, failed);
 
-    // Test active count
     const active = threat_score.getActiveCount();
     passed += helpers.doTest("Active count", active > 0, failed);
 
-    // Test reset score
     const reset_ok = threat_score.resetScore(test_ip);
     passed += helpers.doTest("Reset score", reset_ok, failed);
 
-    // After reset, score should be 0
     const after_reset = threat_score.getScore(test_ip);
     passed += helpers.doTest("Score is zero", after_reset == 0, failed);
 
-    // Test remove entry
     _ = threat_score.recordEvent(test_ip, .auth_failure, .low);
     const removed = threat_score.removeEntry(test_ip);
     passed += helpers.doTest("Remove entry", removed, failed);
 
-    // After remove, score should be 0
     const after_remove = threat_score.getScore(test_ip);
     passed += helpers.doTest("Entry removed", after_remove == 0, failed);
+
+    return passed;
+}
+
+// 🆕 Test Kategori 11: E3.3 Binary Verify Simulation
+fn testBinaryVerification(failed: *u32) u32 {
+    helpers.printTestCategory(11, 11, "E3.3 Binary Verify");
+    var passed: u32 = 0;
+
+    if (!binaryverify.isInitialized()) {
+        helpers.doSkip("Engine initialized");
+        helpers.doSkip("Block unknown malware");
+        helpers.doSkip("Register valid app");
+        helpers.doSkip("Allow valid app");
+        helpers.doSkip("Cache fast-path");
+        return 0;
+    }
+
+    passed += helpers.doTest("Engine initialized", true, failed);
+
+    const malware_data = "MALWARE_RANSOMWARE_123";
+    const app_resmi_data = "ZAMRUD_OFFICIAL_APP_123";
+
+    // Pastikan Enforce Mode aktif saat tes
+    const orig_enforce = binaryverify.isEnforcing();
+    binaryverify.setEnforce(true);
+
+    // 1. Blok Malware
+    const is_malware_allowed = binaryverify.checkExec(malware_data);
+    passed += helpers.doTest("Block unknown malware", !is_malware_allowed, failed);
+
+    // 2. Daftar App ke Ledger
+    var app_hash = binaryverify.computeHash(app_resmi_data);
+    const registered = registry.registerFile("test_app.zam", &app_hash, .user_app, 1);
+    passed += helpers.doTest("Register valid app", registered, failed);
+
+    // 3. User jalankan App
+    const is_app_allowed = binaryverify.checkExec(app_resmi_data);
+    passed += helpers.doTest("Allow valid app", is_app_allowed, failed);
+
+    // 4. Cache Hit
+    const is_app_allowed_again = binaryverify.checkExec(app_resmi_data);
+    passed += helpers.doTest("Cache fast-path", is_app_allowed_again, failed);
+
+    // Kembalikan status asli
+    binaryverify.setEnforce(orig_enforce);
 
     return passed;
 }

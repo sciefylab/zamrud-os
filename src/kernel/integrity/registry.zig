@@ -1,5 +1,5 @@
 //! Zamrud OS - File Integrity Registry
-//! Tracks SHA-256 hashes of system files
+//! Tracks SHA-256 hashes of system files and Ledger approvals
 
 const serial = @import("../drivers/serial/serial.zig");
 
@@ -107,6 +107,10 @@ pub fn init() void {
     serial.writeString("[REGISTRY] Initialized\n");
 }
 
+pub fn isInitialized() bool {
+    return initialized;
+}
+
 pub fn registerFile(name: []const u8, hash_val: *const [32]u8, file_type: FileType, version: u16) bool {
     if (!initialized) init();
     if (entry_count >= MAX_ENTRIES) return false;
@@ -151,6 +155,31 @@ pub fn findEntry(name: []const u8) ?*FileEntry {
         if (match) return &entries[i];
     }
     return null;
+}
+
+/// NEW: Find an entry directly by its Hash
+pub fn findEntryByHash(target_hash: *const [32]u8) ?*FileEntry {
+    if (!initialized) return null;
+    var i: usize = 0;
+    while (i < entry_count) : (i += 1) {
+        if (!entries[i].active) continue;
+
+        var match = true;
+        var j: usize = 0;
+        while (j < 32) : (j += 1) {
+            if (entries[i].expected_hash[j] != target_hash[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return &entries[i];
+    }
+    return null;
+}
+
+/// NEW: Check if a hash is registered (Hook for E3.3 Binary Verify)
+pub fn isRegistered(target_hash: *const [32]u8) bool {
+    return findEntryByHash(target_hash) != null;
 }
 
 pub fn updateStatus(name: []const u8, status: FileStatus) bool {
