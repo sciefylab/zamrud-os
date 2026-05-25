@@ -1,6 +1,7 @@
 //! Zamrud OS - Storage Subsystem
 //! Unified storage interface with partition support
 //! B2.4: AHCI/SATA support with ATA PIO fallback
+//! 🆕 F4.3: Hardware Serial DNA Extraction
 
 pub const ata = @import("ata.zig");
 pub const mbr = @import("mbr.zig");
@@ -212,11 +213,22 @@ pub fn getDriveCount() usize {
 }
 
 pub fn getDrive(idx: usize) ?*const Drive {
-    // AHCI doesn't use the ata.Drive struct, so we provide ATA drives
-    // For AHCI, use getAhciDriveInfo() instead
     return switch (active_backend) {
         .ata_pio => ata.getDrive(idx),
         else => ata.getDrive(idx), // Fallback — AHCI returns null from ATA
+    };
+}
+
+// 🆕 F4.3: Hardware DNA Extraction (Universal)
+pub fn getDriveSerial(idx: usize) ?[]const u8 {
+    return switch (active_backend) {
+        .ahci_dma => ahci.getDriveSerial(idx),
+        .ata_pio => if (ata.getDrive(idx)) |drv| blk: {
+            var len: usize = 0;
+            while (len < 20 and drv.serial[len] != 0) : (len += 1) {}
+            break :blk drv.serial[0..len];
+        } else null,
+        .none => null,
     };
 }
 

@@ -1,13 +1,18 @@
-//! Zamrud OS - File Integrity Registry
-//! Tracks SHA-256 hashes of system files and Ledger approvals
+//! Zamrud OS - File Integrity Registry (Persistent Signed Ledger)
+//! Tracks SHA-256 hashes of system files and Hardware Ledger approvals
+//! 🆕 F4.3: Cryptographically Signed Persistent Storage (REGISTRY.DAT)
 
 const serial = @import("../drivers/serial/serial.zig");
+const fat32 = @import("../fs/fat32.zig");
+const hash_mod = @import("../crypto/hash.zig");
 
 // =============================================================================
 // Constants
 // =============================================================================
 
 pub const MAX_ENTRIES: usize = 32;
+const REGISTRY_FILE = "REGISTRY.DAT";
+const REGISTRY_MAGIC = "ZREGv100"; // 8-byte magic header
 
 // =============================================================================
 // Types
@@ -19,6 +24,7 @@ pub const FileType = enum(u8) {
     system_lib = 2,
     config = 3,
     user_app = 4,
+    physical_drive = 5, // F4.3: Hardware Authentication
     unknown = 255,
 };
 
@@ -63,7 +69,7 @@ pub const IntegrityStats = struct {
 };
 
 // =============================================================================
-// State - all static
+// State
 // =============================================================================
 
 var entries: [MAX_ENTRIES]FileEntry = undefined;
@@ -72,14 +78,11 @@ var system_hash: [32]u8 = [_]u8{0} ** 32;
 var system_hash_valid: bool = false;
 var initialized: bool = false;
 
-// Static test variables
 var static_test_hash: [32]u8 = [_]u8{0} ** 32;
-
-// Static stats - avoid return by value
 var static_stats: IntegrityStats = undefined;
 
 // =============================================================================
-// Functions
+// Initialization
 // =============================================================================
 
 pub fn init() void {
@@ -110,6 +113,184 @@ pub fn init() void {
 pub fn isInitialized() bool {
     return initialized;
 }
+
+// =============================================================================
+// 🆕 PRODUCTION SECURITY: Persistent Cryptographic Ledger (Save/Load)
+// =============================================================================
+
+/// Menyimpan data Registry ke Disk dengan segel Tanda Tangan Kriptografi (Hash)
+pub fn saveToDisk() bool {
+    if (!fat32.isMounted()) return false;
+
+    var buf: [4096]u8 = [_]u8{0} ** 4096;
+    var pos: usize = 0;
+
+    // 1. Tulis Magic Header
+    for (REGISTRY_MAGIC) |c| {
+        buf[pos] = c;
+        pos += 1;
+    }
+
+    // 2. Tulis Jumlah Entry Aktif
+    const active_count = getTotalCount();
+    buf[pos] = @intCast(active_count & 0xFF);
+    pos += 1;
+    buf[pos] = @intCast((active_count >> 8) & 0xFF);
+    pos += 1;
+    buf[pos] = @intCast((active_count >> 16) & 0xFF);
+    pos += 1;
+    buf[pos] = @intCast((active_count >> 24) & 0xFF);
+    pos += 1;
+
+    // 3. Serialize Entries
+    var i: usize = 0;
+    while (i < MAX_ENTRIES) : (i += 1) {
+        if (!entries[i].active) continue;
+
+        var j: usize = 0;
+        while (j < 32) : (j += 1) {
+            buf[pos] = entries[i].name[j];
+            pos += 1;
+        }
+        buf[pos] = entries[i].name_len;
+        pos += 1;
+
+        j = 0;
+        while (j < 32) : (j += 1) {
+            buf[pos] = entries[i].expected_hash[j];
+            pos += 1;
+        }
+
+        buf[pos] = @intFromEnum(entries[i].file_type);
+        pos += 1;
+        buf[pos] = @intFromEnum(entries[i].status);
+        pos += 1;
+
+        buf[pos] = @intCast(entries[i].version & 0xFF);
+        pos += 1;
+        buf[pos] = @intCast((entries[i].version >> 8) & 0xFF);
+        pos += 1;
+
+        buf[pos] = @intCast(entries[i].last_check & 0xFF);
+        pos += 1;
+        buf[pos] = @intCast((entries[i].last_check >> 8) & 0xFF);
+        pos += 1;
+        buf[pos] = @intCast((entries[i].last_check >> 16) & 0xFF);
+        pos += 1;
+        buf[pos] = @intCast((entries[i].last_check >> 24) & 0xFF);
+        pos += 1;
+    }
+
+    // 4. Buat Segel Digital (SHA-256) dari Payload
+    var hash_result: [32]u8 = undefined;
+    hash_mod.sha256Into(buf[0..pos], &hash_result);
+
+    // 5. Tempelkan Segel di Ekor File
+    var h: usize = 0;
+    while (h < 32) : (h += 1) {
+        buf[pos] = hash_result[h];
+        pos += 1;
+    }
+
+    _ = fat32.deleteFile(REGISTRY_FILE);
+    const success = fat32.createFile(REGISTRY_FILE, buf[0..pos]);
+
+    if (success) {
+        serial.writeString("[REGISTRY] Signed Ledger persistently saved to disk.\n");
+    }
+    return success;
+}
+
+/// Membaca dan Memverifikasi Segel Kriptografi Registry dari Disk
+pub fn loadFromDisk() bool {
+    if (!fat32.isMounted()) return false;
+    const file = fat32.findInRoot(REGISTRY_FILE) orelse return false;
+
+    var buf: [4096]u8 = [_]u8{0} ** 4096;
+    const read_size = @min(@as(usize, @intCast(file.size)), 4096);
+    const bytes_read = fat32.readFile(file.cluster, buf[0..read_size]);
+
+    if (bytes_read < 8 + 4 + 32) {
+        serial.writeString("[REGISTRY] CORRUPTION: File too small.\n");
+        return false;
+    }
+
+    const payload_len = bytes_read - 32;
+
+    // 1. Verifikasi Integritas Data (Tamper Check)
+    var computed_hash: [32]u8 = undefined;
+    hash_mod.sha256Into(buf[0..payload_len], &computed_hash);
+
+    var hash_match = true;
+    var h: usize = 0;
+    while (h < 32) : (h += 1) {
+        if (computed_hash[h] != buf[payload_len + h]) {
+            hash_match = false;
+            break;
+        }
+    }
+    if (!hash_match) {
+        serial.writeString("[REGISTRY] CRITICAL: HASH MISMATCH! Ledger tampering detected!\n");
+        return false;
+    }
+
+    // 2. Verifikasi Magic Header
+    var m: usize = 0;
+    while (m < 8) : (m += 1) {
+        if (buf[m] != REGISTRY_MAGIC[m]) {
+            serial.writeString("[REGISTRY] ERROR: Invalid magic header.\n");
+            return false;
+        }
+    }
+
+    // 3. Deserialize Data
+    var pos: usize = 8;
+    const count = @as(u32, buf[pos]) | (@as(u32, buf[pos + 1]) << 8) |
+        (@as(u32, buf[pos + 2]) << 16) | (@as(u32, buf[pos + 3]) << 24);
+    pos += 4;
+
+    init(); // Reset state memori
+
+    var i: usize = 0;
+    while (i < count and i < MAX_ENTRIES) : (i += 1) {
+        entries[i].active = true;
+
+        var j: usize = 0;
+        while (j < 32) : (j += 1) {
+            entries[i].name[j] = buf[pos];
+            pos += 1;
+        }
+        entries[i].name_len = buf[pos];
+        pos += 1;
+
+        j = 0;
+        while (j < 32) : (j += 1) {
+            entries[i].expected_hash[j] = buf[pos];
+            pos += 1;
+        }
+
+        entries[i].file_type = @enumFromInt(buf[pos]);
+        pos += 1;
+        entries[i].status = @enumFromInt(buf[pos]);
+        pos += 1;
+
+        entries[i].version = @as(u16, buf[pos]) | (@as(u16, buf[pos + 1]) << 8);
+        pos += 2;
+
+        entries[i].last_check = @as(u32, buf[pos]) | (@as(u32, buf[pos + 1]) << 8) |
+            (@as(u32, buf[pos + 2]) << 16) | (@as(u32, buf[pos + 3]) << 24);
+        pos += 4;
+
+        entry_count += 1;
+    }
+
+    serial.writeString("[REGISTRY] Secure Ledger loaded and verified.\n");
+    return true;
+}
+
+// =============================================================================
+// Core API
+// =============================================================================
 
 pub fn registerFile(name: []const u8, hash_val: *const [32]u8, file_type: FileType, version: u16) bool {
     if (!initialized) init();
@@ -157,7 +338,6 @@ pub fn findEntry(name: []const u8) ?*FileEntry {
     return null;
 }
 
-/// NEW: Find an entry directly by its Hash
 pub fn findEntryByHash(target_hash: *const [32]u8) ?*FileEntry {
     if (!initialized) return null;
     var i: usize = 0;
@@ -177,7 +357,6 @@ pub fn findEntryByHash(target_hash: *const [32]u8) ?*FileEntry {
     return null;
 }
 
-/// NEW: Check if a hash is registered (Hook for E3.3 Binary Verify)
 pub fn isRegistered(target_hash: *const [32]u8) bool {
     return findEntryByHash(target_hash) != null;
 }
@@ -197,14 +376,8 @@ pub fn isSystemValid() bool {
     var i: usize = 0;
     while (i < entry_count) : (i += 1) {
         if (!entries[i].active) continue;
-
-        if (entries[i].file_type == .kernel or
-            entries[i].file_type == .driver or
-            entries[i].file_type == .system_lib)
-        {
-            if (entries[i].status == .modified or
-                entries[i].status == .quarantined)
-            {
+        if (entries[i].file_type == .kernel or entries[i].file_type == .driver or entries[i].file_type == .system_lib) {
+            if (entries[i].status == .modified or entries[i].status == .quarantined) {
                 return false;
             }
         }
@@ -212,7 +385,6 @@ pub fn isSystemValid() bool {
     return true;
 }
 
-/// Get stats - returns pointer to static struct
 pub fn getStats() *const IntegrityStats {
     static_stats.total = 0;
     static_stats.valid = 0;
@@ -224,7 +396,6 @@ pub fn getStats() *const IntegrityStats {
     while (i < entry_count) : (i += 1) {
         if (!entries[i].active) continue;
         static_stats.total += 1;
-
         switch (entries[i].status) {
             .valid => static_stats.valid += 1,
             .modified => static_stats.modified += 1,
@@ -232,11 +403,9 @@ pub fn getStats() *const IntegrityStats {
             else => static_stats.unknown += 1,
         }
     }
-
     return &static_stats;
 }
 
-/// Get total count directly (simpler alternative)
 pub fn getTotalCount() usize {
     var count: usize = 0;
     var i: usize = 0;
@@ -253,14 +422,11 @@ pub fn getEntryCount() usize {
 // =============================================================================
 // Test
 // =============================================================================
-
 pub fn test_registry() bool {
     serial.writeString("[REGISTRY] Testing...\n");
-
     var passed: u32 = 0;
     var failed: u32 = 0;
 
-    // Test 1: Init
     serial.writeString("  Test 1: Initialize\n");
     init();
     if (initialized and entry_count == 0) {
@@ -271,14 +437,12 @@ pub fn test_registry() bool {
         failed += 1;
     }
 
-    // Test 2: Register - use static hash
     serial.writeString("  Test 2: Register file\n");
     var i: usize = 0;
     while (i < 32) : (i += 1) {
         static_test_hash[i] = 0;
     }
     static_test_hash[0] = 0xAB;
-
     if (registerFile("kernel.bin", &static_test_hash, .kernel, 1)) {
         serial.writeString("    OK\n");
         passed += 1;
@@ -287,7 +451,6 @@ pub fn test_registry() bool {
         failed += 1;
     }
 
-    // Test 3: Find
     serial.writeString("  Test 3: Find entry\n");
     if (findEntry("kernel.bin") != null) {
         serial.writeString("    OK\n");
@@ -297,7 +460,6 @@ pub fn test_registry() bool {
         failed += 1;
     }
 
-    // Test 4: Stats - use getTotalCount instead of getStats to avoid struct return
     serial.writeString("  Test 4: Get stats\n");
     const total = getTotalCount();
     if (total == 1) {
@@ -313,7 +475,6 @@ pub fn test_registry() bool {
     serial.writeString("/");
     printU32(passed + failed);
     serial.writeString(" passed\n");
-
     return failed == 0;
 }
 
@@ -322,16 +483,13 @@ fn printU32(val: u32) void {
         serial.writeChar('0');
         return;
     }
-
     var buf: [10]u8 = [_]u8{0} ** 10;
     var i: usize = 0;
     var v = val;
-
     while (v > 0) : (i += 1) {
         buf[i] = @intCast((v % 10) + '0');
         v = v / 10;
     }
-
     while (i > 0) {
         i -= 1;
         serial.writeChar(buf[i]);

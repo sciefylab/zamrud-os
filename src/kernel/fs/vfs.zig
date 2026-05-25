@@ -1,6 +1,7 @@
 //! Zamrud OS - Virtual File System (VFS)
 //! Main VFS interface with E3.2 Unveil + F3 Permission enforcement
 //! B2.3: Rename, Truncate, Ftruncate operations
+//! 🆕 F4.3: Anti-Evil Maid Drive Binding (Robust Hardware Control)
 
 const serial = @import("../drivers/serial/serial.zig");
 const heap = @import("../mm/heap.zig");
@@ -196,6 +197,32 @@ pub fn mount(mount_path: []const u8, fs: *FileSystem) bool {
     if (!initialized) return false;
     if (mount_count >= MAX_MOUNT_POINTS) return false;
 
+    // 🆕 F4.3: Anti-Evil Maid Drive Binding Check
+    if (strEqual(mount_path, "/disk")) {
+        const storage = @import("../drivers/storage/storage.zig");
+        const registry = @import("../integrity/registry.zig");
+        const hash_mod = @import("../crypto/hash.zig");
+
+        // 🛡️ ROBUST FIX: Deteksi drive index dari partisi yang akan di-mount
+        const target_drive_idx = if (storage.findFAT32Partition()) |p| p.drive_index else 0;
+
+        if (storage.getDriveSerial(target_drive_idx)) |serial_str| {
+            var serial_hash: [32]u8 = undefined;
+            hash_mod.sha256Into(serial_str, &serial_hash);
+
+            if (registry.isInitialized() and !registry.isRegistered(&serial_hash)) {
+                serial.writeString("\n=================================================\n");
+                serial.writeString("[SECURITY] CRITICAL: UNTRUSTED DRIVE DETECTED!\n");
+                serial.writeString("[SECURITY] Physical Serial Number is NOT bound to Ledger.\n");
+                serial.writeString("[SECURITY] Anti-Evil Maid protection activated. Mount REJECTED.\n");
+                serial.writeString("[SECURITY] Run 'disk register' to authorize this hardware.\n");
+                serial.writeString("=================================================\n\n");
+                return false; // TOLAK MOUNTING! Hacker terkunci di luar.
+            }
+            serial.writeString("[SECURITY] Drive Identity Verified via Blockchain Ledger.\n");
+        }
+    }
+
     var i: usize = 0;
     var slot: usize = MAX_MOUNT_POINTS;
 
@@ -326,9 +353,7 @@ pub fn open(file_path: []const u8, flags: OpenFlags) ?*File {
     return openInode(inode, file_path, flags);
 }
 
-// ── FIX #1: Scan for free slot instead of using count as index ──
 fn openInode(inode: *Inode, file_path: []const u8, flags: OpenFlags) ?*File {
-    // Find a free slot by scanning (not using count as index!)
     var slot: usize = MAX_OPEN_FILES;
     var i: usize = 0;
     while (i < MAX_OPEN_FILES) : (i += 1) {
@@ -337,7 +362,7 @@ fn openInode(inode: *Inode, file_path: []const u8, flags: OpenFlags) ?*File {
             break;
         }
     }
-    if (slot >= MAX_OPEN_FILES) return null; // No free slots
+    if (slot >= MAX_OPEN_FILES) return null;
 
     const alloc_size = @sizeOf(File) + PTR_ALIGNMENT;
     const raw_ptr = heap.kmalloc(alloc_size);
@@ -461,12 +486,11 @@ pub fn seek(file: *File, offset: i64, whence: SeekWhence) i64 {
 }
 
 // =============================================================================
-// Directory Operations (with E3.2 unveil + F3 permission checks)
+// Directory Operations
 // =============================================================================
 
 pub fn readdir(dir_path: []const u8, index: usize) ?*DirEntry {
     if (!initialized) return null;
-
     if (!checkUnveilRead(dir_path)) return null;
 
     if (dir_path.len >= 5 and
@@ -488,7 +512,6 @@ pub fn readdir(dir_path: []const u8, index: usize) ?*DirEntry {
 
     const inode = resolvePath(dir_path) orelse return null;
     if (inode.file_type != .Directory) return null;
-
     if (!checkFilePerm(inode, dir_path, .read)) return null;
 
     if (inode.ops) |ops| {
@@ -546,7 +569,6 @@ pub fn chdir(dir_path: []const u8) bool {
         return true;
     }
 
-    // Allow cd to /disk
     if (dir_path.len == 5 and
         dir_path[0] == '/' and
         dir_path[1] == 'd' and
@@ -750,7 +772,7 @@ pub fn resolvePath(file_path: []const u8) ?*Inode {
 }
 
 // =============================================================================
-// Higher-Level File Operations (with E3.2 unveil + F3 permission checks)
+// Higher-Level File Operations
 // =============================================================================
 
 fn getParentInode(file_path: []const u8) ?*Inode {
@@ -877,54 +899,41 @@ pub fn removeDir(dir_path: []const u8) bool {
 }
 
 // =============================================================================
-// B2.3: Rename Operation (with E3.2 unveil + F3 permission checks)
+// B2.3: Rename Operation
 // =============================================================================
 
 pub fn rename(old_path: []const u8, new_path: []const u8) bool {
     if (root_fs == null) return false;
     if (!initialized) return false;
 
-    // ── FIX #2: Same path = no-op (success) ──
     if (strEqual(old_path, new_path)) return true;
 
-    // E3.2: Unveil check — need write on both paths
     if (!checkUnveilWrite(old_path)) return false;
     if (!checkUnveilCreate(new_path)) return false;
 
-    // Check source exists
     const old_inode = resolvePath(old_path) orelse {
-        // Source not found via VFS — check CWD=/disk relative path
         const cwd = getcwd();
         if (isPathUnderMount(cwd, "/disk") and old_path.len > 0 and old_path[0] != '/' and new_path.len > 0 and new_path[0] != '/') {
-            // ── FIX #3: Permission check even for CWD-relative /disk paths ──
-            // Note: Cannot check F3 inode perms since resolvePath failed for relative paths.
-            // Unveil checks above provide the security boundary.
             const fat32 = @import("fat32.zig");
             return fat32.renameFile(old_path, new_path);
         }
         return false;
     };
 
-    // F3: Need write permission on source
     if (!checkFilePerm(old_inode, old_path, .write)) return false;
 
-    // ── FIX #2 (continued): Check if new_path resolves to SAME inode ──
-    // This handles case-insensitive rename on FAT32 (e.g., "A.TXT" → "a.txt")
     if (resolvePath(new_path)) |new_inode| {
         if (@intFromPtr(old_inode) == @intFromPtr(new_inode)) {
-            // Same inode — allow rename (case change or no-op)
-            // Fall through to actual rename
+            // fallthrough
         } else {
-            return false; // Different file exists at destination
+            return false;
         }
     }
 
-    // Both paths must be on the same mount point
     const old_on_disk = isPathUnderMount(old_path, "/disk");
     const new_on_disk = isPathUnderMount(new_path, "/disk");
 
     if (old_on_disk and new_on_disk) {
-        // FAT32 rename via direct driver
         const fat32 = @import("fat32.zig");
         const old_name = path.basename(old_path);
         const new_name = path.basename(new_path);
@@ -933,14 +942,12 @@ pub fn rename(old_path: []const u8, new_path: []const u8) bool {
     }
 
     if (old_on_disk != new_on_disk) {
-        return false; // Cross-mount rename not supported
+        return false;
     }
 
-    // Same filesystem — use InodeOps.rename if available
     const old_parent = getParentInode(old_path) orelse return false;
     const new_parent = getParentInode(new_path) orelse return false;
 
-    // F3: Need write on parent directories
     const old_parent_path = path.dirname(old_path);
     if (!checkFilePerm(old_parent, old_parent_path, .write)) return false;
     const new_parent_path = path.dirname(new_path);
@@ -960,23 +967,20 @@ pub fn rename(old_path: []const u8, new_path: []const u8) bool {
 }
 
 // =============================================================================
-// B2.3: Truncate Operation (with E3.2 unveil + F3 permission checks)
+// B2.3: Truncate Operation
 // =============================================================================
 
 pub fn truncate(file_path: []const u8, length: u64) bool {
     if (root_fs == null) return false;
     if (!initialized) return false;
 
-    // E3.2: Unveil check — need write permission
     if (!checkUnveilWrite(file_path)) return false;
 
-    // FAT32 path — check absolute /disk path
     if (isPathUnderMount(file_path, "/disk")) {
         const fat32 = @import("fat32.zig");
         const fname = path.basename(file_path);
         if (fname.len == 0) return false;
 
-        // F3: check via inode if resolvable
         const inode_check = resolvePath(file_path);
         if (inode_check) |ic| {
             if (ic.file_type != .Regular) return false;
@@ -986,33 +990,25 @@ pub fn truncate(file_path: []const u8, length: u64) bool {
         return fat32.truncateFile(fname, @intCast(@min(length, 0xFFFFFFFF)));
     }
 
-    // Check if cwd is /disk and path is relative
     const cwd = getcwd();
     if (isPathUnderMount(cwd, "/disk") and file_path.len > 0 and file_path[0] != '/') {
         const fat32 = @import("fat32.zig");
         return fat32.truncateFile(file_path, @intCast(@min(length, 0xFFFFFFFF)));
     }
 
-    // RAMFS path
     const inode_result = resolvePath(file_path) orelse return false;
     if (inode_result.file_type != .Regular) return false;
 
-    // F3: Need write permission
     if (!checkFilePerm(inode_result, file_path, .write)) return false;
 
-    // ── FIX #5: Delegate truncate to ramfs module instead of reaching into internals ──
     const ramfs = @import("ramfs.zig");
     return ramfs.truncateByInode(inode_result, length);
 }
 
-/// Truncate by open file descriptor
 pub fn ftruncate(file: *File, length: u64) bool {
     if (file.inode.file_type != .Regular) return false;
     if (!file.flags.write) return false;
 
-    // ── FIX #6: Try filesystem-specific truncate in correct order ──
-
-    // Check if this is a FAT32 inode (has a name in FAT32 inode pool)
     const fat32 = @import("fat32.zig");
     const fat32_name = fat32.getInodeName(file.inode);
     if (fat32_name) |n| {
@@ -1023,10 +1019,9 @@ pub fn ftruncate(file: *File, length: u64) bool {
             }
             return true;
         }
-        return false; // FAT32 inode but truncate failed — don't try RAMFS
+        return false;
     }
 
-    // Not FAT32 — try RAMFS
     const ramfs = @import("ramfs.zig");
     if (ramfs.truncateByInode(file.inode, length)) {
         if (file.position > length) {
@@ -1094,10 +1089,6 @@ pub fn ensureDir(dir_path: []const u8) bool {
     if (resolvePath(dir_path) != null) return true;
     return createDir(dir_path) != null;
 }
-
-// =============================================================================
-// Module Tests
-// =============================================================================
 
 pub fn runAllTests() bool {
     var all_passed = true;

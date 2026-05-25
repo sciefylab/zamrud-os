@@ -1,7 +1,8 @@
-//! Zamrud OS - Enhanced Professional Shell (T3 + T4.2 + T4.3 + T5.1 + H.7)
+//! Zamrud OS - Enhanced Professional Shell (Production / T5.1 + H.7)
 //! Full readline-style line editing with login, env vars, I/O redirection
-//! H.7 FIX: Proper login gate, identity loading, system key management
-//! FIX: Keyboard buffer cleared after login to prevent ghost characters
+//! 🆕 FIX: Enforced Strict Genesis Ceremony (No Auto-Login fallback)
+//! 🛠️ FIX: Anti-Skip Ceremony logic for Partial Amnesia state
+//! 🛠️ FIX: Restored History API for system.zig compatibility
 
 const serial = @import("../drivers/serial/serial.zig");
 const terminal = @import("../drivers/display/terminal.zig");
@@ -15,7 +16,6 @@ const identity = @import("../identity/identity.zig");
 const env = @import("env.zig");
 const redir = @import("redir.zig");
 
-// H.7: Additional imports for login gate
 const identity_store = @import("../persist/identity_store.zig");
 const config_store = @import("../persist/config_store.zig");
 const trust_ceremony = @import("../boot/trust_ceremony.zig");
@@ -27,33 +27,26 @@ const hid = @import("../drivers/usb/hid.zig");
 const audio = @import("../drivers/audio/audio.zig");
 
 // =============================================================================
-// Constants
+// Constants & State
 // =============================================================================
 
 const MAX_INPUT: usize = 256;
 const MAX_HISTORY: usize = 32;
 const TAB_COMPLETE_MAX: usize = 20;
 
-// =============================================================================
-// State
-// =============================================================================
-
 var input_buffer: [MAX_INPUT]u8 = [_]u8{0} ** MAX_INPUT;
 var input_len: usize = 0;
 var cursor_pos: usize = 0;
 
-// History
 var history: [MAX_HISTORY][MAX_INPUT]u8 = [_][MAX_INPUT]u8{[_]u8{0} ** MAX_INPUT} ** MAX_HISTORY;
 var history_lens: [MAX_HISTORY]usize = [_]usize{0} ** MAX_HISTORY;
 var history_count: usize = 0;
 var history_index: usize = 0;
 var browsing_history: bool = false;
 
-// T3: Saved input when browsing history
 var saved_input: [MAX_INPUT]u8 = [_]u8{0} ** MAX_INPUT;
 var saved_input_len: usize = 0;
 
-// Tab completion
 var completions: [TAB_COMPLETE_MAX][48]u8 = undefined;
 var completion_lens: [TAB_COMPLETE_MAX]usize = [_]usize{0} ** TAB_COMPLETE_MAX;
 var completion_count: usize = 0;
@@ -63,25 +56,17 @@ var last_was_tab: bool = false;
 var running: bool = false;
 var initialized: bool = false;
 
-// Prompt tracking
 var prompt_row: u32 = 0;
 var prompt_col: u32 = 0;
 var prompt_len: u32 = 0;
 
-// T5.1: Login state
 var logged_in: bool = false;
 var current_user: [32]u8 = [_]u8{0} ** 32;
 var current_user_len: usize = 0;
 var home_dir: [64]u8 = [_]u8{0} ** 64;
 var home_dir_len: usize = 0;
 
-// T4.2: Last command exit status
 var last_exit_success: bool = true;
-
-// Track if login is required
-var login_required: bool = false;
-
-// H.7: Recovery mode flag
 var recovery_mode: bool = false;
 
 // =============================================================================
@@ -98,71 +83,13 @@ pub fn init() void {
     current_user_len = 0;
     home_dir_len = 0;
     last_exit_success = true;
-    login_required = false;
     recovery_mode = false;
 
     ui.init();
-
-    // T4.2: Initialize environment variables
     env.init();
 
     initialized = true;
-    serial.writeString("[SHELL] Initialized (T3+T4.2+T4.3+T5.1+H.7)\n");
-}
-
-// =============================================================================
-// H.7: Login Requirement Detection
-// =============================================================================
-
-fn hasAnyUsers() bool {
-    // Check users system
-    if (users.isInitialized() and users.getUserCount() > 0) {
-        return true;
-    }
-
-    // Check identity system
-    if (identity.isInitialized() and identity.getIdentityCount() > 0) {
-        return true;
-    }
-
-    return false;
-}
-
-/// H.7: Determine if login MUST be required
-/// This is smarter than just checking "has users" - it considers disk state
-fn mustRequireLogin() bool {
-    // Always require login if ceremony just completed
-    if (trust_ceremony.ceremonyJustCompleted()) {
-        serial.writeString("[SHELL] Login required: ceremony just completed\n");
-        return true;
-    }
-
-    // Always require login for returning users
-    if (trust_ceremony.isReturningUser()) {
-        serial.writeString("[SHELL] Login required: returning user\n");
-        return true;
-    }
-
-    // Check if identity file exists on disk (even if not loaded yet)
-    if (identity_store.hasIdentityFile()) {
-        serial.writeString("[SHELL] Login required: identity file exists\n");
-        return true;
-    }
-
-    // Check if ceremony was ever completed (config flag)
-    if (trust_ceremony.isCeremonyComplete()) {
-        serial.writeString("[SHELL] Login required: ceremony was completed\n");
-        return true;
-    }
-
-    // Fallback: check memory
-    if (hasAnyUsers()) {
-        serial.writeString("[SHELL] Login required: users in memory\n");
-        return true;
-    }
-
-    serial.writeString("[SHELL] No login required: first boot, no ceremony\n");
-    return false;
+    serial.writeString("[SHELL] Initialized (Strict Security Enforcement)\n");
 }
 
 // =============================================================================
@@ -178,86 +105,81 @@ pub fn run() void {
         terminal.setCursor(0, @intCast(ui.getContentStartRow()));
     }
 
-    // End keyboard grace period — shell is ready for input
     keyboard.endGracePeriod();
 
-    // H.7 FIX: Use mustRequireLogin() instead of hasAnyUsers()
-    login_required = mustRequireLogin();
+    while (running) {
+        hid.processPending();
 
-    if (login_required) {
-        // Login loop
-        while (running) {
-            // B2.11b: Process USB HID events
-            hid.processPending();
+        drawWelcome();
 
-            drawWelcome();
+        const ceremony_complete = trust_ceremony.isCeremonyComplete();
+        const has_identity_file = identity_store.hasIdentityFile();
 
-            // H.7: Load identities NOW (before login prompt)
-            // This is when we actually deserialize the file
-            if (!hasAnyUsers()) {
-                if (identity_store.hasIdentityFile()) {
-                    serial.writeString("[SHELL] Loading identities from disk...\n");
-                    if (!identity_store.loadFromDisk()) {
-                        // Load failed - show recovery options
-                        showRecoveryPrompt();
-                        if (recovery_mode) {
-                            // Enter recovery shell
-                            autoLoginRecovery();
-                            shellLoop();
-                            recovery_mode = false;
-                            continue;
-                        }
-                        continue;
-                    }
-                    serial.writeString("[SHELL] Loaded ");
-                    printNumberSerial(identity.getIdentityCount());
-                    serial.writeString(" identities\n");
-                }
+        // 🛡️ JIKA INI ADALAH SISTEM BARU (Atau baru di-reset)
+        if (!ceremony_complete or !has_identity_file) {
+            serial.writeString("[SHELL] Blank system detected. Triggering Genesis Ceremony...\n");
+
+            // 🛡️ ANTI-SKIP FIX: Paksa reset memory status jika config tidak sinkron
+            if (ceremony_complete) {
+                serial.writeString("[SHELL] Inconsistent state (Partial Amnesia). Forcing memory reset...\n");
+                _ = trust_ceremony.resetCeremony();
             }
 
-            // Check again after loading
-            if (!hasAnyUsers()) {
-                serial.writeString("[SHELL] No users after load - auto-login\n");
-                autoLoginDefault();
-                shellLoop();
-                continue;
-            }
-
-            loginPrompt();
-
-            if (!logged_in) continue;
-
-            // H.7: Set system master key after successful login
-            setSystemKeyFromCurrentIdentity();
-
-            // H.7: Load encrypted config now that we have the key
-            loadEncryptedConfigIfNeeded();
-
-            shellLoop();
-
-            // Logout cleanup
-            logged_in = false;
-            current_user_len = 0;
-            home_dir_len = 0;
-
-            env.clearLoginVars();
-
-            // H.7: Clear system key on logout
-            clearSystemKey();
-
-            // H.7: Lock identity
-            auth.lock();
+            const cmd_mod = @import("commands/ceremony.zig");
+            cmd_mod.execute("start");
 
             if (terminal.isInitialized()) {
-                terminal.clear();
-                ui.refresh();
-                terminal.setCursor(0, @intCast(ui.getContentStartRow()));
+                terminal.setFgColor(ui.getTheme().text_warning);
+            }
+            println("\n[SYSTEM HALT] Genesis Ceremony complete. Reboot is required.");
+            if (terminal.isInitialized()) {
+                terminal.setFgColor(ui.getTheme().text_normal);
+            }
+            while (true) {
+                asm volatile ("cli; hlt");
             }
         }
-    } else {
-        drawWelcome();
-        autoLoginDefault();
+
+        serial.writeString("[SHELL] Loading identities from disk...\n");
+        if (!identity_store.loadFromDisk()) {
+            showRecoveryPrompt();
+            if (recovery_mode) {
+                autoLoginRecovery();
+                shellLoop();
+                recovery_mode = false;
+                continue;
+            }
+            continue;
+        }
+
+        // 🛡️ F4.3: LOAD PERSISTENT HARDWARE LEDGER
+        const registry = @import("../integrity/registry.zig");
+        if (registry.isInitialized()) {
+            _ = registry.loadFromDisk();
+        }
+
+        loginPrompt();
+
+        if (!logged_in) continue;
+
+        setSystemKeyFromCurrentIdentity();
+        loadEncryptedConfigIfNeeded();
+
         shellLoop();
+
+        logged_in = false;
+        current_user_len = 0;
+        home_dir_len = 0;
+
+        env.clearLoginVars();
+        clearSystemKey();
+        auth.lock();
+
+        if (terminal.isInitialized()) {
+            terminal.clear();
+            ui.refresh();
+            terminal.setCursor(0, @intCast(ui.getContentStartRow()));
+        }
     }
 }
 
@@ -269,7 +191,6 @@ pub fn stop() void {
 // H.7: System Key Management
 // =============================================================================
 
-/// Set system encryption key from current identity
 fn setSystemKeyFromCurrentIdentity() void {
     if (identity.getCurrentIdentity()) |id| {
         if (id.keypair.valid) {
@@ -281,9 +202,7 @@ fn setSystemKeyFromCurrentIdentity() void {
     }
 }
 
-/// Load encrypted config after login
 fn loadEncryptedConfigIfNeeded() void {
-    // Only if we have the key and config wasn't loaded yet
     if (sys_encrypt.isMasterKeySet() and !config_store.wasLoadedFromDisk()) {
         if (config_store.hasSavedConfig()) {
             if (config_store.loadFromDisk()) {
@@ -297,7 +216,6 @@ fn loadEncryptedConfigIfNeeded() void {
     }
 }
 
-/// Clear system key on logout
 fn clearSystemKey() void {
     sys_encrypt.clearMasterKey();
     serial.writeString("[SHELL] System key cleared\n");
@@ -307,10 +225,8 @@ fn clearSystemKey() void {
 // H.7: Recovery Mode
 // =============================================================================
 
-/// Show recovery options when identity load fails
 fn showRecoveryPrompt() void {
     const theme = ui.getTheme();
-
     newLine();
 
     if (terminal.isInitialized()) {
@@ -326,7 +242,6 @@ fn showRecoveryPrompt() void {
 
     newLine();
 
-    // Show specific error
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_warning);
     }
@@ -358,7 +273,7 @@ fn showRecoveryPrompt() void {
         terminal.setFgColor(theme.text_dim);
     }
     println("        Enter recovery shell, then run:");
-    println("          ceremony reset");
+    println("          ceremony reset confirm");
     println("          ceremony start");
     newLine();
 
@@ -414,7 +329,6 @@ fn showRecoveryPrompt() void {
     }
 }
 
-/// Auto-login for recovery mode (limited shell)
 fn autoLoginRecovery() void {
     const recovery_name = "recovery";
 
@@ -439,47 +353,11 @@ fn autoLoginRecovery() void {
         println("  RECOVERY SHELL");
         terminal.setBold(false);
         terminal.setFgColor(theme.text_dim);
-        println("  Limited functionality - run 'ceremony' to restore");
+        println("  Limited functionality - run 'ceremony reset confirm' to restore");
         terminal.setFgColor(theme.text_normal);
         newLine();
     }
-
     serial.writeString("[SHELL] Entered recovery mode\n");
-}
-
-// =============================================================================
-// Auto-login (no users configured / first boot)
-// =============================================================================
-
-fn autoLoginDefault() void {
-    const default_name = "zamrud";
-
-    var i: usize = 0;
-    while (i < default_name.len) : (i += 1) {
-        current_user[i] = default_name[i];
-    }
-    current_user_len = default_name.len;
-
-    logged_in = true;
-
-    setupHomeDir(default_name);
-
-    const home_path = home_dir[0..home_dir_len];
-    env.setLoginVars(default_name, home_path);
-
-    // FIX: Clear keyboard buffer after auto-login
-    keyboard.clearBuffer();
-
-    const theme = ui.getTheme();
-    if (terminal.isInitialized()) {
-        terminal.setFgColor(theme.text_dim);
-        printDirect("  Type 'help' for available commands");
-        newLineDirect();
-        terminal.setFgColor(theme.text_normal);
-        newLineDirect();
-    }
-
-    serial.writeString("[SHELL] Auto-login as zamrud (no users configured)\n");
 }
 
 fn setupHomeDir(username: []const u8) void {
@@ -496,7 +374,6 @@ fn setupHomeDir(username: []const u8) void {
         home_dir[home_dir_len] = username[i];
         home_dir_len += 1;
     }
-
     const home_path = home_dir[0..home_dir_len];
     _ = vfs.ensureDir(home_path);
     vfs.setCwd(home_path);
@@ -508,26 +385,23 @@ fn setupHomeDir(username: []const u8) void {
 
 fn loginPrompt() void {
     const theme = ui.getTheme();
-
     var attempts: u32 = 0;
     const max_attempts: u32 = 5;
 
     while (attempts < max_attempts and running) : (attempts += 1) {
-        // Check lockout status
         if (auth.isLockedOut()) {
             if (terminal.isInitialized()) {
                 terminal.setFgColor(theme.text_error);
             }
             if (auth.getLockoutState() == .hard_lock) {
                 println("Account locked. Use seed phrase to recover.");
-                println("Run 'ceremony reset' then 'ceremony start' to reset.");
+                println("Run 'ceremony reset confirm' then 'ceremony start' to reset.");
             } else {
                 println("Too many failed attempts. Please wait...");
             }
             if (terminal.isInitialized()) {
                 terminal.setFgColor(theme.text_normal);
             }
-            // Wait a bit before allowing retry
             var wait: u32 = 0;
             while (wait < 10000000) : (wait += 1) {
                 asm volatile ("pause");
@@ -535,10 +409,7 @@ fn loginPrompt() void {
             continue;
         }
 
-        // FIX: Clear keyboard buffer before username prompt
         keyboard.clearBuffer();
-
-        // Username prompt
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_normal);
         }
@@ -548,14 +419,12 @@ fn loginPrompt() void {
 
         if (input_len == 0) continue;
 
-        // Copy username
         var i: usize = 0;
         while (i < input_len and i < 31) : (i += 1) {
             current_user[i] = input_buffer[i];
         }
         current_user_len = i;
 
-        // Handle @ prefix
         var username_start: usize = 0;
         if (current_user_len > 0 and current_user[0] == '@') {
             username_start = 1;
@@ -564,20 +433,16 @@ fn loginPrompt() void {
 
         newLine();
 
-        // Check if user exists
         var user_exists = false;
         var needs_password = false;
 
-        // Check identity system first (H.7 ceremony users)
         if (identity.isInitialized() and identity.getIdentityCount() > 0) {
             if (identity.getIdentity(username)) |id| {
                 user_exists = true;
-                // H.7: Check if this identity uses password
                 needs_password = (id.credential_type == .password);
             }
         }
 
-        // Fallback to legacy users system
         if (!user_exists and users.isInitialized() and users.getUserCount() > 0) {
             if (users.findUserByName(username) != null) {
                 user_exists = true;
@@ -597,29 +462,20 @@ fn loginPrompt() void {
             continue;
         }
 
-        // Password prompt (if needed)
         if (needs_password) {
-            // FIX: Clear keyboard buffer before password prompt
             keyboard.clearBuffer();
-
             printDirect("Password: ");
-
             var password_buf: [64]u8 = [_]u8{0} ** 64;
             var password_len: usize = 0;
 
-            // Read password (hidden input)
             while (true) {
-                // B2.11b: Process USB HID events
                 hid.processPending();
-
                 if (keyboard.hasKey()) {
                     const key = keyboard.getKey() orelse continue;
                     if (key == 0) continue;
-
                     if (key == '\n' or key == '\r') {
                         break;
                     }
-
                     if (key == keyboard.KEY_BACKSPACE or key == 127) {
                         if (password_len > 0) {
                             password_len -= 1;
@@ -632,17 +488,14 @@ fn loginPrompt() void {
                         }
                         continue;
                     }
-
                     if (key == keyboard.KEY_CTRL_C) {
                         newLine();
-                        // Wipe password buffer
                         i = 0;
                         while (i < 64) : (i += 1) {
                             password_buf[i] = 0;
                         }
                         return;
                     }
-
                     if (key >= 32 and key < 127 and password_len < 63) {
                         password_buf[password_len] = key;
                         password_len += 1;
@@ -651,43 +504,29 @@ fn loginPrompt() void {
                         }
                     }
                 }
-
-                // B2.10: Poll audio
                 if (audio.needsPoll()) {
                     audio.poll();
                 }
-
                 asm volatile ("pause");
             }
-
             newLine();
-
-            // Verify password using auth system
             const password = password_buf[0..password_len];
-
             if (auth.unlock(username, password)) {
-                // Wipe password from memory
                 i = 0;
                 while (i < 64) : (i += 1) {
                     password_buf[i] = 0;
                 }
-
-                // FIX: Clear keyboard buffer after successful auth
                 keyboard.clearBuffer();
-
                 loginSuccess(current_user[0..current_user_len]);
                 return;
             } else {
-                // Wipe password from memory
                 i = 0;
                 while (i < 64) : (i += 1) {
                     password_buf[i] = 0;
                 }
-
                 if (terminal.isInitialized()) {
                     terminal.setFgColor(theme.text_error);
                 }
-
                 const remaining = max_attempts - attempts - 1;
                 if (remaining > 0) {
                     printDirect("Authentication failed (");
@@ -696,7 +535,6 @@ fn loginPrompt() void {
                 } else {
                     println("Authentication failed");
                 }
-
                 if (terminal.isInitialized()) {
                     terminal.setFgColor(theme.text_normal);
                 }
@@ -704,30 +542,18 @@ fn loginPrompt() void {
                 continue;
             }
         } else {
-            // No password needed (legacy user or PIN identity)
-            // For PIN identity, still need to verify
             if (identity.getIdentity(username)) |id| {
                 if (id.credential_type == .pin) {
-                    // FIX: Clear keyboard buffer before PIN prompt
                     keyboard.clearBuffer();
-
-                    // Prompt for PIN
                     printDirect("PIN: ");
-
                     var pin_buf: [16]u8 = [_]u8{0} ** 16;
                     var pin_len: usize = 0;
-
                     while (true) {
-
-                        // B2.11b: Process USB HID events
                         hid.processPending();
-
                         if (keyboard.hasKey()) {
                             const key = keyboard.getKey() orelse continue;
                             if (key == 0) continue;
-
                             if (key == '\n' or key == '\r') break;
-
                             if (key == keyboard.KEY_BACKSPACE or key == 127) {
                                 if (pin_len > 0) {
                                     pin_len -= 1;
@@ -740,14 +566,12 @@ fn loginPrompt() void {
                                 }
                                 continue;
                             }
-
                             if (key == keyboard.KEY_CTRL_C) {
                                 newLine();
                                 i = 0;
                                 while (i < 16) : (i += 1) pin_buf[i] = 0;
                                 return;
                             }
-
                             if (key >= '0' and key <= '9' and pin_len < 8) {
                                 pin_buf[pin_len] = key;
                                 pin_len += 1;
@@ -756,30 +580,21 @@ fn loginPrompt() void {
                                 }
                             }
                         }
-
-                        // B2.10: Poll audio
                         if (audio.needsPoll()) {
                             audio.poll();
                         }
-
                         asm volatile ("pause");
                     }
-
                     newLine();
-
                     if (auth.unlock(username, pin_buf[0..pin_len])) {
                         i = 0;
                         while (i < 16) : (i += 1) pin_buf[i] = 0;
-
-                        // FIX: Clear keyboard buffer after successful PIN auth
                         keyboard.clearBuffer();
-
                         loginSuccess(current_user[0..current_user_len]);
                         return;
                     } else {
                         i = 0;
                         while (i < 16) : (i += 1) pin_buf[i] = 0;
-
                         if (terminal.isInitialized()) {
                             terminal.setFgColor(theme.text_error);
                         }
@@ -792,15 +607,10 @@ fn loginPrompt() void {
                     }
                 }
             }
-
-            // Legacy user without authentication
             if (users.isInitialized()) {
                 _ = users.login(username, "");
             }
-
-            // FIX: Clear keyboard buffer after legacy login
             keyboard.clearBuffer();
-
             loginSuccess(current_user[0..current_user_len]);
             return;
         }
@@ -859,11 +669,8 @@ fn printNumberSerial(val: usize) void {
 
 fn loginSuccess(username: []const u8) void {
     const theme = ui.getTheme();
-
     logged_in = true;
     setupHomeDir(username);
-
-    // FIX: Clear keyboard buffer to prevent ghost characters after login
     keyboard.clearBuffer();
 
     const home_path = home_dir[0..home_dir_len];
@@ -879,12 +686,10 @@ fn loginSuccess(username: []const u8) void {
         printDirect("Home: ");
         println(home_path);
 
-        // Show current date/time
         if (rtc.isInitialized()) {
             const dt = rtc.now();
             var buf: [19]u8 = undefined;
             const len = dt.format(&buf);
-
             terminal.setFgColor(theme.text_dim);
             printDirect("Date: ");
             printDirect(dt.weekdayName());
@@ -894,11 +699,9 @@ fn loginSuccess(username: []const u8) void {
             printDirect(rtc.getTimezoneName());
             newLineDirect();
         }
-
         terminal.setFgColor(theme.text_normal);
         newLine();
     }
-
     serial.writeString("[LOGIN] User: ");
     serial.writeString(username);
     serial.writeString(" Home: ");
@@ -910,7 +713,6 @@ pub fn getHomeDir() []const u8 {
     if (home_dir_len == 0) return "/";
     return home_dir[0..home_dir_len];
 }
-
 pub fn getCurrentUser() []const u8 {
     if (current_user_len == 0) return "zamrud";
     return current_user[0..current_user_len];
@@ -918,18 +720,13 @@ pub fn getCurrentUser() []const u8 {
 
 fn readLoginInput() void {
     while (true) {
-
-        // B2.11b: Process USB HID events during login input
         hid.processPending();
-
         if (keyboard.hasKey()) {
             const key = keyboard.getKey() orelse continue;
             if (key == 0) continue;
-
             if (key == '\n' or key == '\r') {
                 return;
             }
-
             if (key == keyboard.KEY_BACKSPACE or key == 127) {
                 if (input_len > 0) {
                     input_len -= 1;
@@ -942,13 +739,11 @@ fn readLoginInput() void {
                 }
                 continue;
             }
-
             if (key == keyboard.KEY_CTRL_C) {
                 clearInputBuffer();
                 newLine();
                 return;
             }
-
             if (key >= 32 and key < 127 and input_len < MAX_INPUT - 1) {
                 input_buffer[input_len] = key;
                 input_len += 1;
@@ -957,102 +752,54 @@ fn readLoginInput() void {
                 }
             }
         }
-
-        // B2.10: Poll audio while waiting for login input
         if (audio.needsPoll()) {
             audio.poll();
         }
-
         asm volatile ("pause");
     }
 }
 
-/// Called by logout command
 pub fn logout() void {
     if (users.isInitialized() and users.isLoggedIn()) {
         users.logout();
     }
-
-    // H.7: Lock identity and clear key
     auth.lock();
     clearSystemKey();
-
     logged_in = false;
-
-    // FIX: Clear keyboard buffer on logout
     keyboard.clearBuffer();
-
-    if (!login_required) {
-        autoLoginDefault();
-        return;
-    }
-
     vfs.setCwd("/");
 }
 
-/// T4.2: Get last command exit status
 pub fn getLastExitSuccess() bool {
     return last_exit_success;
 }
-
-/// T4.2: Set last command exit status
 pub fn setLastExitSuccess(success: bool) void {
     last_exit_success = success;
 }
 
 // =============================================================================
-// Main Shell Loop (T4.3: redirection support)
+// Main Shell Loop
 // =============================================================================
 
 fn shellLoop() void {
-    // FIX: Clear any leftover keys before starting shell loop
     clearInputBuffer();
-
     while (running and logged_in) {
-        // B2.11b: Process USB HID events
         hid.processPending();
-
-        // B2.10: Poll audio for continuous playback
         if (audio.needsPoll()) {
             audio.poll();
         }
 
         ui.drawStatusBar();
-
         drawPrompt();
-
         readInput();
 
         if (input_len > 0) {
-            // Check logout
-            if (strEql(input_buffer[0..input_len], "logout")) {
-                if (login_required) {
-                    println("Logging out...");
-                    logout();
-                    return;
-                } else {
-                    println("No login session — use 'shutdown' or 'reboot'");
-                    clearInputBuffer();
-                    continue;
-                }
+            if (strEql(input_buffer[0..input_len], "logout") or strEql(input_buffer[0..input_len], "exit")) {
+                println("Logging out...");
+                logout();
+                return;
             }
-
-            // Check exit (same as logout)
-            if (strEql(input_buffer[0..input_len], "exit")) {
-                if (login_required) {
-                    println("Logging out...");
-                    logout();
-                    return;
-                } else {
-                    println("No login session — use 'shutdown' or 'reboot'");
-                    clearInputBuffer();
-                    continue;
-                }
-            }
-
             addToHistory();
-
-            // T4.2: Expand environment variables
             const raw_input = input_buffer[0..input_len];
             const expanded = env.expandVars(raw_input);
 
@@ -1060,70 +807,49 @@ fn shellLoop() void {
             serial.writeString(expanded);
             serial.writeString("\n");
 
-            // T4.2: Update $PWD before command
             env.updatePwd();
-
-            // T4.3: Check for I/O redirection first
             if (!redir.executeWithRedirection(expanded)) {
-                // No redirection — execute normally
                 commands.execute(expanded);
             }
-
-            // T4.2: Update $PWD after command
             env.updatePwd();
 
-            // Update status bar with command name
             var cmd_end: usize = 0;
             while (cmd_end < expanded.len and expanded[cmd_end] != ' ') : (cmd_end += 1) {}
             ui.setLastCommand(expanded[0..cmd_end], last_exit_success);
         }
-
         clearInputBuffer();
     }
 }
 
 // =============================================================================
-// Welcome Screen
+// Welcome Screen & Prompt
 // =============================================================================
 
 fn drawWelcome() void {
     const theme = ui.getTheme();
-
     newLine();
-
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.status_accent);
         terminal.setBold(true);
         println("  ZAMRUD OS v0.1.0");
         terminal.setBold(false);
-
         terminal.setFgColor(theme.text_dim);
         println("  Secure - Private - Decentralized");
-
         terminal.setFgColor(theme.text_normal);
         newLine();
     }
 }
 
-// =============================================================================
-// Prompt
-// =============================================================================
-
 fn drawPrompt() void {
-
-    // B2.10: Keep audio alive during prompt drawing
     if (audio.needsPoll()) {
         audio.poll();
     }
-
     if (terminal.isInitialized()) {
         prompt_row = terminal.getCursorRow();
         const col_before = terminal.getCursorCol();
-
         var display_path_buf: [128]u8 = undefined;
         const display_path = getDisplayPath(&display_path_buf);
 
-        // H.7: Show recovery indicator
         if (recovery_mode) {
             ui.drawPromptRecovery(display_path);
         } else {
@@ -1140,7 +866,6 @@ fn drawPrompt() void {
 
 fn getDisplayPath(buf: []u8) []const u8 {
     const cwd = vfs.getcwd();
-
     if (home_dir_len > 0 and cwd.len >= home_dir_len) {
         var match = true;
         var i: usize = 0;
@@ -1150,7 +875,6 @@ fn getDisplayPath(buf: []u8) []const u8 {
                 break;
             }
         }
-
         if (match) {
             buf[0] = '~';
             if (cwd.len == home_dir_len) {
@@ -1168,38 +892,31 @@ fn getDisplayPath(buf: []u8) []const u8 {
             }
         }
     }
-
     return cwd;
 }
 
 // =============================================================================
-// T3: Full Input Handling with Line Editing
+// Full Input Handling with Line Editing
 // =============================================================================
 
 fn readInput() void {
     browsing_history = false;
     last_was_tab = false;
-
     while (true) {
-        // B2.11b: Process USB HID events during input wait
         hid.processPending();
-
         if (keyboard.hasKey()) {
             const key = keyboard.getKey() orelse continue;
-
             if (key == 0) continue;
 
             if (key == '\n' or key == '\r') {
                 newLine();
                 return;
             }
-
             if (key == keyboard.KEY_BACKSPACE or key == 127) {
                 handleBackspace();
                 last_was_tab = false;
                 continue;
             }
-
             if (key == '\t') {
                 handleTabComplete();
                 continue;
@@ -1225,7 +942,6 @@ fn readInput() void {
                 last_was_tab = false;
                 continue;
             }
-
             if (key == keyboard.KEY_HOME) {
                 handleHome();
                 last_was_tab = false;
@@ -1236,7 +952,6 @@ fn readInput() void {
                 last_was_tab = false;
                 continue;
             }
-
             if (key == keyboard.KEY_DELETE) {
                 handleDelete();
                 last_was_tab = false;
@@ -1253,7 +968,6 @@ fn readInput() void {
                 last_was_tab = false;
                 continue;
             }
-
             if (key == keyboard.KEY_SHIFT_PGUP) {
                 terminal.scrollUp(10);
                 continue;
@@ -1276,31 +990,26 @@ fn readInput() void {
                 last_was_tab = false;
                 continue;
             }
-
             if (key == keyboard.KEY_CTRL_E) {
                 handleEnd();
                 last_was_tab = false;
                 continue;
             }
-
             if (key == keyboard.KEY_CTRL_K) {
                 handleKillToEnd();
                 last_was_tab = false;
                 continue;
             }
-
             if (key == keyboard.KEY_CTRL_U) {
                 handleKillToStart();
                 last_was_tab = false;
                 continue;
             }
-
             if (key == keyboard.KEY_CTRL_W) {
                 handleKillWord();
                 last_was_tab = false;
                 continue;
             }
-
             if (key == keyboard.KEY_CTRL_L) {
                 clearScreen();
                 drawPrompt();
@@ -1308,7 +1017,6 @@ fn readInput() void {
                 last_was_tab = false;
                 continue;
             }
-
             if (key == keyboard.KEY_CTRL_C) {
                 handleCancel();
                 last_was_tab = false;
@@ -1317,14 +1025,10 @@ fn readInput() void {
 
             if (key == keyboard.KEY_CTRL_D) {
                 if (input_len == 0) {
-                    if (login_required) {
-                        newLine();
-                        println("logout");
-                        logout();
-                        return;
-                    } else {
-                        continue;
-                    }
+                    newLine();
+                    println("logout");
+                    logout();
+                    return;
                 }
                 handleDelete();
                 last_was_tab = false;
@@ -1336,21 +1040,17 @@ fn readInput() void {
                 last_was_tab = false;
             }
         }
-
-        // B2.10: Poll audio while waiting for input (aggressive)
         if (audio.needsPoll()) {
             audio.poll();
-            // Don't pause too long — audio needs frequent polling
             asm volatile ("pause");
             continue;
         }
-
         asm volatile ("pause");
     }
 }
 
 // =============================================================================
-// T3: Cursor Movement
+// Cursor Movement & Line Editing
 // =============================================================================
 
 fn handleCursorLeft() void {
@@ -1359,24 +1059,20 @@ fn handleCursorLeft() void {
         updateCursorPosition();
     }
 }
-
 fn handleCursorRight() void {
     if (cursor_pos < input_len) {
         cursor_pos += 1;
         updateCursorPosition();
     }
 }
-
 fn handleHome() void {
     cursor_pos = 0;
     updateCursorPosition();
 }
-
 fn handleEnd() void {
     cursor_pos = input_len;
     updateCursorPosition();
 }
-
 fn handleWordLeft() void {
     if (cursor_pos == 0) return;
     while (cursor_pos > 0 and input_buffer[cursor_pos - 1] == ' ') {
@@ -1387,7 +1083,6 @@ fn handleWordLeft() void {
     }
     updateCursorPosition();
 }
-
 fn handleWordRight() void {
     if (cursor_pos >= input_len) return;
     while (cursor_pos < input_len and input_buffer[cursor_pos] != ' ') {
@@ -1398,15 +1093,10 @@ fn handleWordRight() void {
     }
     updateCursorPosition();
 }
-
 fn updateCursorPosition() void {
     if (!terminal.isInitialized()) return;
     terminal.setCursor(prompt_col + @as(u32, @intCast(cursor_pos)), prompt_row);
 }
-
-// =============================================================================
-// T3: Line Editing
-// =============================================================================
 
 fn insertChar(c: u8) void {
     if (input_len >= MAX_INPUT - 1) return;
@@ -1421,7 +1111,6 @@ fn insertChar(c: u8) void {
     cursor_pos += 1;
     redrawInput();
 }
-
 fn handleBackspace() void {
     if (cursor_pos == 0) return;
     var i = cursor_pos - 1;
@@ -1433,7 +1122,6 @@ fn handleBackspace() void {
     cursor_pos -= 1;
     redrawInput();
 }
-
 fn handleDelete() void {
     if (cursor_pos >= input_len) return;
     var i = cursor_pos;
@@ -1444,7 +1132,6 @@ fn handleDelete() void {
     input_len -= 1;
     redrawInput();
 }
-
 fn handleKillToEnd() void {
     var i = cursor_pos;
     while (i < MAX_INPUT) : (i += 1) {
@@ -1453,7 +1140,6 @@ fn handleKillToEnd() void {
     input_len = cursor_pos;
     redrawInput();
 }
-
 fn handleKillToStart() void {
     if (cursor_pos == 0) return;
     const remaining = input_len - cursor_pos;
@@ -1468,7 +1154,6 @@ fn handleKillToStart() void {
     cursor_pos = 0;
     redrawInput();
 }
-
 fn handleKillWord() void {
     if (cursor_pos == 0) return;
     var new_pos = cursor_pos;
@@ -1493,7 +1178,6 @@ fn handleKillWord() void {
     cursor_pos = new_pos;
     redrawInput();
 }
-
 fn handleCancel() void {
     if (terminal.isInitialized()) {
         terminal.setFgColor(ui.getTheme().text_error);
@@ -1506,7 +1190,7 @@ fn handleCancel() void {
 }
 
 // =============================================================================
-// T3: Command History
+// History & Redraw
 // =============================================================================
 
 fn handleHistoryUp() void {
@@ -1525,7 +1209,6 @@ fn handleHistoryUp() void {
         loadHistoryEntry(history_index);
     }
 }
-
 fn handleHistoryDown() void {
     if (!browsing_history) return;
     if (history_index < history_count - 1) {
@@ -1546,7 +1229,6 @@ fn handleHistoryDown() void {
         redrawInput();
     }
 }
-
 fn loadHistoryEntry(idx: usize) void {
     if (idx >= history_count) return;
     input_len = history_lens[idx];
@@ -1560,29 +1242,19 @@ fn loadHistoryEntry(idx: usize) void {
     }
     redrawInput();
 }
-
-// =============================================================================
-// Input Redraw
-// =============================================================================
-
 fn redrawInput() void {
-
-    // B2.10: Keep audio alive during prompt drawing
     if (audio.needsPoll()) {
         audio.poll();
     }
-
     if (!terminal.isInitialized()) return;
     terminal.setCursor(0, prompt_row);
     var display_path_buf: [128]u8 = undefined;
     const display_path = getDisplayPath(&display_path_buf);
-
     if (recovery_mode) {
         ui.drawPromptRecovery(display_path);
     } else {
         ui.drawPromptWithPath(display_path);
     }
-
     prompt_col = terminal.getCursorCol();
     var i: usize = 0;
     while (i < input_len) : (i += 1) {
@@ -1594,7 +1266,6 @@ fn redrawInput() void {
     }
     updateCursorPosition();
 }
-
 fn clearInputBuffer() void {
     var i: usize = 0;
     while (i < MAX_INPUT) : (i += 1) {
@@ -1602,6 +1273,15 @@ fn clearInputBuffer() void {
     }
     input_len = 0;
     cursor_pos = 0;
+}
+
+// 🛡️ MENGEMBALIKAN FUNGSI HISTORY API YANG HILANG
+pub fn getHistoryCount() usize {
+    return history_count;
+}
+pub fn getHistoryEntry(idx: usize) ?[]const u8 {
+    if (idx >= history_count) return null;
+    return history[idx][0..history_lens[idx]];
 }
 
 // =============================================================================
@@ -1645,16 +1325,11 @@ fn handleTabComplete() void {
 
 fn findCommandCompletions(prefix: []const u8) void {
     const cmds = [_][]const u8{
-        "help",     "clear",        "info",    "uptime",   "memory",
-        "history",  "echo",         "ls",      "cd",       "pwd",
-        "mkdir",    "touch",        "rm",      "rmdir",    "cat",
-        "write",    "lsdev",        "devtest", "ps",       "spawn",
-        "kill",     "sched",        "crypto",  "chain",    "integrity",
-        "identity", "syscall",      "boot",    "whoami",   "theme",
-        "reboot",   "shutdown",     "exit",    "logout",   "test-all",
-        "test-fs",  "test-syscall", "login",   "id",       "su",
-        "sudo",     "sudoend",      "user",    "usertest", "set",
-        "unset",    "env",          "export",  "printenv", "ceremony",
+        "help",   "clear",    "info",   "uptime",   "memory",    "history",  "echo",         "ls",      "cd",       "pwd",
+        "mkdir",  "touch",    "rm",     "rmdir",    "cat",       "write",    "lsdev",        "devtest", "ps",       "spawn",
+        "kill",   "sched",    "crypto", "chain",    "integrity", "identity", "syscall",      "boot",    "whoami",   "theme",
+        "reboot", "shutdown", "exit",   "logout",   "test-all",  "test-fs",  "test-syscall", "login",   "id",       "su",
+        "sudo",   "sudoend",  "user",   "usertest", "set",       "unset",    "env",          "export",  "printenv", "ceremony",
         "acpi",
     };
     for (cmds) |cmd| {
@@ -1664,7 +1339,6 @@ fn findCommandCompletions(prefix: []const u8) void {
         }
     }
 }
-
 fn findEnvCompletions(prefix: []const u8) void {
     var idx: usize = 0;
     while (idx < env.getVarCount()) : (idx += 1) {
@@ -1682,7 +1356,6 @@ fn findEnvCompletions(prefix: []const u8) void {
         } else break;
     }
 }
-
 fn findPathCompletions(prefix: []const u8) void {
     const cwd = vfs.getcwd();
     var index: usize = 0;
@@ -1697,7 +1370,6 @@ fn findPathCompletions(prefix: []const u8) void {
         index += 1;
     }
 }
-
 fn copyToCompletion(idx: usize, str: []const u8) void {
     var i: usize = 0;
     while (i < str.len and i < 47) : (i += 1) {
@@ -1706,7 +1378,6 @@ fn copyToCompletion(idx: usize, str: []const u8) void {
     completions[idx][i] = 0;
     completion_lens[idx] = i;
 }
-
 fn applyCompletion(word_start: usize, idx: usize) void {
     if (idx >= completion_count) return;
     const comp_len = completion_lens[idx];
@@ -1722,7 +1393,6 @@ fn applyCompletion(word_start: usize, idx: usize) void {
     cursor_pos = input_len;
     redrawInput();
 }
-
 fn showCompletions() void {
     const theme = ui.getTheme();
     if (terminal.isInitialized()) {
@@ -1741,7 +1411,6 @@ fn showCompletions() void {
         terminal.setFgColor(theme.text_normal);
     }
 }
-
 fn startsWith(str: []const u8, prefix: []const u8) bool {
     if (prefix.len > str.len) return false;
     var i: usize = 0;
@@ -1754,11 +1423,6 @@ fn startsWith(str: []const u8, prefix: []const u8) bool {
     }
     return true;
 }
-
-// =============================================================================
-// History
-// =============================================================================
-
 fn addToHistory() void {
     if (input_len == 0) return;
     if (history_count > 0 and history_lens[history_count - 1] == input_len) {
@@ -1792,20 +1456,10 @@ fn addToHistory() void {
     history_index = history_count;
 }
 
-pub fn getHistoryCount() usize {
-    return history_count;
-}
-
-pub fn getHistoryEntry(idx: usize) ?[]const u8 {
-    if (idx >= history_count) return null;
-    return history[idx][0..history_lens[idx]];
-}
-
 // =============================================================================
-// T4.3: Output Functions (capture-aware)
+// Output Functions
 // =============================================================================
 
-/// Direct print — always goes to terminal+serial (never captured)
 fn printDirect(text: []const u8) void {
     if (terminal.isInitialized()) {
         for (text) |c| {
@@ -1814,16 +1468,12 @@ fn printDirect(text: []const u8) void {
     }
     serial.writeString(text);
 }
-
-/// Direct newline — always goes to terminal+serial
 fn newLineDirect() void {
     if (terminal.isInitialized()) {
         terminal.writeChar('\n');
     }
     serial.writeString("\n");
 }
-
-/// Print — goes to capture buffer when capturing, otherwise to terminal+serial
 pub fn print(text: []const u8) void {
     if (redir.isCapturing()) {
         redir.captureStr(text);
@@ -1837,13 +1487,10 @@ pub fn print(text: []const u8) void {
     }
     serial.writeString(text);
 }
-
 pub fn println(text: []const u8) void {
     print(text);
     newLine();
 }
-
-/// PrintChar — capture-aware
 pub fn printChar(c: u8) void {
     if (redir.isCapturing()) {
         redir.captureChar(c);
@@ -1855,8 +1502,6 @@ pub fn printChar(c: u8) void {
     }
     serial.writeChar(c);
 }
-
-/// NewLine — capture-aware
 pub fn newLine() void {
     if (redir.isCapturing()) {
         redir.captureChar('\n');
@@ -1868,7 +1513,6 @@ pub fn newLine() void {
     }
     serial.writeString("\n");
 }
-
 pub fn clearScreen() void {
     if (terminal.isInitialized()) {
         terminal.clear();
@@ -1876,7 +1520,6 @@ pub fn clearScreen() void {
         terminal.setCursor(0, @intCast(ui.getContentStartRow()));
     }
 }
-
 pub fn printSuccess(text: []const u8) void {
     if (redir.isCapturing()) {
         redir.captureStr(text);
@@ -1890,7 +1533,6 @@ pub fn printSuccess(text: []const u8) void {
     }
     serial.writeString(text);
 }
-
 pub fn printSuccessLine(text: []const u8) void {
     if (redir.isCapturing()) {
         redir.captureStr("[OK] ");
@@ -1901,7 +1543,6 @@ pub fn printSuccessLine(text: []const u8) void {
     }
     ui.showSuccess(text);
 }
-
 pub fn printError(text: []const u8) void {
     if (terminal.isInitialized()) {
         terminal.setFgColor(ui.getTheme().text_error);
@@ -1910,11 +1551,9 @@ pub fn printError(text: []const u8) void {
     }
     serial.writeString(text);
 }
-
 pub fn printErrorLine(text: []const u8) void {
     ui.showError(text);
 }
-
 pub fn printWarning(text: []const u8) void {
     if (redir.isCapturing()) {
         redir.captureStr(text);
@@ -1928,7 +1567,6 @@ pub fn printWarning(text: []const u8) void {
     }
     serial.writeString(text);
 }
-
 pub fn printWarningLine(text: []const u8) void {
     if (redir.isCapturing()) {
         redir.captureStr("[WARN] ");
@@ -1939,7 +1577,6 @@ pub fn printWarningLine(text: []const u8) void {
     }
     ui.showWarning(text);
 }
-
 pub fn printInfo(text: []const u8) void {
     if (redir.isCapturing()) {
         redir.captureStr(text);
@@ -1953,7 +1590,6 @@ pub fn printInfo(text: []const u8) void {
     }
     serial.writeString(text);
 }
-
 pub fn printInfoLine(text: []const u8) void {
     if (redir.isCapturing()) {
         redir.captureStr("[INFO] ");
@@ -1964,17 +1600,11 @@ pub fn printInfoLine(text: []const u8) void {
     }
     ui.showInfo(text);
 }
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
 fn writeStr(s: []const u8) void {
     for (s) |c| {
         terminal.writeChar(c);
     }
 }
-
 fn strEql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |ca, cb| {
@@ -1985,20 +1615,4 @@ fn strEql(a: []const u8, b: []const u8) bool {
         if (la != lb) return false;
     }
     return true;
-}
-
-// =============================================================================
-// H.7: Public State Accessors
-// =============================================================================
-
-pub fn isRecoveryMode() bool {
-    return recovery_mode;
-}
-
-pub fn isLoginRequired() bool {
-    return login_required;
-}
-
-pub fn isLoggedIn() bool {
-    return logged_in;
 }

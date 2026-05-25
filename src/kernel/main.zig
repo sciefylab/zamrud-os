@@ -2,6 +2,7 @@
 //! Phases A-F4.2 + SC1 + H.7 + B2.9 SMP Complete
 //! FIXED: Terminal init BEFORE ceremony so UI renders on screen
 //! 🆕 INTEGRATED: Strict Binary Verification & Dev/Authority Keys
+//! 🛡️ FIXED: VFS /disk directory ensured before FAT32 mount
 
 const cpu = @import("core/cpu.zig");
 const limine = @import("core/limine.zig");
@@ -305,6 +306,10 @@ export fn kernel_main() noreturn {
     }
     if (vfs.ensureDir("/tmp")) {
         serial.writeString("[OK]   /tmp created\n");
+    }
+    // 🛡️ FIX VFS Integration: Ensure /disk exists before mounting FAT32
+    if (vfs.ensureDir("/disk")) {
+        serial.writeString("[OK]   /disk created\n");
     }
 
     if (devfs.init()) {

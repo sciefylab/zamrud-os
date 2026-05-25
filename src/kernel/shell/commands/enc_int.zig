@@ -1,18 +1,21 @@
-//! F4.1 Shell Commands — Encryption Integration
+//! F4.1 & F4.3 Shell Commands — Encryption & Hardware Integration
 //! Commands: encwho, encfiles, encinttest
 
 const shell = @import("../shell.zig");
 const helpers = @import("helpers.zig");
 const enc_integration = @import("../../fs/enc_integration.zig");
 const encryptfs = @import("../../fs/encryptfs.zig");
+const storage = @import("../../drivers/storage/storage.zig");
+const registry = @import("../../integrity/registry.zig");
+const hash_mod = @import("../../crypto/hash.zig");
 
 // =============================================================================
-// encwho — Show current encryption identity
+// encwho — Show current encryption identity & Hardware Binding
 // =============================================================================
 
 pub fn encWhoCommand(_: []const u8) void {
     shell.newLine();
-    shell.printInfoLine("=== Encryption Identity ===");
+    shell.printInfoLine("=== Encryption Identity & Hardware ===");
 
     if (!enc_integration.isInitialized()) {
         shell.println("  Not initialized");
@@ -38,6 +41,28 @@ pub fn encWhoCommand(_: []const u8) void {
         shell.println("key set");
     } else {
         shell.println("no key");
+    }
+
+    // 🆕 F4.3 Hardware Binding Status (ROBUST FIX)
+    shell.print("  HW Bind: ");
+    if (storage.getDriveCount() > 0) {
+        // Cari secara otomatis drive mana yang memegang partisi utama
+        const target_drive_idx = if (storage.findFAT32Partition()) |p| p.drive_index else 0;
+
+        if (storage.getDriveSerial(target_drive_idx)) |serial_str| {
+            var serial_hash: [32]u8 = undefined;
+            hash_mod.sha256Into(serial_str, &serial_hash);
+
+            if (registry.isInitialized() and registry.isRegistered(&serial_hash)) {
+                shell.println("SECURE (Bound to Ledger)");
+            } else {
+                shell.println("UNREGISTERED (Untrusted Drive)");
+            }
+        } else {
+            shell.println("UNKNOWN (Failed to extract serial)");
+        }
+    } else {
+        shell.println("VIRTUAL (No Physical Drive)");
     }
 
     const s = enc_integration.getStats();
@@ -71,8 +96,8 @@ pub fn encFilesCommand(_: []const u8) void {
         return;
     }
 
-    shell.println("  NAME                  UID   ROLE   SIZE");
-    shell.println("  ----                  ---   ----   ----");
+    shell.println("  NAME                    UID   ROLE   SIZE");
+    shell.println("  ----                    ---   ----   ----");
 
     var i: usize = 0;
     while (i < count) : (i += 1) {
@@ -106,7 +131,7 @@ pub fn encFilesCommand(_: []const u8) void {
 
 pub fn encIntTestCommand(_: []const u8) void {
     shell.newLine();
-    shell.println("Running F4.1 integration tests...");
+    shell.println("Running F4.1 & F4.3 integration tests...");
     const result = enc_integration.runTests();
     if (result) {
         shell.printInfoLine("F4.1: ALL TESTS PASSED");

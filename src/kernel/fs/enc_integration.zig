@@ -1,12 +1,7 @@
 //! Zamrud OS - F4.1: User-Hierarchy Encryption Integration
 //! Ties encryption to user roles, identity-based key derivation,
 //! per-user encryption domains, and auto key management on login/logout.
-//!
-//! Key Hierarchy:
-//!   MASTER KEY (root) → can decrypt ALL files
-//!   ADMIN KEY (per-admin uid) → own + shared admin files
-//!   USER KEY (per-user uid) → own files only
-//!   GUEST → NO KEY (CAP_CRYPTO denied)
+//! 🆕 F4.3 Upgrade: Cryptographic Hardware Binding (Anti-Cloning - Robust)
 
 const serial = @import("../drivers/serial/serial.zig");
 const encryptfs = @import("encryptfs.zig");
@@ -15,6 +10,7 @@ const capability = @import("../security/capability.zig");
 const violation = @import("../security/violation.zig");
 const keyring = @import("../identity/keyring.zig");
 const aes = @import("../crypto/aes.zig");
+const storage = @import("../drivers/storage/storage.zig");
 
 // =============================================================================
 // Per-User Key State
@@ -64,18 +60,18 @@ pub fn isInitialized() bool {
 }
 
 // =============================================================================
-// Key Derivation — Identity + Role + UID based
+// 🆕 F4.3: Key Derivation — Identity + Role + UID + HARDWARE SERIAL
 // =============================================================================
 
 /// Derive a unique encryption key for a user
-/// key = KDF(pubkey, "zamrud-enc:{role}:{uid}")
+/// key = KDF(pubkey, "zamrud-enc:{role}:{uid}:{hw_serial}")
 pub fn deriveKeyForUser(pubkey: *const [32]u8, role: users.UserRole, uid: u16) [aes.KEY_SIZE]u8 {
-    var domain_buf: [48]u8 = [_]u8{0} ** 48;
+    var domain_buf: [128]u8 = [_]u8{0} ** 128;
     var pos: usize = 0;
 
     const prefix = "zamrud-enc:";
     for (prefix) |c| {
-        if (pos < 48) {
+        if (pos < domain_buf.len) {
             domain_buf[pos] = c;
             pos += 1;
         }
@@ -83,19 +79,19 @@ pub fn deriveKeyForUser(pubkey: *const [32]u8, role: users.UserRole, uid: u16) [
 
     const role_str = role.toString();
     for (role_str) |c| {
-        if (pos < 48) {
+        if (pos < domain_buf.len) {
             domain_buf[pos] = c;
             pos += 1;
         }
     }
 
-    if (pos < 48) {
+    if (pos < domain_buf.len) {
         domain_buf[pos] = ':';
         pos += 1;
     }
 
     if (uid == 0) {
-        if (pos < 48) {
+        if (pos < domain_buf.len) {
             domain_buf[pos] = '0';
             pos += 1;
         }
@@ -109,27 +105,51 @@ pub fn deriveKeyForUser(pubkey: *const [32]u8, role: users.UserRole, uid: u16) [
         }
         while (tlen > 0) {
             tlen -= 1;
-            if (pos < 48) {
+            if (pos < domain_buf.len) {
                 domain_buf[pos] = tmp[tlen];
                 pos += 1;
             }
         }
     }
 
-    // aes.deriveKey returns *const [32]u8, dereference to get value
+    // 🆕 Masukkan Hardware Serial Number ke dalam rumus Kriptografi
+    if (pos < domain_buf.len) {
+        domain_buf[pos] = ':';
+        pos += 1;
+    }
+
+    // 🛡️ ROBUST FIX: Cari secara otomatis drive mana yang memegang partisi utama
+    const target_drive_idx = if (storage.findFAT32Partition()) |p| p.drive_index else 0;
+
+    if (storage.getDriveSerial(target_drive_idx)) |serial_str| {
+        for (serial_str) |c| {
+            if (pos < domain_buf.len) {
+                domain_buf[pos] = c;
+                pos += 1;
+            }
+        }
+    } else {
+        const no_drv = "VIRTUAL";
+        for (no_drv) |c| {
+            if (pos < domain_buf.len) {
+                domain_buf[pos] = c;
+                pos += 1;
+            }
+        }
+    }
+
     const derived_ptr = aes.deriveKey(pubkey, domain_buf[0..pos]);
     return derived_ptr.*;
 }
+
 // =============================================================================
 // Login/Logout Hooks
 // =============================================================================
 
-/// Called when a user logs in — auto-sets encryption key
 pub fn onLogin(uid: u16, role: users.UserRole, identity_index: i8) void {
     if (!initialized) return;
     if (!encryptfs.isInitialized()) return;
 
-    // Guest gets NO key
     if (role == .guest) {
         serial.writeString("[ENC_INT] Guest login - no encryption key\n");
         current_owner_uid = uid;
@@ -138,7 +158,6 @@ pub fn onLogin(uid: u16, role: users.UserRole, identity_index: i8) void {
         return;
     }
 
-    // Get pubkey from identity
     if (identity_index < 0) {
         serial.writeString("[ENC_INT] No identity linked - no encryption key\n");
         key_active = false;
@@ -150,17 +169,14 @@ pub fn onLogin(uid: u16, role: users.UserRole, identity_index: i8) void {
         serial.writeString("[ENC_INT] Identity not found - no encryption key\n");
         key_active = false;
         return;
-    };
+    }; // 🛡️ FIX: Titik koma ditambahkan di sini
 
     if (!id.active) {
         key_active = false;
         return;
     }
 
-    // Derive key for this user
     const derived = deriveKeyForUser(&id.keypair.public_key, role, uid);
-
-    // Set key in encryptfs
     encryptfs.setKeyDirect(&derived);
 
     current_owner_uid = uid;
@@ -168,7 +184,6 @@ pub fn onLogin(uid: u16, role: users.UserRole, identity_index: i8) void {
     key_active = true;
     stats_auto_keys += 1;
 
-    // If root, also save master key
     if (role == .root) {
         var i: usize = 0;
         while (i < aes.KEY_SIZE) : (i += 1) {
@@ -177,14 +192,13 @@ pub fn onLogin(uid: u16, role: users.UserRole, identity_index: i8) void {
         master_key_set = true;
     }
 
-    serial.writeString("[ENC_INT] Key auto-set for uid=");
+    serial.writeString("[ENC_INT] Key auto-set (Hardware Bound) for uid=");
     printU16(uid);
     serial.writeString(" role=");
     serial.writeString(role.toString());
     serial.writeString("\n");
 }
 
-/// Called when a user logs out — clears encryption key
 pub fn onLogout() void {
     if (!initialized) return;
 
@@ -200,7 +214,6 @@ pub fn onLogout() void {
 // Ownership-Aware Encrypt/Decrypt
 // =============================================================================
 
-/// Encrypt with current user's ownership stamped
 pub fn encryptWithOwnership(name: []const u8, plaintext: []const u8) bool {
     if (!initialized or !encryptfs.isInitialized()) return false;
 
@@ -216,7 +229,6 @@ pub fn encryptWithOwnership(name: []const u8, plaintext: []const u8) bool {
 
     if (!encryptfs.encryptFile(name, plaintext)) return false;
 
-    // Stamp ownership
     if (encryptfs.findFileMut(name)) |f| {
         f.owner_uid = current_owner_uid;
         f.owner_role = current_owner_role;
@@ -225,7 +237,6 @@ pub fn encryptWithOwnership(name: []const u8, plaintext: []const u8) bool {
     return true;
 }
 
-/// Decrypt with ownership/role access control
 pub fn decryptWithAccessControl(name: []const u8) ?[]const u8 {
     if (!initialized or !encryptfs.isInitialized()) return null;
 
@@ -241,12 +252,10 @@ pub fn decryptWithAccessControl(name: []const u8) ?[]const u8 {
         return null;
     }
 
-    // Owner decrypts normally
     if (current_owner_uid == info.owner_uid) {
         return encryptfs.decryptFile(name);
     }
 
-    // Root uses master key override
     if (current_owner_role == .root and master_key_set) {
         return decryptWithMasterOverride(name, info.owner_uid, info.owner_role);
     }
@@ -254,7 +263,6 @@ pub fn decryptWithAccessControl(name: []const u8) ?[]const u8 {
     return encryptfs.decryptFile(name);
 }
 
-/// Delete with ownership check
 pub fn deleteWithAccessControl(name: []const u8) bool {
     if (!initialized or !encryptfs.isInitialized()) return false;
 
@@ -279,36 +287,22 @@ pub fn deleteWithAccessControl(name: []const u8) bool {
 
 pub const AccessType = enum { read, write, delete };
 
-/// Access Matrix:
-///   Current\File → root    admin   user    guest
-///   root         → R/W/D   R/W/D   R/W/D   R/W/D
-///   admin        → DENY    own*    READ**  DENY
-///   user         → DENY    DENY    own*    DENY
-///   guest        → DENY    DENY    DENY    DENY
-///   (* = own files, ** = admin audit read)
 pub fn checkAccess(file_uid: u16, file_role: users.UserRole, access: AccessType) bool {
     if (!key_active and current_owner_role != .root) return false;
-
-    // Root can access everything
     if (current_owner_role == .root) return true;
-
-    // Guest can access nothing
     if (current_owner_role == .guest) return false;
-
-    // Own files always allowed
     if (current_owner_uid == file_uid) return true;
 
-    // Cross-role
     switch (current_owner_role) {
         .admin => {
             switch (file_role) {
                 .root => return false,
-                .admin => return false, // other admin's files
-                .user => return access == .read, // audit read only
+                .admin => return false,
+                .user => return access == .read,
                 .guest => return false,
             }
         },
-        .user => return false, // only own files
+        .user => return false,
         .root => return true,
         .guest => return false,
     }
@@ -328,17 +322,14 @@ fn decryptWithMasterOverride(name: []const u8, file_uid: u16, file_role: users.U
     const id = keyring.getSlotPtr(idx) orelse return null;
     if (!id.active) return null;
 
-    // Derive owner's key
     const owner_key = deriveKeyForUser(&id.keypair.public_key, file_role, file_uid);
 
-    // Save current root key
     var saved_key: [aes.KEY_SIZE]u8 = undefined;
     var i: usize = 0;
     while (i < aes.KEY_SIZE) : (i += 1) {
         saved_key[i] = master_key[i];
     }
 
-    // Switch to owner's key, decrypt, restore
     encryptfs.setKeyDirect(&owner_key);
     const result = encryptfs.decryptFile(name);
     encryptfs.setKeyDirect(&saved_key);
@@ -351,7 +342,7 @@ fn decryptWithMasterOverride(name: []const u8, file_uid: u16, file_role: users.U
 }
 
 // =============================================================================
-// Helpers
+// Helpers & Queries
 // =============================================================================
 
 fn hasEncryptPermission() bool {
@@ -381,18 +372,12 @@ fn reportAccessDenied(detail: []const u8) void {
     }
 }
 
-// =============================================================================
-// Query
-// =============================================================================
-
 pub fn getCurrentOwnerUid() u16 {
     return current_owner_uid;
 }
-
 pub fn getCurrentOwnerRole() users.UserRole {
     return current_owner_role;
 }
-
 pub fn isKeyActive() bool {
     return key_active;
 }
@@ -476,7 +461,6 @@ pub fn runTests() bool {
     var passed: u32 = 0;
     var failed: u32 = 0;
 
-    // Setup
     keyring.init();
     const auth = @import("../identity/auth.zig");
     auth.init();
@@ -698,10 +682,7 @@ pub fn runTests() bool {
         current_owner_role = .root;
         current_owner_uid = 0;
         key_active = true;
-        if (checkAccess(0, .root, .read) and
-            checkAccess(100, .admin, .read) and
-            checkAccess(200, .user, .read))
-        {
+        if (checkAccess(0, .root, .read) and checkAccess(100, .admin, .read) and checkAccess(200, .user, .read)) {
             serial.writeString("PASS\n");
             passed += 1;
         } else {
@@ -716,11 +697,7 @@ pub fn runTests() bool {
         current_owner_role = .user;
         current_owner_uid = 200;
         key_active = true;
-        if (checkAccess(200, .user, .read) and
-            !checkAccess(300, .user, .read) and
-            !checkAccess(100, .admin, .read) and
-            !checkAccess(0, .root, .read))
-        {
+        if (checkAccess(200, .user, .read) and !checkAccess(300, .user, .read) and !checkAccess(100, .admin, .read) and !checkAccess(0, .root, .read)) {
             serial.writeString("PASS\n");
             passed += 1;
         } else {
@@ -735,10 +712,7 @@ pub fn runTests() bool {
         current_owner_role = .admin;
         current_owner_uid = 100;
         key_active = true;
-        if (checkAccess(200, .user, .read) and
-            !checkAccess(200, .user, .write) and
-            !checkAccess(200, .user, .delete))
-        {
+        if (checkAccess(200, .user, .read) and !checkAccess(200, .user, .write) and !checkAccess(200, .user, .delete)) {
             serial.writeString("PASS\n");
             passed += 1;
         } else {
@@ -766,10 +740,7 @@ pub fn runTests() bool {
     {
         current_owner_role = .admin;
         current_owner_uid = 100;
-        if (checkAccess(100, .admin, .read) and
-            checkAccess(100, .admin, .write) and
-            checkAccess(100, .admin, .delete))
-        {
+        if (checkAccess(100, .admin, .read) and checkAccess(100, .admin, .write) and checkAccess(100, .admin, .delete)) {
             serial.writeString("PASS\n");
             passed += 1;
         } else {

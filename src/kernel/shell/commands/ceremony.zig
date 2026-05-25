@@ -1,9 +1,10 @@
 //! Zamrud OS - Trust Ceremony Shell Commands
 //! H.7: Updated for v2 ceremony with trust anchors + proper reset
+//! 🆕 F4.3: Auto-Hardware Binding integrated into Genesis Ceremony
+//! 🛠️ FIX: Replaced interactive prompt with 'reset confirm' argument to prevent IRQ locks
 
 const serial = @import("../../drivers/serial/serial.zig");
 const terminal = @import("../../drivers/display/terminal.zig");
-const keyboard = @import("../../drivers/input/keyboard.zig");
 const trust_ceremony = @import("../../boot/trust_ceremony.zig");
 const keyring = @import("../../identity/keyring.zig");
 const identity = @import("../../identity/identity.zig");
@@ -12,13 +13,20 @@ const config_store = @import("../../persist/config_store.zig");
 const fat32 = @import("../../fs/fat32.zig");
 const sys_encrypt = @import("../../crypto/sys_encrypt.zig");
 
+// 🆕 F4.3: Imports for Hardware Binding
+const storage = @import("../../drivers/storage/storage.zig");
+const registry = @import("../../integrity/registry.zig");
+const hash_mod = @import("../../crypto/hash.zig");
+
 pub fn execute(args: []const u8) void {
     if (args.len == 0 or strEql(args, "status")) {
         showStatus();
     } else if (strEql(args, "start")) {
         startCeremony();
     } else if (strEql(args, "reset")) {
-        resetCeremony();
+        resetCeremony(false); // Membutuhkan konfirmasi
+    } else if (strEql(args, "reset confirm")) {
+        resetCeremony(true); // Konfirmasi berhasil
     } else if (strEql(args, "verify")) {
         verifyTrust();
     } else if (strEql(args, "test")) {
@@ -33,11 +41,12 @@ pub fn execute(args: []const u8) void {
 fn showHelp() void {
     printStr("\n");
     printStr("Trust Ceremony Commands:\n");
-    printStr("  ceremony status  - Show ceremony and trust anchor status\n");
-    printStr("  ceremony start   - Run first-boot trust ceremony wizard\n");
-    printStr("  ceremony reset   - Delete all identity data and reset\n");
-    printStr("  ceremony verify  - Verify trust anchor integrity\n");
-    printStr("  ceremony test    - Run H.7 ceremony tests\n");
+    printStr("  ceremony status          - Show ceremony and trust anchor status\n");
+    printStr("  ceremony start           - Run first-boot trust ceremony wizard\n");
+    printStr("  ceremony reset           - View reset warning\n");
+    printStr("  ceremony reset confirm   - Delete all identity data and reset (Destructive)\n");
+    printStr("  ceremony verify          - Verify trust anchor integrity\n");
+    printStr("  ceremony test            - Run H.7 ceremony tests\n");
     printStr("\n");
 }
 
@@ -118,11 +127,26 @@ fn showStatus() void {
         }
     }
 
+    // 🆕 F4.3: Show Hardware Binding Status
+    printStr("\n  Hardware Binding:\n");
+    printStr("    Status:     ");
+    const target_drive_idx = if (storage.findFAT32Partition()) |p| p.drive_index else 0;
+    if (storage.getDriveSerial(target_drive_idx)) |serial_str| {
+        var serial_hash: [32]u8 = undefined;
+        hash_mod.sha256Into(serial_str, &serial_hash);
+        if (registry.isInitialized() and registry.isRegistered(&serial_hash)) {
+            printStr("SECURE (Bound to Ledger)\n");
+        } else {
+            printStr("UNREGISTERED (Vulnerable)\n");
+        }
+    } else {
+        printStr("UNKNOWN (No Serial)\n");
+    }
+
     printStr("\n");
 }
 
 fn startCeremony() void {
-    // Check if already complete AND files exist
     if (trust_ceremony.isCeremonyComplete() and identity_store.hasIdentityFile()) {
         printStr("\n");
         printStr("  Ceremony already completed!\n");
@@ -131,9 +155,28 @@ fn startCeremony() void {
         return;
     }
 
-    // Run ceremony
     if (trust_ceremony.runCeremony()) {
         printStr("\n  Ceremony completed successfully!\n");
+
+        // --- 🆕 F4.3: AUTO HARDWARE BINDING SAAT GENESIS CEREMONY ---
+        printStr("  Securing hardware identity...\n");
+        const target_drive_idx = if (storage.findFAT32Partition()) |p| p.drive_index else 0;
+
+        if (storage.getDriveSerial(target_drive_idx)) |serial_str| {
+            var serial_hash: [32]u8 = undefined;
+            hash_mod.sha256Into(serial_str, &serial_hash);
+
+            if (registry.registerFile("Drive-Binding", &serial_hash, .physical_drive, 1)) {
+                printStr("  [SECURITY] Anti-Evil Maid Protection Automatically Activated!\n");
+                printStr("  [SECURITY] Hardware permanently bound to this OS instance.\n");
+            } else {
+                printStr("  [WARNING] Failed to bind hardware to Ledger. Registry full?\n");
+            }
+        } else {
+            printStr("  [WARNING] Could not extract Hardware DNA for binding.\n");
+        }
+        // ------------------------------------------------------
+
         printStr("  Please reboot to apply changes.\n\n");
     }
 }
@@ -157,68 +200,26 @@ fn verifyTrust() void {
     printStr("\n");
 }
 
-fn resetCeremony() void {
+fn resetCeremony(confirmed: bool) void {
     printStr("\n");
     printStr("  +========================================+\n");
-    printStr("  |  WARNING: DESTRUCTIVE OPERATION       |\n");
+    printStr("  |  WARNING: DESTRUCTIVE OPERATION        |\n");
     printStr("  +========================================+\n");
-    printStr("  |  This will DELETE:                    |\n");
-    printStr("  |    - All stored identities            |\n");
-    printStr("  |    - Trust anchors                    |\n");
-    printStr("  |    - System configuration             |\n");
-    printStr("  |    - Encryption keys                  |\n");
-    printStr("  |                                       |\n");
-    printStr("  |  You will need your 24-word seed     |\n");
-    printStr("  |  phrase to recover your identity!    |\n");
-    printStr("  +========================================+\n");
-    printStr("\n");
-    printStr("  Type 'YES' to confirm, or press ESC to cancel: ");
+    printStr("  |  This will DELETE:                     |\n");
+    printStr("  |    - All stored identities             |\n");
+    printStr("  |    - Trust anchors                     |\n");
+    printStr("  |    - System configuration              |\n");
+    printStr("  |    - Encryption keys                   |\n");
+    printStr("  |    - Hardware Binding Ledger           |\n");
+    printStr("  |                                        |\n");
+    printStr("  |  You will need your 24-word seed       |\n");
+    printStr("  |  phrase to recover your identity!      |\n");
+    printStr("  +========================================+\n\n");
 
-    // Wait for confirmation
-    var confirm_buf: [8]u8 = [_]u8{0} ** 8;
-    var confirm_len: usize = 0;
-
-    while (true) {
-        if (keyboard.getKey()) |key| {
-            if (key == 0x1B) {
-                // ESC - cancel
-                printStr("\n\n  Reset cancelled.\n\n");
-                return;
-            }
-
-            if (key == '\n' or key == '\r') {
-                break;
-            }
-
-            if (key == 0x08 or key == 127) {
-                if (confirm_len > 0) {
-                    confirm_len -= 1;
-                    confirm_buf[confirm_len] = 0;
-                    if (terminal.isInitialized()) {
-                        terminal.writeChar(0x08);
-                        terminal.writeChar(' ');
-                        terminal.writeChar(0x08);
-                    }
-                }
-                continue;
-            }
-
-            if (key >= 32 and key < 127 and confirm_len < 7) {
-                confirm_buf[confirm_len] = key;
-                confirm_len += 1;
-                if (terminal.isInitialized()) {
-                    terminal.writeChar(key);
-                }
-            }
-        }
-        asm volatile ("pause");
-    }
-
-    printStr("\n\n");
-
-    // Check confirmation
-    if (!strEql(confirm_buf[0..confirm_len], "YES")) {
-        printStr("  Confirmation failed. Reset cancelled.\n\n");
+    // 🛡️ FIX: Jika user hanya mengetik 'ceremony reset', blokir dan beri tahu perintah yang benar
+    if (!confirmed) {
+        printStr("  To proceed with the reset, you must explicitly type:\n");
+        printStr("    ceremony reset confirm\n\n");
         return;
     }
 
@@ -226,11 +227,8 @@ fn resetCeremony() void {
 
     var success = true;
 
-    // Step 1: Delete disk files
-    printStr("  [1/5] Deleting disk files...\n");
-
+    printStr("  [1/6] Deleting disk files...\n");
     if (fat32.isMounted()) {
-        // Delete IDENTITY.DAT
         if (fat32.findInRoot("IDENTITY.DAT") != null) {
             if (fat32.deleteFile("IDENTITY.DAT")) {
                 printStr("        [OK] IDENTITY.DAT deleted\n");
@@ -242,7 +240,6 @@ fn resetCeremony() void {
             printStr("        [--] IDENTITY.DAT not found\n");
         }
 
-        // Delete CONFIG.DAT
         if (fat32.findInRoot("CONFIG.DAT") != null) {
             if (fat32.deleteFile("CONFIG.DAT")) {
                 printStr("        [OK] CONFIG.DAT deleted\n");
@@ -258,23 +255,23 @@ fn resetCeremony() void {
         success = false;
     }
 
-    // Step 2: Clear system encryption key
-    printStr("  [2/5] Clearing encryption keys...\n");
+    printStr("  [2/6] Clearing encryption keys...\n");
     sys_encrypt.clearMasterKey();
     printStr("        [OK] Master key cleared\n");
 
-    // Step 3: Reset keyring
-    printStr("  [3/5] Resetting keyring...\n");
+    printStr("  [3/6] Resetting keyring...\n");
     keyring.init();
     printStr("        [OK] Keyring cleared\n");
 
-    // Step 4: Reset config to defaults
-    printStr("  [4/5] Resetting configuration...\n");
+    printStr("  [4/6] Resetting configuration...\n");
     config_store.init();
     printStr("        [OK] Config reset to defaults\n");
 
-    // Step 5: Reset ceremony state
-    printStr("  [5/5] Resetting ceremony state...\n");
+    printStr("  [5/6] Clearing Hardware Ledger...\n");
+    registry.init();
+    printStr("        [OK] Ledger Registry flushed\n");
+
+    printStr("  [6/6] Resetting ceremony state...\n");
     if (trust_ceremony.resetCeremony()) {
         printStr("        [OK] Ceremony state reset\n");
     } else {
@@ -286,53 +283,27 @@ fn resetCeremony() void {
 
     if (success) {
         printStr("  +========================================+\n");
-        printStr("  |  RESET COMPLETE                       |\n");
+        printStr("  |  RESET COMPLETE                        |\n");
         printStr("  +========================================+\n");
-        printStr("  |                                       |\n");
-        printStr("  |  Next steps:                          |\n");
-        printStr("  |    1. Run 'reboot'                    |\n");
-        printStr("  |    2. Ceremony will start on boot     |\n");
-        printStr("  |                                       |\n");
-        printStr("  |  Or run 'ceremony start' now          |\n");
-        printStr("  |                                       |\n");
+        printStr("  |                                        |\n");
+        printStr("  |  Next steps:                           |\n");
+        printStr("  |    1. Run 'reboot'                     |\n");
+        printStr("  |    2. Ceremony will start on boot      |\n");
+        printStr("  |                                        |\n");
+        printStr("  |  Or run 'ceremony start' now           |\n");
+        printStr("  |                                        |\n");
         printStr("  +========================================+\n");
     } else {
         printStr("  +========================================+\n");
-        printStr("  |  RESET INCOMPLETE                     |\n");
+        printStr("  |  RESET INCOMPLETE                      |\n");
         printStr("  +========================================+\n");
-        printStr("  |                                       |\n");
-        printStr("  |  Some operations failed.              |\n");
-        printStr("  |  Try rebooting and running            |\n");
-        printStr("  |  'ceremony reset' again.              |\n");
-        printStr("  |                                       |\n");
+        printStr("  |                                        |\n");
+        printStr("  |  Some operations failed.               |\n");
+        printStr("  |  Try rebooting and running             |\n");
+        printStr("  |  'ceremony reset confirm' again.       |\n");
+        printStr("  |                                        |\n");
         printStr("  +========================================+\n");
     }
-
-    printStr("\n");
-
-    // Verify files are gone
-    printStr("  Verification:\n");
-    printStr("    IDENTITY.DAT: ");
-    if (fat32.findInRoot("IDENTITY.DAT") != null) {
-        printStr("STILL EXISTS!\n");
-    } else {
-        printStr("DELETED\n");
-    }
-
-    printStr("    CONFIG.DAT:   ");
-    if (fat32.findInRoot("CONFIG.DAT") != null) {
-        printStr("STILL EXISTS!\n");
-    } else {
-        printStr("DELETED\n");
-    }
-
-    printStr("    First boot:   ");
-    if (trust_ceremony.isFirstBoot()) {
-        printStr("YES (ready for ceremony)\n");
-    } else {
-        printStr("NO (may need reboot)\n");
-    }
-
     printStr("\n");
 }
 

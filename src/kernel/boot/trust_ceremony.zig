@@ -2,8 +2,10 @@
 //! H.7 FIXED: Proper password auth, blockchain trust anchors,
 //!            master key → identity binding, newline-based UI
 //! H.7.2: Integrated backup option at completion
-//! H.7.3: Fixed keyboard grace period issue
 //! B2.11c FIX: Injected USB HID polling to prevent keyboard freeze during wizard
+//! 🆕 FIX: Dual I/O Polling (Serial + PS/2) & Serial Output for Server/No-UI Mode
+//! 🆕 FIX: isFirstBoot() logic to prevent Silent Bypass on reset
+//! 🆕 FIX: Cryptographic Sync - Master Key bound strictly to Identity Public Key
 
 const serial = @import("../drivers/serial/serial.zig");
 const terminal = @import("../drivers/display/terminal.zig");
@@ -21,7 +23,7 @@ const identity_store = @import("../persist/identity_store.zig");
 const sys_encrypt = @import("../crypto/sys_encrypt.zig");
 const identity_export = @import("../identity/export.zig");
 const crypto = @import("../crypto/crypto.zig");
-const hid = @import("../drivers/usb/hid.zig"); // FIX: Required for USB Keyboard polling
+const hid = @import("../drivers/usb/hid.zig");
 
 // =============================================================================
 // Constants
@@ -89,10 +91,28 @@ pub fn init() void {
 }
 
 // =============================================================================
-// FIX: System Polling Helper
+// FIX: Dual-Input Polling (Listen to both PS/2 and Serial VS Code)
 // =============================================================================
+fn getAnyKey() ?u8 {
+    // 1. Check USB/PS2 Keyboard
+    if (keyboard.getKey()) |k| return k;
+
+    // 2. Check Serial COM1
+    const lsr = asm volatile ("inb %[port], %[result]"
+        : [result] "={al}" (-> u8),
+        : [port] "{dx}" (@as(u16, 0x3FD)),
+    );
+    if ((lsr & 1) != 0) {
+        return asm volatile ("inb %[port], %[result]"
+            : [result] "={al}" (-> u8),
+            : [port] "{dx}" (@as(u16, 0x3F8)),
+        );
+    }
+
+    return null;
+}
+
 fn pollSystem() void {
-    // We MUST poll the USB HID driver manually because we are in a blocking loop
     hid.processPending();
     asm volatile ("pause");
 }
@@ -117,12 +137,11 @@ pub fn runCeremony() bool {
     ceremony_in_progress = true;
     ceremony_step = 0;
 
-    serial.writeString("[TRUST_CEREMONY] Starting first-boot trust ceremony v2\n");
+    serial.writeString("\n[TRUST_CEREMONY] Starting first-boot trust ceremony v2\n");
 
     keyboard.endGracePeriod();
-    serial.writeString("[TRUST_CEREMONY] Keyboard grace period ended\n");
 
-    while (keyboard.getKey() != null) {}
+    while (getAnyKey() != null) {}
 
     if (!stepWelcome()) {
         abortCeremony("User cancelled");
@@ -284,8 +303,8 @@ fn stepGatherEntropy() bool {
     var last_time: u64 = timer.getTicks();
 
     while (user_len < 64) {
-        pollSystem(); // FIX: USB HID Polling
-        if (keyboard.getKey()) |key| {
+        pollSystem();
+        if (getAnyKey()) |key| {
             const current_time = timer.getTicks();
 
             const timing: u8 = @truncate((current_time -% last_time) & 0xFF);
@@ -305,9 +324,12 @@ fn stepGatherEntropy() bool {
             if (key >= 0x20 and key < 0x7F) {
                 user_entropy[user_len] = key;
                 user_len += 1;
+
+                // 🛡️ Print to both Terminal and Serial
                 if (terminal.isInitialized()) {
                     terminal.writeChar('*');
                 }
+                serial.writeChar('*');
 
                 var key_arr = [_]u8{key};
                 entropy.addEntropy(&key_arr, 4);
@@ -441,8 +463,8 @@ fn stepShowRecoveryPhrase() bool {
 
     setColor(.error_color);
     writeLine("  ┌────────────────────────────────────────────────────────────┐");
-    writeLine("  │ ⚠ WARNING: Write these words down NOW!                    │");
-    writeLine("  │   They will NOT be shown again after verification!        │");
+    writeLine("  │ ⚠ WARNING: Write these words down NOW!                     │");
+    writeLine("  │   They will NOT be shown again after verification!         │");
     writeLine("  └────────────────────────────────────────────────────────────┘");
     setColor(.normal);
     writeLine("");
@@ -499,8 +521,8 @@ fn stepShowRecoveryPhrase() bool {
     writeLine(" to cancel");
 
     while (true) {
-        pollSystem(); // FIX: USB HID Polling
-        if (keyboard.getKey()) |key| {
+        pollSystem();
+        if (getAnyKey()) |key| {
             if (key == 'y' or key == 'Y') return true;
             if (key == 'r' or key == 'R') return stepShowRecoveryPhrase();
             if (key == 0x1B) return false;
@@ -550,8 +572,8 @@ fn stepVerifyRecoveryPhrase() bool {
             var input_len: usize = 0;
 
             while (true) {
-                pollSystem(); // FIX: USB HID Polling
-                if (keyboard.getKey()) |key| {
+                pollSystem();
+                if (getAnyKey()) |key| {
                     if (key == '\n' or key == '\r') {
                         break;
                     }
@@ -567,19 +589,28 @@ fn stepVerifyRecoveryPhrase() bool {
                                 terminal.writeChar(' ');
                                 terminal.writeChar(0x08);
                             }
+                            serial.writeChar(0x08);
+                            serial.writeChar(' ');
+                            serial.writeChar(0x08);
                         }
                         continue;
                     }
                     if (key >= 'a' and key <= 'z' and input_len < 15) {
                         input[input_len] = key;
                         input_len += 1;
-                        if (terminal.isInitialized()) terminal.writeChar(key);
+                        if (terminal.isInitialized()) {
+                            terminal.writeChar(key);
+                        }
+                        serial.writeChar(key);
                     }
                     if (key >= 'A' and key <= 'Z' and input_len < 15) {
                         const lower = key + 32;
                         input[input_len] = lower;
                         input_len += 1;
-                        if (terminal.isInitialized()) terminal.writeChar(lower);
+                        if (terminal.isInitialized()) {
+                            terminal.writeChar(lower);
+                        }
+                        serial.writeChar(lower);
                     }
                 }
             }
@@ -616,8 +647,8 @@ fn stepVerifyRecoveryPhrase() bool {
             writeLine("  Press ENTER to try again, or ESC to go back...");
 
             while (true) {
-                pollSystem(); // FIX: USB HID Polling
-                if (keyboard.getKey()) |key| {
+                pollSystem();
+                if (getAnyKey()) |key| {
                     if (key == '\n' or key == '\r') return stepVerifyRecoveryPhrase();
                     if (key == 0x1B) {
                         if (stepShowRecoveryPhrase()) return stepVerifyRecoveryPhrase();
@@ -690,8 +721,8 @@ fn stepCreateFirstIdentity() bool {
 
     name_len = 0;
     while (true) {
-        pollSystem(); // FIX: USB HID Polling
-        if (keyboard.getKey()) |key| {
+        pollSystem();
+        if (getAnyKey()) |key| {
             if (key == '\n' or key == '\r') {
                 if (name_len >= 3) break;
                 continue;
@@ -706,6 +737,9 @@ fn stepCreateFirstIdentity() bool {
                         terminal.writeChar(' ');
                         terminal.writeChar(0x08);
                     }
+                    serial.writeChar(0x08);
+                    serial.writeChar(' ');
+                    serial.writeChar(0x08);
                 }
                 continue;
             }
@@ -720,7 +754,10 @@ fn stepCreateFirstIdentity() bool {
             if (valid and name_len < MAX_NAME_LEN - 1) {
                 name_buf[name_len] = c;
                 name_len += 1;
-                if (terminal.isInitialized()) terminal.writeChar(c);
+                if (terminal.isInitialized()) {
+                    terminal.writeChar(c);
+                }
+                serial.writeChar(c);
             }
         }
     }
@@ -735,8 +772,8 @@ fn stepCreateFirstIdentity() bool {
 
     password_len = 0;
     while (true) {
-        pollSystem(); // FIX: USB HID Polling
-        if (keyboard.getKey()) |key| {
+        pollSystem();
+        if (getAnyKey()) |key| {
             if (key == '\n' or key == '\r') {
                 if (password_len >= MIN_PASSWORD_LEN) {
                     if (keyring.isStrongPassword(password_buf[0..password_len])) {
@@ -763,6 +800,9 @@ fn stepCreateFirstIdentity() bool {
                         terminal.writeChar(' ');
                         terminal.writeChar(0x08);
                     }
+                    serial.writeChar(0x08);
+                    serial.writeChar(' ');
+                    serial.writeChar(0x08);
                 }
                 continue;
             }
@@ -770,7 +810,10 @@ fn stepCreateFirstIdentity() bool {
             if (key >= 0x20 and key < 0x7F and password_len < MAX_PASSWORD_LEN) {
                 password_buf[password_len] = key;
                 password_len += 1;
-                if (terminal.isInitialized()) terminal.writeChar('*');
+                if (terminal.isInitialized()) {
+                    terminal.writeChar('*');
+                }
+                serial.writeChar('*');
             }
         }
     }
@@ -787,8 +830,8 @@ fn stepCreateFirstIdentity() bool {
     var confirm_len: usize = 0;
 
     while (true) {
-        pollSystem(); // FIX: USB HID Polling
-        if (keyboard.getKey()) |key| {
+        pollSystem();
+        if (getAnyKey()) |key| {
             if (key == '\n' or key == '\r') {
                 if (confirm_len >= MIN_PASSWORD_LEN) break;
                 continue;
@@ -803,6 +846,9 @@ fn stepCreateFirstIdentity() bool {
                         terminal.writeChar(' ');
                         terminal.writeChar(0x08);
                     }
+                    serial.writeChar(0x08);
+                    serial.writeChar(' ');
+                    serial.writeChar(0x08);
                 }
                 continue;
             }
@@ -810,7 +856,10 @@ fn stepCreateFirstIdentity() bool {
             if (key >= 0x20 and key < 0x7F and confirm_len < MAX_PASSWORD_LEN) {
                 confirm_buf[confirm_len] = key;
                 confirm_len += 1;
-                if (terminal.isInitialized()) terminal.writeChar('*');
+                if (terminal.isInitialized()) {
+                    terminal.writeChar('*');
+                }
+                serial.writeChar('*');
             }
         }
     }
@@ -851,20 +900,9 @@ fn stepCreateFirstIdentity() bool {
     writeStr("  Binding master key to identity...");
 
     if (sys_encrypt.isInitialized() and !sys_encrypt.isMasterKeySet()) {
-        var sys_key_input: [64]u8 = [_]u8{0} ** 64;
-        var i: usize = 0;
-        while (i < password_len and i < 32) : (i += 1) {
-            sys_key_input[i] = password_buf[i];
-        }
-        i = 0;
-        while (i < 32) : (i += 1) {
-            sys_key_input[32 + i] = master_seed[i];
-        }
-        var sys_key: [32]u8 = undefined;
-        hash.sha256Into(&sys_key_input, &sys_key);
-        sys_encrypt.setMasterKeyFromIdentity(&sys_key);
-        constant_time.secureZero(&sys_key_input);
-        constant_time.secureZero32(&sys_key);
+        // 🛡️ FIX: Gunakan Public Key dari identitas yang baru saja dibuat
+        // agar sinkron dengan cara shell.zig membukanya saat login!
+        sys_encrypt.setMasterKeyFromIdentity(&id.?.keypair.public_key);
     }
 
     setColor(.success);
@@ -1045,8 +1083,8 @@ fn showCompletionScreen() void {
     writeStr("    Your choice (1/2): ");
 
     while (true) {
-        pollSystem(); // FIX: USB HID Polling
-        if (keyboard.getKey()) |key| {
+        pollSystem();
+        if (getAnyKey()) |key| {
             if (key == '1') {
                 writeLine("1");
                 writeLine("");
@@ -1238,8 +1276,8 @@ fn readPasswordInline(buf: *[64]u8) usize {
     var len: usize = 0;
 
     while (len < 63) {
-        pollSystem(); // FIX: USB HID Polling
-        if (keyboard.getKey()) |key| {
+        pollSystem();
+        if (getAnyKey()) |key| {
             if (key == '\n' or key == '\r') {
                 return len;
             }
@@ -1257,6 +1295,9 @@ fn readPasswordInline(buf: *[64]u8) usize {
                         terminal.writeChar(' ');
                         terminal.writeChar(0x08);
                     }
+                    serial.writeChar(0x08);
+                    serial.writeChar(' ');
+                    serial.writeChar(0x08);
                 }
                 continue;
             }
@@ -1267,6 +1308,7 @@ fn readPasswordInline(buf: *[64]u8) usize {
                 if (terminal.isInitialized()) {
                     terminal.writeChar('*');
                 }
+                serial.writeChar('*');
             }
         }
     }
@@ -1337,8 +1379,8 @@ fn showFinalMessage() void {
     setColor(.normal);
 
     while (true) {
-        pollSystem(); // FIX: USB HID Polling
-        if (keyboard.getKey() != null) break;
+        pollSystem();
+        if (getAnyKey() != null) break;
     }
 
     writeLine("");
@@ -1411,6 +1453,7 @@ fn setColor(color: ColorType) void {
     }
 }
 
+// 🛡️ FIX: Always output UI strings to Serial so Server users can see the Wizard
 fn clearScreen() void {
     if (terminal.isInitialized()) {
         terminal.clear();
@@ -1418,12 +1461,14 @@ fn clearScreen() void {
         terminal.writeChar(' ');
         terminal.setCursor(0, 0);
     }
+    serial.writeString("\n==============================================================\n");
 }
 
 fn writeStr(s: []const u8) void {
     if (terminal.isInitialized()) {
         for (s) |c| terminal.writeChar(c);
     }
+    serial.writeString(s);
 }
 
 fn writeLine(s: []const u8) void {
@@ -1431,6 +1476,7 @@ fn writeLine(s: []const u8) void {
     if (terminal.isInitialized()) {
         terminal.writeChar('\n');
     }
+    serial.writeString("\n");
 }
 
 fn writeNumber(val: anytype) void {
@@ -1438,6 +1484,7 @@ fn writeNumber(val: anytype) void {
 
     if (v == 0) {
         if (terminal.isInitialized()) terminal.writeChar('0');
+        serial.writeChar('0');
         return;
     }
 
@@ -1453,6 +1500,7 @@ fn writeNumber(val: anytype) void {
     while (i > 0) {
         i -= 1;
         if (terminal.isInitialized()) terminal.writeChar(buf[i]);
+        serial.writeChar(buf[i]);
     }
 }
 
@@ -1464,8 +1512,8 @@ fn showMessage(msg: []const u8, msg_type: ColorType) void {
 
 fn waitForConfirm() bool {
     while (true) {
-        pollSystem(); // FIX: USB HID Polling
-        if (keyboard.getKey()) |key| {
+        pollSystem();
+        if (getAnyKey()) |key| {
             if (key == '\n' or key == '\r') {
                 return true;
             }
@@ -1478,8 +1526,8 @@ fn waitForConfirm() bool {
 
 fn waitForEnter() bool {
     while (true) {
-        pollSystem(); // FIX: USB HID Polling
-        if (keyboard.getKey()) |key| {
+        pollSystem();
+        if (getAnyKey()) |key| {
             if (key == '\n' or key == '\r') return true;
             if (key == 0x1B) return false;
         }
@@ -1508,13 +1556,16 @@ fn delay(ms: u32) void {
 // =============================================================================
 
 pub fn isFirstBoot() bool {
-    if (identity_store.hasSavedIdentities()) return false;
-    if (config_store.hasSavedConfig()) return false;
+    // 🛡️ FIX: Logic diperketat. Jangan sekadar cek file config ada/tidaknya.
+    // Cek isi config secara spesifik.
+    if (identity_store.hasIdentityFile() and identity_store.hasSavedIdentities()) return false;
+
     if (config_store.isInitialized()) {
         if (config_store.get(KEY_CEREMONY_COMPLETE)) |val| {
             if (strEql(val, "true") or strEql(val, "1")) return false;
         }
     }
+
     if (identity.isInitialized() and identity.getIdentityCount() > 0) return false;
     return true;
 }
@@ -1578,6 +1629,7 @@ pub fn resetCeremony() bool {
     _ = config_store.delete(KEY_SYSTEM_OWNER);
     _ = config_store.delete(KEY_TRUST_ANCHOR);
 
+    // 🛡️ Explicitly set to false to make sure isFirstBoot detects it
     _ = config_store.set(KEY_CEREMONY_COMPLETE, "false");
     _ = config_store.saveToDisk();
 
@@ -1639,14 +1691,12 @@ fn formatU32(val: u32, buf: []u8) usize {
         if (buf.len > 0) buf[0] = '0';
         return 1;
     }
-
     var v = val;
     var i: usize = 0;
     while (v > 0 and i < buf.len) : (i += 1) {
         buf[i] = @intCast((v % 10) + '0');
         v /= 10;
     }
-
     var j: usize = 0;
     var k: usize = if (i > 0) i - 1 else 0;
     while (j < k) {
@@ -1727,13 +1777,10 @@ pub fn runTests() bool {
     {
         const was_complete = config_store.get(KEY_CEREMONY_COMPLETE);
         _ = config_store.delete(KEY_CEREMONY_COMPLETE);
-
         const is_first = isFirstBoot();
-
         if (was_complete) |val| {
             _ = config_store.set(KEY_CEREMONY_COMPLETE, val);
         }
-
         serial.writeString("PASS (");
         if (is_first) serial.writeString("first") else serial.writeString("not first");
         serial.writeString(")\n");
@@ -1787,9 +1834,7 @@ pub fn runTests() bool {
         }
         password_len = 10;
         name_len = 8;
-
         wipeAllBuffers();
-
         var all_zero = true;
         i = 0;
         while (i < 32) : (i += 1) {
@@ -1798,7 +1843,6 @@ pub fn runTests() bool {
                 break;
             }
         }
-
         if (all_zero and password_len == 0 and name_len == 0) {
             serial.writeString("PASS\n");
             passed += 1;
@@ -1930,7 +1974,6 @@ pub fn runTests() bool {
                 }
             }
         }
-
         if (different) {
             serial.writeString("PASS\n");
         } else {
