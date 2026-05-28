@@ -1,5 +1,5 @@
-//! Zamrud OS - P2P Shell Commands (H.3 + H.4 HARDENED)
-//! P2P network management, testing, Sybil defense, and Eclipse defense
+//! Zamrud OS - P2P Shell Commands (H.3 + H.4 HARDENED + P.3 ONION ROUTING)
+//! P2P network management, testing, Sybil defense, Eclipse defense, and Hardware Attestation.
 
 const helpers = @import("helpers.zig");
 const shell = @import("../shell.zig");
@@ -68,7 +68,7 @@ pub fn execute(args: []const u8) void {
 
 fn showHelp() void {
     shell.printInfoLine("========================================");
-    shell.printInfoLine("  P2P - Peer-to-Peer Network (H.3+H.4)");
+    shell.printInfoLine("  P2P - Peer-to-Peer Network (H.3+H.4+P.3)");
     shell.printInfoLine("========================================");
     shell.newLine();
 
@@ -76,16 +76,16 @@ fn showHelp() void {
     shell.newLine();
 
     shell.println("Commands:");
-    shell.println("  help              Show this help");
-    shell.println("  status            Show P2P node status");
-    shell.println("  start             Start P2P node");
-    shell.println("  stop              Stop P2P node");
-    shell.println("  id                Show node ID");
-    shell.println("  stats             Show statistics");
+    shell.println("  help            Show this help");
+    shell.println("  status          Show P2P node status");
+    shell.println("  start           Start P2P node");
+    shell.println("  stop            Stop P2P node");
+    shell.println("  id              Show node ID");
+    shell.println("  stats           Show statistics");
     shell.newLine();
 
     shell.println("Peer Management:");
-    shell.println("  peers             List connected peers");
+    shell.println("  peers           List connected peers");
     shell.println("  connect <ip:port> Connect to peer");
     shell.println("  disconnect <id>   Disconnect peer");
     shell.println("  discover          Run peer discovery");
@@ -111,7 +111,7 @@ fn showHelp() void {
     shell.newLine();
 
     shell.println("Testing:");
-    shell.println("  test              Run all P2P tests (55 tests)");
+    shell.println("  test              Run all P2P tests (H.3, H.4, P.3)");
     shell.println("  test quick        Quick health check");
     shell.println("  test h3           H.3 Sybil tests only");
     shell.println("  test h4           H.4 Eclipse tests only");
@@ -515,7 +515,7 @@ fn showAnchors() void {
         return;
     }
 
-    shell.println("  ID                             Trust");
+    shell.println("  ID                               Trust");
     shell.println("  -------------------------------- -------");
 
     for (anchors) |anchor_id| {
@@ -1256,7 +1256,7 @@ fn runQuickTest() void {
 }
 
 fn runAllTests() void {
-    helpers.printTestHeader("P2P TEST SUITE (H.3+H.4 HARDENED)");
+    helpers.printTestHeader("P2P TEST SUITE (H.3+H.4+P.3 HARDENED)");
 
     var passed: u32 = 0;
     var failed: u32 = 0;
@@ -1266,6 +1266,9 @@ fn runAllTests() void {
 
     // Run H.4 tests
     runH4TestsInternal(&passed, &failed);
+
+    // Run P.3 Onion Routing tests
+    runP3TestsInternal(&passed, &failed);
 
     // Summary
     helpers.printTestResults(passed, failed);
@@ -1291,6 +1294,40 @@ fn runH4Tests() void {
     runH4TestsInternal(&passed, &failed);
 
     helpers.printTestResults(passed, failed);
+}
+
+// =========================================================================
+// 🧅 P.3: P2P Protocol & Hardware Attestation Tests
+// =========================================================================
+fn runP3TestsInternal(passed: *u32, failed: *u32) void {
+    shell.newLine();
+    shell.printInfoLine("=== P.3: Onion Routing Protocol & Hardware DNA ===");
+
+    if (protocol.buildHandshake()) |handshake| {
+        passed.* += helpers.doTest("Build Handshake Payload", true, failed);
+
+        // Uji validasi Header
+        const valid_magic = (handshake.magic[0] == 'Z' and handshake.magic[1] == 'A');
+        passed.* += helpers.doTest("Verify Magic Bytes (ZAMNET01)", valid_magic, failed);
+        passed.* += helpers.doTest("Verify Protocol Version", handshake.version == protocol.PROTOCOL_VERSION, failed);
+
+        // Uji validasi tanda tangan kriptografis dari DNA Hardware
+        const validation = protocol.validateHandshake(&handshake);
+        passed.* += helpers.doTest("Validate Hardware Signature (Self)", validation == .Valid, failed);
+
+        // Simulasi Serangan: Seseorang mengubah 1 byte dari Hardware Hash di tengah jalan!
+        var tampered_handshake = handshake;
+        tampered_handshake.hardware_hash[0] ^= 0xFF; // Rusak hash-nya
+
+        const tamper_validation = protocol.validateHandshake(&tampered_handshake);
+        passed.* += helpers.doTest("Reject Tampered Hardware DNA", tamper_validation == .SignatureMismatch, failed);
+    } else {
+        passed.* += helpers.doTest("Build Handshake Payload", false, failed);
+        helpers.doSkip("Verify Magic Bytes (ZAMNET01)");
+        helpers.doSkip("Verify Protocol Version");
+        helpers.doSkip("Validate Hardware Signature (Self)");
+        helpers.doSkip("Reject Tampered Hardware DNA");
+    }
 }
 
 fn runH3TestsInternal(passed: *u32, failed: *u32) void {

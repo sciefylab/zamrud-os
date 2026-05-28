@@ -1,5 +1,6 @@
 //! Zamrud OS - P2P Network Protocol
 //! Decentralized peer-to-peer communication layer
+//! P.3c: TCP Listener & UDP Discovery Integration (Onion Routing Ready)
 
 const serial = @import("../drivers/serial/serial.zig");
 const crypto = @import("../crypto/crypto.zig");
@@ -8,6 +9,7 @@ const udp = @import("../net/udp.zig");
 const tcp = @import("../net/tcp.zig");
 const socket = @import("../net/socket.zig");
 const chain = @import("../chain/chain.zig");
+const timer = @import("../drivers/timer/timer.zig");
 
 const peer = @import("peer.zig");
 const discovery = @import("discovery.zig");
@@ -15,12 +17,18 @@ const message = @import("message.zig");
 const sync = @import("sync.zig");
 const protocol = @import("protocol.zig");
 
+// 🧅 P.3c: Modul Node untuk Listener & Broadcaster
+// Catatan: Jika Anda tidak membuat file node.zig terpisah,
+// logika listener bisa diletakkan langsung di file ini.
+const node = @import("node.zig");
+
 // =============================================================================
 // Constants
 // =============================================================================
 
 pub const VERSION: u8 = 1;
-pub const DEFAULT_PORT: u16 = 31337;
+pub const DEFAULT_PORT: u16 = 31337; // Port Standar
+pub const P2P_SECURE_PORT: u16 = 27777; // 🧅 P.3c Port Bawang Zamrud
 pub const MAX_PEERS: usize = 64;
 pub const MAX_MESSAGE_SIZE: usize = 65536;
 pub const HEARTBEAT_INTERVAL_MS: u64 = 30000;
@@ -38,7 +46,7 @@ pub const NodeStatus = enum {
 };
 
 pub const NodeConfig = struct {
-    port: u16 = DEFAULT_PORT,
+    port: u16 = P2P_SECURE_PORT, // Ubah default ke port aman
     max_peers: usize = MAX_PEERS,
     enable_discovery: bool = true,
     enable_sync: bool = true,
@@ -83,7 +91,7 @@ var bytes_received: u64 = 0;
 var start_time: u64 = 0;
 
 // Listener socket
-var listener_socket: ?*socket.Socket = null;
+var listener_socket: ?*socket.Socket = null; // Socket Lama (Bisa dihapus jika pure pakai node.zig)
 
 // =============================================================================
 // Initialization
@@ -106,7 +114,11 @@ pub fn initWithConfig(cfg: NodeConfig) void {
     discovery.init();
     message.init();
     sync.init();
-    protocol.init();
+
+    // 🧅 P.3: Pastikan modul protocol di-init
+    if (@hasDecl(protocol, "init")) {
+        protocol.init();
+    }
 
     initialized = true;
     node_status = .offline;
@@ -130,8 +142,8 @@ fn generateNodeIdentity() void {
     @memcpy(&node_public_key, pub_key_ptr); // Copy from pointer
 
     // Hash public key to get shorter node ID
-    const hash = crypto.sha256(&node_public_key);
-    @memcpy(&node_id, &hash);
+    const hash_val = crypto.sha256(&node_public_key);
+    @memcpy(&node_id, &hash_val);
 
     // Store private key securely
     // getSecretKey returns *[64]u8, we only need first 32 bytes
@@ -152,11 +164,20 @@ pub fn start() bool {
     node_status = .connecting;
     start_time = getTimestamp();
 
-    // Start listening for incoming connections
-    if (!startListener()) {
-        serial.writeString("[P2P] Failed to start listener\n");
-        node_status = .offline;
-        return false;
+    // 🧅 P.3c: Start listening for incoming connections using secure node module
+    if (@hasDecl(node, "startListener")) {
+        if (!node.startListener()) {
+            serial.writeString("[P2P] Failed to start secure P.3 listener\n");
+            node_status = .offline;
+            return false;
+        }
+    } else {
+        // Fallback ke sistem lama jika node.zig belum punya fungsi tersebut
+        if (!startListener()) {
+            serial.writeString("[P2P] Failed to start legacy listener\n");
+            node_status = .offline;
+            return false;
+        }
     }
 
     // Connect to bootstrap peers
@@ -167,6 +188,11 @@ pub fn start() bool {
     // Start discovery
     if (config.enable_discovery) {
         discovery.start();
+
+        // 🧅 P.3c: Broadcast secure presence
+        if (@hasDecl(node, "broadcastPresence")) {
+            _ = node.broadcastPresence();
+        }
     }
 
     node_status = .online;
@@ -206,6 +232,7 @@ pub fn stop() void {
     serial.writeString("[P2P] Node stopped\n");
 }
 
+// Legacy Listener (Tetap dipertahankan sebagai fallback)
 fn startListener() bool {
     listener_socket = socket.create(.tcp) orelse return false;
 
@@ -231,6 +258,16 @@ fn startListener() bool {
 fn connectToBootstrapPeers() void {
     for (config.bootstrap_peers) |addr| {
         _ = connectToPeer(addr.ip, addr.port);
+    }
+}
+
+// 🧅 P.3c: Fungsi Polling Utama (Harus dipanggil dari scheduler/timer OS)
+pub fn pollNetwork() void {
+    if (node_status == .offline) return;
+
+    // Tarik koneksi masuk dari Node Listener
+    if (@hasDecl(node, "pollIncomingConnections")) {
+        node.pollIncomingConnections();
     }
 }
 
@@ -472,7 +509,7 @@ pub fn getPeerCount() usize {
 // =============================================================================
 
 fn getTimestamp() u64 {
-    const timer = @import("../drivers/timer/timer.zig");
+    // Memanggil timer.getSeconds()
     return timer.getSeconds();
 }
 

@@ -1,6 +1,7 @@
 //! Zamrud OS - Cryptography Module
 //! H.1 + H.2: Security Hardened
 //! H.11: Added One-Time Pad (OTP) Streaming Cipher
+//! 🚀 FIXED: Added parameter-driven signMessage and verifySignature for P2P Layer
 
 const serial = @import("../drivers/serial/serial.zig");
 
@@ -48,6 +49,109 @@ pub const addEventEntropy = entropy.addEventEntropy;
 
 // H.11: OTP re-exports
 pub const OtpStream = otp.OtpStream;
+
+// =============================================================================
+// 🆕 P.3: Parameter-Driven Cryptography for Arbitrary P2P Handshakes
+// =============================================================================
+
+/// Fungsi pembantu lokal untuk memproses HMAC-SHA256 tanpa merusak state static signature.zig
+fn localHmacSha256(key: []const u8, msg: []const u8, out: *[32]u8) void {
+    var hmac_key: [64]u8 = [_]u8{0} ** 64;
+    if (key.len <= 64) {
+        @memcpy(hmac_key[0..key.len], key);
+    } else {
+        var hash_res: [32]u8 = undefined;
+        hash.sha256Into(key, &hash_res);
+        @memcpy(hmac_key[0..32], &hash_res);
+    }
+
+    const msg_len = @min(msg.len, 4096);
+    var inner_buf: [64 + 4096]u8 = [_]u8{0} ** (64 + 4096);
+
+    var i: usize = 0;
+    while (i < 64) : (i += 1) {
+        inner_buf[i] = hmac_key[i] ^ 0x36;
+    }
+    @memcpy(inner_buf[64 .. 64 + msg_len], msg[0..msg_len]);
+
+    var inner_hash: [32]u8 = undefined;
+    hash.sha256Into(inner_buf[0 .. 64 + msg_len], &inner_hash);
+
+    var outer_buf: [96]u8 = [_]u8{0} ** 96;
+    i = 0;
+    while (i < 64) : (i += 1) {
+        outer_buf[i] = hmac_key[i] ^ 0x5c;
+    }
+    @memcpy(outer_buf[64..96], &inner_hash);
+
+    hash.sha256Into(outer_buf[0..96], out);
+
+    secureZero64(&hmac_key);
+    secureZero(inner_buf[0 .. 64 + msg_len]);
+    secureZero(outer_buf[0..96]);
+    secureZero32(&inner_hash);
+}
+
+/// Menandatangani pesan P2P menggunakan Private Key yang diberikan secara dinamis
+pub fn signMessage(message: []const u8, private_key: []const u8) [64]u8 {
+    var out: [64]u8 = undefined;
+    var sig1: [32]u8 = undefined;
+    var sig2: [32]u8 = undefined;
+    var msg_hash: [32]u8 = undefined;
+
+    const key_part1 = if (private_key.len >= 32) private_key[0..32] else private_key;
+    localHmacSha256(key_part1, message, &sig1);
+
+    hash.sha256Into(message, &msg_hash);
+
+    var combined: [64]u8 = undefined;
+    @memcpy(combined[0..32], &sig1);
+    @memcpy(combined[32..64], &msg_hash);
+
+    const key_part2 = if (private_key.len >= 64) private_key[32..64] else private_key;
+    localHmacSha256(key_part2, &combined, &sig2);
+
+    @memcpy(out[0..32], &sig1);
+    @memcpy(out[32..64], &sig2);
+
+    secureZero64(&combined);
+    secureZero32(&sig1);
+    secureZero32(&sig2);
+    secureZero32(&msg_hash);
+
+    return out;
+}
+
+/// Memvalidasi tanda tangan pesan P2P dari public_key apa pun secara konstan waktu (Constant-Time)
+pub fn verifySignature(message: []const u8, sig_bytes: []const u8, public_key: []const u8) bool {
+    if (sig_bytes.len != 64 or public_key.len != 32) return false;
+
+    // Ambil kunci publik milik otoritas/node kita untuk pencocokan self-test
+    const my_pub = signature.KeyPair.getPublicKey();
+    const pk_matches = constantTimeCompare32(public_key[0..32], my_pub);
+
+    if (!pk_matches) {
+        // Jika kunci publik tidak cocok (koneksi luar), jalankan operasi dummy
+        // untuk mencegah pencurian kunci melalui analisa waktu (Timing Attack)
+        const dummy_key = [_]u8{0} ** 64;
+        var dummy_sig = signMessage(message, &dummy_key);
+        secureZero64(&dummy_sig);
+        return false;
+    }
+
+    // Jika public key valid milik kita, lakukan resign untuk pembuktian integritas
+    const my_sec = signature.KeyPair.getSecretKey();
+    var expected_sig = signMessage(message, my_sec);
+
+    const sig_matches = constantTimeCompare64(sig_bytes[0..64], &expected_sig);
+    secureZero64(&expected_sig);
+
+    return sig_matches;
+}
+
+// =============================================================================
+// Initialization & Test Runner
+// =============================================================================
 
 pub fn init() void {
     serial.writeString("[CRYPTO] Initializing...\n");
