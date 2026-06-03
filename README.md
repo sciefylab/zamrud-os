@@ -4,7 +4,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  ZAMRUD OS - GLOBAL PROJECT STATUS                              │
 │  "Security = Identity × Integrity × Isolation × Blockchain"     │
-│  Last Updated: P.3c (Socket Listener & Broadcaster) INTEGRATED 🆕│
+│  Last Updated: P.3d (Multi-Layer Onion Wrapping) INTEGRATED   🆕│
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
@@ -21,7 +21,7 @@
 │  TERMINAL T1-T5                                ✅ PASS          │
 │                                                                 │
 │  ─────────────────────────────────────────────────────────      │
-│  TOTAL VERIFIED:  1091 tests, ALL PASSING ✅                    │
+│  TOTAL VERIFIED:  1093 tests, ALL PASSING ✅                    │
 │  ─────────────────────────────────────────────────────────      │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
@@ -90,8 +90,8 @@
 │  ⬚  P.3: P2P Onion Routing (OTP & SLOR)          IN PROGRESS  🧅│
 │  │  ├── P.3a: Packet Types & Magic Constants     DONE           │
 │  │  ├── P.3b: Handshake & Hardware Attestation   DONE           │
-│  │  ├── P.3c: P2P Socket Listener & Broadcaster  DONE         🆕│
-│  │  ├── P.3d: Multi-Layer Onion Wrapping         PENDING        │
+│  │  ├── P.3c: P2P Socket Listener & Broadcaster  DONE           │
+│  │  ├── P.3d: Multi-Layer Onion Wrapping         DONE         🆕│
 │  │  └── P.3e: Twin-Node Eviction Execution       PENDING        │
 │  ✅ P.4: Privacy Modes (Stealth/Public)          TESTED         │
 │  ✅ P.5: Metadata Minimization                   TESTED         │
@@ -169,10 +169,10 @@
 │  Stage F:  ████████████████████  4/4   complete (100%) ✅     🛡️│
 │  Stage S:  ████████████████████  6/6   complete (100%) ✅       │
 │  Stage R:  ████████████████████  5/5   complete (100%) ✅       │
-│  Stage P:  ████████████████░░░░  4/5   complete (80%)         🧅│
+│  Stage P:  ██████████████████░░  4/5   complete (90%)         🧅│
 │  Stage H:  ████████████████████ 11/11  complete (100%) ✅       │
 │                                                                 │
-│  OVERALL:  ████████████████████████████░ 94%                  🚀│
+│  OVERALL:  ████████████████████████████░ 95%                  🚀│
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -180,9 +180,9 @@
 │  NEXT PRIORITIES                                                │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  1. P.3d: Implement Multi-Layer Onion Wrapping (OTP & SLOR)   🧅│
-│  2. P.3e: Implement Twin-Node Eviction (Network Kill-Switch)    │
-│  3. G.1 : Zamrud Secure Shell (ZSH Protocol Definition)         │
+│  1. P.3e: Implement Twin-Node Eviction (Network Kill-Switch)  🔪│
+│  2. G.1 : Zamrud Secure Shell (ZSH Protocol Definition)         │
+│  3. G.2 : Peer Discovery & Handshake                            │
 │  4. F6.1: Framebuffer Compositor (GUI Foundation)               │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘

@@ -1,5 +1,6 @@
 //! Zamrud OS - P2P Message Protocol
 //! Message encoding, decoding, and signing
+//! P.3d: Multi-Layer Onion Wrapping (OTP & SLOR Integration)
 
 const serial = @import("../drivers/serial/serial.zig");
 const crypto = @import("../crypto/crypto.zig");
@@ -22,6 +23,9 @@ pub const MessageType = enum(u8) {
     // Handshake
     handshake = 0x01,
     handshake_ack = 0x02,
+
+    // Onion Routing (P.3d)
+    onion_routed = 0x06,
 
     // Keepalive
     ping = 0x10,
@@ -58,6 +62,7 @@ pub const MessageType = enum(u8) {
         return switch (self) {
             .handshake => "HANDSHAKE",
             .handshake_ack => "HANDSHAKE_ACK",
+            .onion_routed => "ONION_ROUTED", // 🧅 Added for P.3d
             .ping => "PING",
             .pong => "PONG",
             .get_peers => "GET_PEERS",
@@ -113,7 +118,7 @@ pub fn init() void {
     messages_encoded = 0;
     messages_decoded = 0;
     initialized = true;
-    serial.writeString("[MSG] Message protocol initialized\n");
+    serial.writeString("[MSG] Message protocol initialized (P.3d Onion Ready)\n");
 }
 
 pub fn isInitialized() bool {
@@ -224,6 +229,33 @@ pub fn decode(data: []const u8) ?Message {
 }
 
 // =============================================================================
+// 🧅 P.3d: Onion Wrapping (OTP Payload Encryption/Decryption)
+// =============================================================================
+
+/// Encrypts the payload of a message IN-PLACE using OTP stream initialized by SLOR Shared Secret.
+/// This acts as wrapping one layer of the "Onion".
+pub fn encryptPayloadOtp(msg: *Message, shared_secret: *const [32]u8) void {
+    if (msg.payload_len == 0) return;
+
+    // Initialize OTP stream with the shared secret (from SLOR)
+    var stream = crypto.OtpStream.init(shared_secret);
+
+    // Process modifies the data directly via XOR without needing extra memory
+    const p_len: usize = @intCast(msg.payload_len);
+    stream.process(msg.payload[0..p_len]);
+
+    // Wipe stream
+    stream.destroy();
+}
+
+/// Decrypts the payload of an Onion message IN-PLACE.
+/// Because OTP is symmetric XOR, the decryption is identical to encryption.
+/// This acts as peeling one layer of the "Onion".
+pub fn decryptPayloadOtp(msg: *Message, shared_secret: *const [32]u8) void {
+    encryptPayloadOtp(msg, shared_secret); // Symmetric execution
+}
+
+// =============================================================================
 // Signing & Verification
 // =============================================================================
 
@@ -327,6 +359,24 @@ pub fn createGetPeers(node_id: [32]u8) Message {
         .payload_len = 0,
         .signature = [_]u8{0} ** SIGNATURE_SIZE,
     };
+}
+
+// 🧅 P.3d: Pembungkus Onion Routed Packet Builder
+pub fn createOnionRouted(node_id: [32]u8, raw_payload: []const u8) Message {
+    var msg = Message{
+        .msg_type = .onion_routed,
+        .sender_id = node_id,
+        .timestamp = getTimestamp(),
+        .payload = [_]u8{0} ** MAX_PAYLOAD_SIZE,
+        .payload_len = 0,
+        .signature = [_]u8{0} ** SIGNATURE_SIZE,
+    };
+
+    const copy_len = @min(raw_payload.len, MAX_PAYLOAD_SIZE);
+    @memcpy(msg.payload[0..copy_len], raw_payload[0..copy_len]);
+    msg.payload_len = @intCast(copy_len);
+
+    return msg;
 }
 
 // =============================================================================

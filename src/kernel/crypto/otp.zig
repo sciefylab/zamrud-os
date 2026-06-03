@@ -1,9 +1,9 @@
 //! Zamrud OS - One-Time Pad (OTP) Cipher
 //! H.11: Perfect Secrecy Streaming Cipher
+//! FIXED: Kernel Panic on Alignment Cast (@alignCast removed)
 //!
 //! Uses Zamrud CSPRNG (SHA-256 CTR) to generate a deterministic,
 //! infinitely long pad from a shared secret seed.
-//! Features ultra-fast 64-bit word XORing and secure memory wiping.
 
 const ct = @import("constant_time.zig");
 const hash = @import("hash.zig");
@@ -65,57 +65,17 @@ pub const OtpStream = struct {
         ct.secureZero(&input);
     }
 
-    /// Process (Encrypt/Decrypt) data in-place
-    /// OTP is symmetric: Encryption and Decryption use the exact same logic
+    /// Process (Encrypt/Decrypt) data in-place safely.
+    /// FIX: Simple byte-wise loop avoids hardware alignment issues.
+    /// LLVM will automatically vectorize this securely at compile time.
     pub fn process(self: *OtpStream, data: []u8) void {
         if (!self.is_active or data.len == 0) return;
 
-        var remaining = data.len;
-        var offset: usize = 0;
-
-        // 1. Process byte-by-byte until aligned to 8-byte boundary (for fast XOR)
-        while (remaining > 0 and (@intFromPtr(&data[offset]) % 8) != 0) {
+        var i: usize = 0;
+        while (i < data.len) : (i += 1) {
             if (self.buffer_pos >= 32) self.generateNextBlock();
-            data[offset] ^= self.buffer[self.buffer_pos];
+            data[i] ^= self.buffer[self.buffer_pos];
             self.buffer_pos += 1;
-            offset += 1;
-            remaining -= 1;
-        }
-
-        // 2. Fast 64-bit XOR (8 bytes at a time)
-        while (remaining >= 8) {
-            if (self.buffer_pos >= 32) self.generateNextBlock();
-
-            // If we have at least 8 bytes left in the pad buffer
-            if (32 - self.buffer_pos >= 8) {
-                const data_ptr: *u64 = @ptrCast(@alignCast(&data[offset]));
-                const pad_ptr: *const u64 = @ptrCast(@alignCast(&self.buffer[self.buffer_pos]));
-
-                data_ptr.* ^= pad_ptr.*;
-
-                self.buffer_pos += 8;
-                offset += 8;
-                remaining -= 8;
-            } else {
-                // Buffer wrap-around boundary, fallback to byte-wise for this chunk
-                var i: usize = 0;
-                while (i < 8) : (i += 1) {
-                    if (self.buffer_pos >= 32) self.generateNextBlock();
-                    data[offset + i] ^= self.buffer[self.buffer_pos];
-                    self.buffer_pos += 1;
-                }
-                offset += 8;
-                remaining -= 8;
-            }
-        }
-
-        // 3. Process remaining unaligned bytes
-        while (remaining > 0) {
-            if (self.buffer_pos >= 32) self.generateNextBlock();
-            data[offset] ^= self.buffer[self.buffer_pos];
-            self.buffer_pos += 1;
-            offset += 1;
-            remaining -= 1;
         }
     }
 

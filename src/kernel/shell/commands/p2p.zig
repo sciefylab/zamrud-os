@@ -14,6 +14,10 @@ const reputation = @import("../../p2p/reputation.zig");
 const sybil = @import("../../p2p/sybil_defense.zig");
 const eclipse = @import("../../p2p/eclipse_defense.zig");
 
+// Imports for P.3d Tests
+const slor = @import("../../crypto/slor.zig");
+const crypto = @import("../../crypto/crypto.zig");
+
 // =============================================================================
 // Main Entry Point
 // =============================================================================
@@ -1267,7 +1271,7 @@ fn runAllTests() void {
     // Run H.4 tests
     runH4TestsInternal(&passed, &failed);
 
-    // Run P.3 Onion Routing tests
+    // Run P.3 Onion Routing tests (includes P.3d Layering)
     runP3TestsInternal(&passed, &failed);
 
     // Summary
@@ -1297,11 +1301,11 @@ fn runH4Tests() void {
 }
 
 // =========================================================================
-// 🧅 P.3: P2P Protocol & Hardware Attestation Tests
+// 🧅 P.3: P2P Protocol, Onion Routing & Hardware Attestation Tests
 // =========================================================================
 fn runP3TestsInternal(passed: *u32, failed: *u32) void {
     shell.newLine();
-    shell.printInfoLine("=== P.3: Onion Routing Protocol & Hardware DNA ===");
+    shell.printInfoLine("=== P.3: Handshake Protocol & Hardware DNA ===");
 
     if (protocol.buildHandshake()) |handshake| {
         passed.* += helpers.doTest("Build Handshake Payload", true, failed);
@@ -1317,7 +1321,7 @@ fn runP3TestsInternal(passed: *u32, failed: *u32) void {
 
         // Simulasi Serangan: Seseorang mengubah 1 byte dari Hardware Hash di tengah jalan!
         var tampered_handshake = handshake;
-        tampered_handshake.hardware_hash[0] ^= 0xFF; // Rusak hash-nya
+        tampered_handshake.hardware_hash[0] ^= 0xFF;
 
         const tamper_validation = protocol.validateHandshake(&tampered_handshake);
         passed.* += helpers.doTest("Reject Tampered Hardware DNA", tamper_validation == .SignatureMismatch, failed);
@@ -1328,6 +1332,54 @@ fn runP3TestsInternal(passed: *u32, failed: *u32) void {
         helpers.doSkip("Validate Hardware Signature (Self)");
         helpers.doSkip("Reject Tampered Hardware DNA");
     }
+
+    // 🧅 P.3d: OTP & SLOR Onion Wrapping Tests
+    shell.newLine();
+    shell.printInfoLine("=== P.3d: Multi-Layer Onion Wrapping (OTP & SLOR) ===");
+
+    // 1. SLOR Key Exchange Simulation (Alice & Bob)
+    var pk: slor.SlorPublicKey = undefined;
+    var sk: slor.SlorSecretKey = undefined;
+    slor.generateKeyPair(&pk, &sk);
+
+    var ct_data: slor.SlorCiphertext = undefined;
+    var shared_secret_tx: [32]u8 = undefined;
+    var shared_secret_rx: [32]u8 = undefined;
+
+    slor.encapsulate(&pk, &ct_data, &shared_secret_tx);
+    slor.decapsulate(&sk, &ct_data, &shared_secret_rx);
+
+    passed.* += helpers.doTest("SLOR Shared Secret Agreement", crypto.constantTimeCompare32(&shared_secret_tx, &shared_secret_rx), failed);
+
+    // 2. Create Onion Packet
+    const plain_text = "TOP_SECRET_ZAMRUD_ROUTING_DATA";
+    var msg = message.createOnionRouted(p2p.getNodeId(), plain_text);
+    passed.* += helpers.doTest("Create Onion Routed Packet", msg.msg_type == .onion_routed, failed);
+
+    // 3. Encrypt Payload using OTP + SLOR Secret
+    message.encryptPayloadOtp(&msg, &shared_secret_tx);
+
+    // 🛠️ LOGIC FIX: Kita hanya mengecek apakah string sudah teracak (tidak identik 100% dengan teks asli)
+    var is_encrypted = false;
+    for (plain_text, 0..) |c, i| {
+        if (msg.payload[i] != c) {
+            is_encrypted = true; // Ketemu perbedaan, berarti enkripsi bekerja!
+            break;
+        }
+    }
+    passed.* += helpers.doTest("OTP Fast Payload Encryption (XOR)", is_encrypted, failed);
+
+    // 4. Decrypt Payload using Receiving Secret
+    message.decryptPayloadOtp(&msg, &shared_secret_rx);
+
+    var is_decrypted = true;
+    for (plain_text, 0..) |c, i| {
+        if (msg.payload[i] != c) {
+            is_decrypted = false;
+            break;
+        }
+    }
+    passed.* += helpers.doTest("OTP Payload Decryption", is_decrypted, failed);
 }
 
 fn runH3TestsInternal(passed: *u32, failed: *u32) void {
