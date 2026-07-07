@@ -1,6 +1,8 @@
 //! Zamrud OS - P2P Network Protocol
 //! Decentralized peer-to-peer communication layer
-//! P.3c: TCP Listener & UDP Discovery Integration (Onion Routing Ready)
+//! P.3c: TCP Listener & UDP Discovery Integration
+//! P.3d: Onion Routing Ready
+//! P.3e: Twin-Node Eviction Transport Ready
 
 const serial = @import("../drivers/serial/serial.zig");
 const crypto = @import("../crypto/crypto.zig");
@@ -16,10 +18,6 @@ const discovery = @import("discovery.zig");
 const message = @import("message.zig");
 const sync = @import("sync.zig");
 const protocol = @import("protocol.zig");
-
-// 🧅 P.3c: Modul Node untuk Listener & Broadcaster
-// Catatan: Jika Anda tidak membuat file node.zig terpisah,
-// logika listener bisa diletakkan langsung di file ini.
 const node = @import("node.zig");
 
 // =============================================================================
@@ -27,8 +25,8 @@ const node = @import("node.zig");
 // =============================================================================
 
 pub const VERSION: u8 = 1;
-pub const DEFAULT_PORT: u16 = 31337; // Port Standar
-pub const P2P_SECURE_PORT: u16 = 27777; // 🧅 P.3c Port Bawang Zamrud
+pub const DEFAULT_PORT: u16 = 31337;
+pub const P2P_SECURE_PORT: u16 = 27777;
 pub const MAX_PEERS: usize = 64;
 pub const MAX_MESSAGE_SIZE: usize = 65536;
 pub const HEARTBEAT_INTERVAL_MS: u64 = 30000;
@@ -46,7 +44,7 @@ pub const NodeStatus = enum {
 };
 
 pub const NodeConfig = struct {
-    port: u16 = P2P_SECURE_PORT, // Ubah default ke port aman
+    port: u16 = P2P_SECURE_PORT,
     max_peers: usize = MAX_PEERS,
     enable_discovery: bool = true,
     enable_sync: bool = true,
@@ -78,20 +76,17 @@ var initialized: bool = false;
 var node_status: NodeStatus = .offline;
 var config: NodeConfig = .{};
 
-// Our identity
 var node_id: [32]u8 = [_]u8{0} ** 32;
 var node_private_key: [32]u8 = [_]u8{0} ** 32;
 var node_public_key: [32]u8 = [_]u8{0} ** 32;
 
-// Statistics
 var messages_sent: u64 = 0;
 var messages_received: u64 = 0;
 var bytes_sent: u64 = 0;
 var bytes_received: u64 = 0;
 var start_time: u64 = 0;
 
-// Listener socket
-var listener_socket: ?*socket.Socket = null; // Socket Lama (Bisa dihapus jika pure pakai node.zig)
+var listener_socket: ?*socket.Socket = null;
 
 // =============================================================================
 // Initialization
@@ -106,16 +101,13 @@ pub fn initWithConfig(cfg: NodeConfig) void {
 
     config = cfg;
 
-    // Generate or load node identity
     generateNodeIdentity();
 
-    // Initialize sub-modules
     peer.init();
     discovery.init();
     message.init();
     sync.init();
 
-    // 🧅 P.3: Pastikan modul protocol di-init
     if (@hasDecl(protocol, "init")) {
         protocol.init();
     }
@@ -126,7 +118,8 @@ pub fn initWithConfig(cfg: NodeConfig) void {
     serial.writeString("[P2P] Node ID: ");
     printHex(node_id[0..8]);
     serial.writeString("...\n");
-    serial.writeString("[P2P] P2P network initialized\n");
+
+    serial.writeString("[P2P] P2P network initialized (P.3e transport ready)\n");
 }
 
 pub fn isInitialized() bool {
@@ -134,20 +127,15 @@ pub fn isInitialized() bool {
 }
 
 fn generateNodeIdentity() void {
-    // Generate keypair for this node
     crypto.KeyPair.generate();
 
-    // getPublicKey() returns *[32]u8, need to dereference properly
-    const pub_key_ptr = crypto.KeyPair.getPublicKey(); // *[32]u8
-    @memcpy(&node_public_key, pub_key_ptr); // Copy from pointer
+    const pub_key_ptr = crypto.KeyPair.getPublicKey();
+    @memcpy(&node_public_key, pub_key_ptr);
 
-    // Hash public key to get shorter node ID
     const hash_val = crypto.sha256(&node_public_key);
     @memcpy(&node_id, &hash_val);
 
-    // Store private key securely
-    // getSecretKey returns *[64]u8, we only need first 32 bytes
-    const secret_key_ptr = crypto.KeyPair.getSecretKey(); // *[64]u8
+    const secret_key_ptr = crypto.KeyPair.getSecretKey();
     @memcpy(&node_private_key, secret_key_ptr[0..32]);
 }
 
@@ -164,7 +152,6 @@ pub fn start() bool {
     node_status = .connecting;
     start_time = getTimestamp();
 
-    // 🧅 P.3c: Start listening for incoming connections using secure node module
     if (@hasDecl(node, "startListener")) {
         if (!node.startListener()) {
             serial.writeString("[P2P] Failed to start secure P.3 listener\n");
@@ -172,7 +159,6 @@ pub fn start() bool {
             return false;
         }
     } else {
-        // Fallback ke sistem lama jika node.zig belum punya fungsi tersebut
         if (!startListener()) {
             serial.writeString("[P2P] Failed to start legacy listener\n");
             node_status = .offline;
@@ -180,16 +166,13 @@ pub fn start() bool {
         }
     }
 
-    // Connect to bootstrap peers
     if (config.enable_discovery) {
         connectToBootstrapPeers();
     }
 
-    // Start discovery
     if (config.enable_discovery) {
         discovery.start();
 
-        // 🧅 P.3c: Broadcast secure presence
         if (@hasDecl(node, "broadcastPresence")) {
             _ = node.broadcastPresence();
         }
@@ -198,7 +181,6 @@ pub fn start() bool {
     node_status = .online;
     serial.writeString("[P2P] Node is online\n");
 
-    // Start sync if enabled
     if (config.enable_sync) {
         node_status = .syncing;
         sync.start();
@@ -213,16 +195,10 @@ pub fn stop() void {
 
     serial.writeString("[P2P] Stopping P2P node...\n");
 
-    // Stop sync
     sync.stop();
-
-    // Stop discovery
     discovery.stop();
-
-    // Disconnect all peers
     peer.disconnectAll();
 
-    // Close listener
     if (listener_socket) |sock| {
         socket.close(sock);
         listener_socket = null;
@@ -232,7 +208,6 @@ pub fn stop() void {
     serial.writeString("[P2P] Node stopped\n");
 }
 
-// Legacy Listener (Tetap dipertahankan sebagai fallback)
 fn startListener() bool {
     listener_socket = socket.create(.tcp) orelse return false;
 
@@ -261,14 +236,22 @@ fn connectToBootstrapPeers() void {
     }
 }
 
-// 🧅 P.3c: Fungsi Polling Utama (Harus dipanggil dari scheduler/timer OS)
+/// Main network polling function.
+/// Should be called periodically from scheduler/timer.
 pub fn pollNetwork() void {
     if (node_status == .offline) return;
 
-    // Tarik koneksi masuk dari Node Listener
     if (@hasDecl(node, "pollIncomingConnections")) {
         node.pollIncomingConnections();
     }
+
+    // P.3e maintenance: cleanup stale eviction votes
+    const eviction = @import("eviction.zig");
+    if (@hasDecl(eviction, "pollMaintenance")) {
+        eviction.pollMaintenance();
+    }
+
+    peer.checkTimeouts();
 }
 
 // =============================================================================
@@ -282,16 +265,13 @@ pub fn connectToPeer(ip: u32, port: u16) bool {
     printU16(port);
     serial.writeString("\n");
 
-    // Create socket
     const sock = socket.create(.tcp) orelse return false;
 
-    // Connect
     if (!socket.connect(sock, ip, port)) {
         socket.close(sock);
         return false;
     }
 
-    // Perform handshake
     if (!performHandshake(sock, ip, port)) {
         socket.close(sock);
         return false;
@@ -301,17 +281,15 @@ pub fn connectToPeer(ip: u32, port: u16) bool {
 }
 
 fn performHandshake(sock: *socket.Socket, ip: u32, port: u16) bool {
-    // Build handshake message
     var handshake = message.Message{
         .msg_type = .handshake,
         .sender_id = node_id,
         .timestamp = getTimestamp(),
-        .payload = undefined,
+        .payload = [_]u8{0} ** message.MAX_PAYLOAD_SIZE,
         .payload_len = 0,
-        .signature = undefined,
+        .signature = [_]u8{0} ** message.SIGNATURE_SIZE,
     };
 
-    // Add our info to payload
     const info = protocol.NodeInfo{
         .version = VERSION,
         .port = config.port,
@@ -321,12 +299,16 @@ fn performHandshake(sock: *socket.Socket, ip: u32, port: u16) bool {
 
     handshake.payload_len = protocol.encodeNodeInfo(&info, &handshake.payload);
 
-    // Sign message
     message.sign(&handshake, &node_private_key);
 
-    // Send handshake
     var buffer: [512]u8 = undefined;
     const len = message.encode(&handshake, &buffer);
+
+    if (len == 0) {
+        serial.writeString("[P2P] Failed to encode handshake\n");
+        return false;
+    }
+
     if (socket.send(sock, buffer[0..len]) < 0) {
         return false;
     }
@@ -334,9 +316,9 @@ fn performHandshake(sock: *socket.Socket, ip: u32, port: u16) bool {
     messages_sent += 1;
     bytes_sent += len;
 
-    // Wait for response
     var recv_buf: [512]u8 = undefined;
     const recv_len = socket.recv(sock, &recv_buf);
+
     if (recv_len <= 0) {
         return false;
     }
@@ -344,20 +326,22 @@ fn performHandshake(sock: *socket.Socket, ip: u32, port: u16) bool {
     messages_received += 1;
     bytes_received += @intCast(recv_len);
 
-    // Parse response
     const response = message.decode(recv_buf[0..@intCast(recv_len)]) orelse return false;
 
     if (response.msg_type != .handshake_ack) {
         return false;
     }
 
-    // Verify signature
+    if (peer.isBanned(response.sender_id)) {
+        serial.writeString("[P2P] Refusing handshake with banned peer\n");
+        return false;
+    }
+
     if (!message.verify(&response)) {
         serial.writeString("[P2P] Invalid signature from peer\n");
         return false;
     }
 
-    // Add peer
     _ = peer.add(response.sender_id, ip, port, sock);
 
     serial.writeString("[P2P] Handshake successful with ");
@@ -372,30 +356,37 @@ fn performHandshake(sock: *socket.Socket, ip: u32, port: u16) bool {
 // =============================================================================
 
 pub fn broadcast(msg_type: message.MessageType, payload: []const u8) void {
+    const copy_len = @min(payload.len, message.MAX_PAYLOAD_SIZE);
+
     var msg = message.Message{
         .msg_type = msg_type,
         .sender_id = node_id,
         .timestamp = getTimestamp(),
-        .payload = undefined,
-        .payload_len = @intCast(payload.len),
-        .signature = undefined,
+        .payload = [_]u8{0} ** message.MAX_PAYLOAD_SIZE,
+        .payload_len = @intCast(copy_len),
+        .signature = [_]u8{0} ** message.SIGNATURE_SIZE,
     };
 
-    // Copy payload
-    const copy_len = @min(payload.len, msg.payload.len);
-    @memcpy(msg.payload[0..copy_len], payload[0..copy_len]);
+    if (copy_len > 0) {
+        @memcpy(msg.payload[0..copy_len], payload[0..copy_len]);
+    }
 
-    // Sign message
     message.sign(&msg, &node_private_key);
 
-    // Encode
     var buffer: [MAX_MESSAGE_SIZE]u8 = undefined;
     const len = message.encode(&msg, &buffer);
 
-    // Send to all peers
+    if (len == 0) {
+        serial.writeString("[P2P] Broadcast encode failed\n");
+        return;
+    }
+
     const peers = peer.getAll();
+
     for (peers) |p| {
         if (p.status == .connected) {
+            if (peer.isBanned(p.id)) continue;
+
             if (p.socket) |s| {
                 _ = socket.send(s, buffer[0..len]);
                 messages_sent += 1;
@@ -405,26 +396,91 @@ pub fn broadcast(msg_type: message.MessageType, payload: []const u8) void {
     }
 }
 
-pub fn sendToPeer(peer_id: [32]u8, msg_type: message.MessageType, payload: []const u8) bool {
-    const p = peer.getById(peer_id) orelse return false;
-    if (p.status != .connected) return false;
+/// P.3e helper:
+/// Broadcast to all connected peers except a specific peer ID.
+/// Used so eviction votes/commits are not sent directly to the target.
+pub fn broadcastExcept(
+    excluded_peer_id: [32]u8,
+    msg_type: message.MessageType,
+    payload: []const u8,
+) void {
+    const copy_len = @min(payload.len, message.MAX_PAYLOAD_SIZE);
 
     var msg = message.Message{
         .msg_type = msg_type,
         .sender_id = node_id,
         .timestamp = getTimestamp(),
-        .payload = undefined,
-        .payload_len = @intCast(payload.len),
-        .signature = undefined,
+        .payload = [_]u8{0} ** message.MAX_PAYLOAD_SIZE,
+        .payload_len = @intCast(copy_len),
+        .signature = [_]u8{0} ** message.SIGNATURE_SIZE,
     };
 
-    const copy_len = @min(payload.len, msg.payload.len);
-    @memcpy(msg.payload[0..copy_len], payload[0..copy_len]);
+    if (copy_len > 0) {
+        @memcpy(msg.payload[0..copy_len], payload[0..copy_len]);
+    }
 
     message.sign(&msg, &node_private_key);
 
     var buffer: [MAX_MESSAGE_SIZE]u8 = undefined;
     const len = message.encode(&msg, &buffer);
+
+    if (len == 0) {
+        serial.writeString("[P2P] BroadcastExcept encode failed\n");
+        return;
+    }
+
+    const peers = peer.getAll();
+
+    for (peers) |p| {
+        if (p.status != .connected) continue;
+        if (peer.isBanned(p.id)) continue;
+
+        if (eqlBytes(&p.id, &excluded_peer_id)) {
+            continue;
+        }
+
+        if (p.socket) |s| {
+            _ = socket.send(s, buffer[0..len]);
+            messages_sent += 1;
+            bytes_sent += len;
+        }
+    }
+}
+
+pub fn sendToPeer(peer_id: [32]u8, msg_type: message.MessageType, payload: []const u8) bool {
+    if (peer.isBanned(peer_id)) {
+        serial.writeString("[P2P] Refusing send to banned peer\n");
+        return false;
+    }
+
+    const p = peer.getById(peer_id) orelse return false;
+
+    if (p.status != .connected) return false;
+
+    const copy_len = @min(payload.len, message.MAX_PAYLOAD_SIZE);
+
+    var msg = message.Message{
+        .msg_type = msg_type,
+        .sender_id = node_id,
+        .timestamp = getTimestamp(),
+        .payload = [_]u8{0} ** message.MAX_PAYLOAD_SIZE,
+        .payload_len = @intCast(copy_len),
+        .signature = [_]u8{0} ** message.SIGNATURE_SIZE,
+    };
+
+    if (copy_len > 0) {
+        @memcpy(msg.payload[0..copy_len], payload[0..copy_len]);
+    }
+
+    message.sign(&msg, &node_private_key);
+
+    var buffer: [MAX_MESSAGE_SIZE]u8 = undefined;
+    const len = message.encode(&msg, &buffer);
+
+    if (len == 0) {
+        serial.writeString("[P2P] sendToPeer encode failed\n");
+        return false;
+    }
 
     if (p.socket) |sock| {
         if (socket.send(sock, buffer[0..len]) >= 0) {
@@ -450,22 +506,25 @@ pub fn handleIncomingMessage(p: *peer.Peer, data: []const u8) void {
         return;
     };
 
-    // Verify signature
+    if (peer.isBanned(msg.sender_id)) {
+        serial.writeString("[P2P] Dropping message from banned peer\n");
+        return;
+    }
+
     if (!message.verify(&msg)) {
         serial.writeString("[P2P] Invalid message signature\n");
+        peer.decreaseReputation(p, 3);
         return;
     }
 
-    // Check sender matches peer
     if (!eqlBytes(&msg.sender_id, &p.id)) {
         serial.writeString("[P2P] Sender ID mismatch\n");
+        peer.decreaseReputation(p, 5);
         return;
     }
 
-    // Update peer activity
     p.last_seen = getTimestamp();
 
-    // Dispatch to protocol handler
     protocol.handleMessage(p, &msg);
 }
 
@@ -504,25 +563,43 @@ pub fn getPeerCount() usize {
     return peer.getConnectedCount();
 }
 
+pub fn getMessagesSent() u64 {
+    return messages_sent;
+}
+
+pub fn getMessagesReceived() u64 {
+    return messages_received;
+}
+
+pub fn getBytesSent() u64 {
+    return bytes_sent;
+}
+
+pub fn getBytesReceived() u64 {
+    return bytes_received;
+}
+
 // =============================================================================
 // Utilities
 // =============================================================================
 
 fn getTimestamp() u64 {
-    // Memanggil timer.getSeconds()
     return timer.getSeconds();
 }
 
 fn eqlBytes(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
+
     for (a, b) |x, y| {
         if (x != y) return false;
     }
+
     return true;
 }
 
 fn printHex(data: []const u8) void {
     const hex_chars = "0123456789abcdef";
+
     for (data) |b| {
         serial.writeChar(hex_chars[b >> 4]);
         serial.writeChar(hex_chars[b & 0xF]);
@@ -539,6 +616,7 @@ fn printU16(val: u16) void {
 
 fn printIp(ip: u32) void {
     const parts = net.u32ToIp(ip);
+
     printU8(parts.a);
     serial.writeChar('.');
     printU8(parts.b);
@@ -564,28 +642,27 @@ pub fn runTests() bool {
     var passed: u32 = 0;
     var failed: u32 = 0;
 
-    // Test 1: Initialization
     if (initialized) {
         passed += 1;
     } else {
         failed += 1;
     }
 
-    // Test 2: Node ID generated
     var has_id = false;
+
     for (node_id) |b| {
         if (b != 0) {
             has_id = true;
             break;
         }
     }
+
     if (has_id) {
         passed += 1;
     } else {
         failed += 1;
     }
 
-    // Test 3: Sub-modules initialized
     if (peer.isInitialized() and discovery.isInitialized() and message.isInitialized()) {
         passed += 1;
     } else {

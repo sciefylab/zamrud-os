@@ -4,11 +4,11 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  ZAMRUD OS - GLOBAL PROJECT STATUS                              │
 │  "Security = Identity × Integrity × Isolation × Blockchain"     │
-│  Last Updated: P.3d (Multi-Layer Onion Wrapping) INTEGRATED   🆕│
+│  Last Updated: P.3e Twin-Node Eviction + Firewall Kill-Switch ✅│
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  COMPLETED PHASES (Verified by testall)                         │
+│  COMPLETED PHASES (Verified by testall / module tests)          │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
 │  PHASE A: Kernel Foundation                    ✅ PASS          │
@@ -21,8 +21,12 @@
 │  TERMINAL T1-T5                                ✅ PASS          │
 │                                                                 │
 │  ─────────────────────────────────────────────────────────      │
-│  TOTAL VERIFIED:  1093 tests, ALL PASSING ✅                    │
+│  TOTAL VERIFIED:  1115+ tests, ALL PASSING ✅                   │
 │  ─────────────────────────────────────────────────────────      │
+│                                                                 │
+│  Latest verified modules:                                      │
+│  ✅ security test: 109 passed, 0 failed                         │
+│  ✅ p2p test:       8/8 passed                                  │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -82,24 +86,31 @@
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE P: Privacy & Anonymity                  🔄 4/5 (80%)     │
+│  STAGE P: Privacy & Anonymity                  ✅ 5/5 (100%) 🧅 │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
 │  ✅ P.1: Anonymous Identity Generation           TESTED         │
 │  ✅ P.2: Pseudonymous Mode                       TESTED         │
-│  ⬚  P.3: P2P Onion Routing (OTP & SLOR)          IN PROGRESS  🧅│
+│  ✅ P.3: P2P Onion Routing + Defense Layer       TESTED         │
 │  │  ├── P.3a: Packet Types & Magic Constants     DONE           │
 │  │  ├── P.3b: Handshake & Hardware Attestation   DONE           │
 │  │  ├── P.3c: P2P Socket Listener & Broadcaster  DONE           │
-│  │  ├── P.3d: Multi-Layer Onion Wrapping         DONE         🆕│
-│  │  └── P.3e: Twin-Node Eviction Execution       PENDING        │
+│  │  ├── P.3d: Multi-Layer Onion Wrapping         DONE           │
+│  │  └── P.3e: Twin-Node Eviction Execution       DONE ✅        │
+│  │      ├── Authority-backed voter gate          PASS           │
+│  │      ├── Reputation health gate               PASS           │
+│  │      ├── Evidence hash                        PASS           │
+│  │      ├── Peer ban + discovery cleanup         PASS           │
+│  │      ├── Eclipse connection cleanup           PASS           │
+│  │      ├── Firewall Network Kill-Switch         PASS           │
+│  │      └── Safe test mode, no false lockdown    PASS           │
 │  ✅ P.4: Privacy Modes (Stealth/Public)          TESTED         │
 │  ✅ P.5: Metadata Minimization                   TESTED         │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE H: Security Hardening & Identity        ✅ 11/11 (100%)  │
+│  STAGE H: Security Hardening & Identity        ✅ 12/12 (100%)  │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
 │  ✅ H.1-H.6: Crypto, RNG, Boot, DHCP Sec         117 tests      │
@@ -108,6 +119,34 @@
 │  ✅ H.9: Memory Sanitization (Secure Wipe)       25 tests       │
 │  ✅ H.10: Anti-Quantum SLOR (Lattice KEM)        INTEGRATED     │
 │  ✅ H.11: One-Time Pad (OTP) Identity Encrypt    INTEGRATED     │
+│  ✅ H.12: Security Authority Registry            22 tests       │
+│  │  ├── Root Authority Registry                  PASS           │
+│  │  ├── Validator Registry                       PASS           │
+│  │  ├── Member / Guest Authority                 PASS           │
+│  │  ├── Vote / Commit Permission Gate            PASS           │
+│  │  ├── Quarantine / Restore                     PASS           │
+│  │  └── Revocation Enforcement                   PASS           │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ═══════════════════════════════════════════════════════════    │
+│  STAGE P2P: Decentralized Network Trust        ✅ PASS          │
+│  ═══════════════════════════════════════════════════════════    │
+│                                                                 │
+│  ✅ P2P Core Module                             PASS           │
+│  ✅ Peer Manager H.3/H.4/P.3e                   4/4 PASS        │
+│  ✅ Message Protocol                            6/6 PASS        │
+│  ✅ Authority-Backed Reputation                 15/15 PASS      │
+│  ✅ Sybil Defense H.3 + P.3e                    6/6 PASS        │
+│  ✅ Eclipse Defense H.4 + P.3e                  5/5 PASS        │
+│  ✅ P.3 Handshake / Onion                       PASS           │
+│  ✅ P.3e Twin-Node Eviction                     5/5 PASS        │
+│                                                                 │
+│  Core Trust Flow:                                               │
+│  security/authority.zig  = authority source-of-truth            │
+│  p2p/reputation.zig      = behavior score + forced ban          │
+│  p2p/eviction.zig        = twin-node eviction enforcement       │
+│  net/firewall.zig        = network kill-switch                  │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -155,6 +194,8 @@
 │  Session Encryption:    ⭐⭐⭐⭐⭐   <- H.11 OTP READY            │
 │  App Signing (Lattice): ⭐⭐⭐⭐⭐   <- E3.6 ENFORCING            │
 │  Hardware Sovereignty:  ⭐⭐⭐⭐⭐   <- F4.3 ANTI-EVIL MAID     ✅│
+│  Authority Governance:  ⭐⭐⭐⭐⭐   <- H.12 SOURCE-OF-TRUTH    ✅│
+│  Network Kill-Switch:   ⭐⭐⭐⭐⭐   <- P.3e FIREWALL ENFORCED  ✅│
 │                                                                 │
 │  OVERALL:  ⭐⭐⭐⭐⭐ (Nation-State Grade Security)               │
 │                                                                 │
@@ -169,10 +210,32 @@
 │  Stage F:  ████████████████████  4/4   complete (100%) ✅     🛡️│
 │  Stage S:  ████████████████████  6/6   complete (100%) ✅       │
 │  Stage R:  ████████████████████  5/5   complete (100%) ✅       │
-│  Stage P:  ██████████████████░░  4/5   complete (90%)         🧅│
-│  Stage H:  ████████████████████ 11/11  complete (100%) ✅       │
+│  Stage P:  ████████████████████  5/5   complete (100%) ✅     🧅│
+│  Stage H:  ████████████████████ 12/12  complete (100%) ✅       │
+│  Stage P2P:████████████████████  8/8   complete (100%) ✅       │
+│  Stage G:  ░░░░░░░░░░░░░░░░░░░░  0/6   complete (0%)            │
+│  Stage F6: ░░░░░░░░░░░░░░░░░░░░  0/6   complete (0%)            │
 │                                                                 │
-│  OVERALL:  ████████████████████████████░ 95%                  🚀│
+│  OVERALL:  ██████████████████████████████░ 97%                🚀│
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ═══════════════════════════════════════════════════════════    │
+│  CURRENT VERIFIED COMMANDS                                      │
+│  ═══════════════════════════════════════════════════════════    │
+│                                                                 │
+│  ✅ security test                                                │
+│     └── 109 passed, 0 failed                                    │
+│                                                                 │
+│  ✅ p2p test                                                     │
+│     └── 8/8 passed OK                                           │
+│                                                                 │
+│  ✅ P.3e firewall integration                                    │
+│     ├── peer ban PASS                                           │
+│     ├── discovery cleanup PASS                                  │
+│     ├── firewall block PASS                                     │
+│     ├── flow drop path PASS                                     │
+│     └── safe test mode PASS                                     │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -180,10 +243,29 @@
 │  NEXT PRIORITIES                                                │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  1. P.3e: Implement Twin-Node Eviction (Network Kill-Switch)  🔪│
-│  2. G.1 : Zamrud Secure Shell (ZSH Protocol Definition)         │
-│  3. G.2 : Peer Discovery & Handshake                            │
-│  4. F6.1: Framebuffer Compositor (GUI Foundation)               │
+│  1. Security Authority Shell Command                           🔐│
+│     ├── security authority                                      │
+│     ├── security authority status                               │
+│     ├── security authority list                                 │
+│     ├── security authority revoked                              │
+│     └── security authority stats                                │
+│                                                                 │
+│  2. Blockchain Audit Hooks                                      ⛓️│
+│     ├── authority registered                                    │
+│     ├── authority revoked                                       │
+│     ├── authority quarantined                                   │
+│     ├── P.3e eviction executed                                  │
+│     └── firewall kill-switch triggered                          │
+│                                                                 │
+│  3. P.3 Vote / Commit Signature Verification                    🧾│
+│     ├── signed eviction_vote                                    │
+│     ├── signed eviction_commit                                  │
+│     ├── reject forged vote                                      │
+│     └── reject unsigned commit                                  │
+│                                                                 │
+│  4. G.1 : Zamrud Secure Shell (ZSH Protocol Definition)         │
+│  5. G.2 : Peer Discovery & Handshake                            │
+│  6. F6.1: Framebuffer Compositor (GUI Foundation)               │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```

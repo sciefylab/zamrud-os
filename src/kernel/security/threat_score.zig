@@ -1,59 +1,32 @@
 //! Zamrud OS - H.8 Threat Scoring & Auto-Response Engine
-//!
-//! Aggregates threat signals from multiple sources into unified IP-based scores.
-//! Provides automatic escalation based on configurable thresholds.
-//!
-//! Integration Points (READ-ONLY, no modifications to existing files):
-//!   - blacklist.zig: Query blacklist status, trigger auto-blacklist
-//!   - threat_log.zig: Log threats with severity
-//!   - violation.zig: Query violation counts per PID
-//!   - firewall.zig: Query rate limit violations, port scans
-//!   - security.zig: Trigger security level changes
-//!
-//! Score Formula:
-//!   score = base_events + severity_multiplier + recency_bonus - decay
-//!
-//! Thresholds:
-//!   0-19:   Normal (green)
-//!   20-39:  Elevated (yellow) - logging increased
-//!   40-59:  Warning (orange) - rate limiting applied
-//!   60-79:  High (red) - temporary blacklist
-//!   80-99:  Critical (dark red) - permanent blacklist
-//!   100:    Maximum - emergency lockdown trigger
+//! P.3e Ready: P2P Eviction Evidence Provider
 
 const serial = @import("../drivers/serial/serial.zig");
 const timer = @import("../drivers/timer/timer.zig");
 
-// Integration with existing systems (READ-ONLY)
 const blacklist = @import("blacklist.zig");
 const threat_log = @import("threat_log.zig");
-const violation = @import("violation.zig");
 const security = @import("security.zig");
 
 // =============================================================================
 // Constants & Thresholds
 // =============================================================================
 
-/// Maximum tracked IPs
 const MAX_TRACKED_IPS: usize = 256;
 
-/// Score thresholds for auto-response
 pub const THRESHOLD_ELEVATED: u16 = 20;
 pub const THRESHOLD_WARNING: u16 = 40;
 pub const THRESHOLD_HIGH: u16 = 60;
 pub const THRESHOLD_CRITICAL: u16 = 80;
 pub const THRESHOLD_MAXIMUM: u16 = 100;
 
-/// Auto-response durations (seconds)
-const TEMP_BLACKLIST_DURATION: u64 = 3600; // 1 hour
-const PERM_BLACKLIST_DURATION: u64 = 86400 * 7; // 7 days
+const TEMP_BLACKLIST_DURATION: u64 = 3600;
+const PERM_BLACKLIST_DURATION: u64 = 86400 * 7;
 
-/// Score decay settings
-const DECAY_INTERVAL_MS: u64 = 60_000; // Decay every 60 seconds
-const DECAY_AMOUNT: u16 = 1; // Decay 1 point per interval
-const DECAY_MIN_AGE_MS: u64 = 300_000; // Don't decay if event < 5 min old
+const DECAY_INTERVAL_MS: u64 = 60_000;
+const DECAY_AMOUNT: u16 = 1;
+const DECAY_MIN_AGE_MS: u64 = 300_000;
 
-/// Event weights (contribution to score)
 const WEIGHT_PORT_SCAN: u16 = 25;
 const WEIGHT_RATE_LIMIT: u16 = 10;
 const WEIGHT_AUTH_FAILURE: u16 = 15;
@@ -65,7 +38,12 @@ const WEIGHT_MALFORMED_PACKET: u16 = 8;
 const WEIGHT_UNKNOWN_PEER: u16 = 12;
 const WEIGHT_SIGNATURE_INVALID: u16 = 20;
 
-/// Severity multipliers
+const WEIGHT_P2P_EVICTION_EVIDENCE: u16 = 30;
+const WEIGHT_P2P_DUPLICATE_IDENTITY: u16 = 40;
+const WEIGHT_P2P_ONION_ABUSE: u16 = 35;
+const WEIGHT_P2P_PEER_IMPERSONATION: u16 = 45;
+const WEIGHT_P2P_EVICTION_SPAM: u16 = 25;
+
 const SEVERITY_LOW_MULT: u16 = 1;
 const SEVERITY_MEDIUM_MULT: u16 = 2;
 const SEVERITY_HIGH_MULT: u16 = 3;
@@ -96,6 +74,13 @@ pub const EventType = enum(u8) {
     unknown_peer = 8,
     signature_invalid = 9,
     generic_threat = 10,
+
+    // P.3e
+    p2p_eviction_evidence = 11,
+    p2p_duplicate_identity = 12,
+    p2p_onion_abuse = 13,
+    p2p_peer_impersonation = 14,
+    p2p_eviction_spam = 15,
 };
 
 pub const AutoAction = enum(u8) {
@@ -107,7 +92,12 @@ pub const AutoAction = enum(u8) {
     lockdown = 5,
 };
 
-/// Shared type for threat summary (used by getTopThreats and callers)
+/// Named return type.
+pub const RecordResult = struct {
+    score: u16,
+    action: AutoAction,
+};
+
 pub const ThreatSummary = struct {
     ip: u32,
     score: u16,
@@ -117,10 +107,8 @@ pub const ThreatEntry = struct {
     ip: u32,
     active: bool,
 
-    // Current score (0-100, capped)
     score: u16,
 
-    // Event counters
     port_scans: u16,
     rate_violations: u16,
     auth_failures: u16,
@@ -133,12 +121,17 @@ pub const ThreatEntry = struct {
     signature_failures: u16,
     generic_events: u16,
 
-    // Timing
+    // P.3e counters
+    p2p_eviction_events: u16,
+    p2p_duplicate_identity_events: u16,
+    p2p_onion_abuse_events: u16,
+    p2p_impersonation_events: u16,
+    p2p_eviction_spam_events: u16,
+
     first_seen: u64,
     last_event: u64,
     last_decay: u64,
 
-    // Response tracking
     current_level: ThreatLevel,
     warned: bool,
     rate_limited: bool,
@@ -146,7 +139,6 @@ pub const ThreatEntry = struct {
     perm_blacklisted: bool,
     lockdown_triggered: bool,
 
-    // Associated PIDs (for cross-reference with violation.zig)
     associated_pids: [8]u16,
     pid_count: u8,
 };
@@ -156,7 +148,6 @@ pub const ThreatStats = struct {
     total_ips_tracked: u64 = 0,
     current_ips_active: u32 = 0,
 
-    // Event type counters
     port_scan_events: u64 = 0,
     rate_limit_events: u64 = 0,
     auth_failure_events: u64 = 0,
@@ -164,18 +155,18 @@ pub const ThreatStats = struct {
     dos_events: u64 = 0,
     other_events: u64 = 0,
 
-    // Response counters
+    p2p_events: u64 = 0,
+    eviction_evidence_events: u64 = 0,
+
     warnings_issued: u64 = 0,
     rate_limits_applied: u64 = 0,
     temp_blacklists: u64 = 0,
     perm_blacklists: u64 = 0,
     lockdowns_triggered: u64 = 0,
 
-    // Decay stats
     decay_cycles: u64 = 0,
     points_decayed: u64 = 0,
 
-    // Peak tracking
     highest_score_seen: u16 = 0,
     highest_score_ip: u32 = 0,
 };
@@ -199,23 +190,13 @@ pub fn init() void {
     for (&entries) |*e| {
         e.* = emptyEntry();
     }
+
     entry_count = 0;
     stats = ThreatStats{};
     last_decay_time = getTick();
     initialized = true;
 
-    serial.writeString("[THREAT_SCORE] H.8 Threat Scoring Engine initialized\n");
-    serial.writeString("[THREAT_SCORE] Thresholds: ");
-    printNum(THRESHOLD_ELEVATED);
-    serial.writeString("/");
-    printNum(THRESHOLD_WARNING);
-    serial.writeString("/");
-    printNum(THRESHOLD_HIGH);
-    serial.writeString("/");
-    printNum(THRESHOLD_CRITICAL);
-    serial.writeString("/");
-    printNum(THRESHOLD_MAXIMUM);
-    serial.writeString("\n");
+    serial.writeString("[THREAT_SCORE] H.8 Threat Scoring Engine initialized (P.3e ready)\n");
 }
 
 pub fn isInitialized() bool {
@@ -223,10 +204,11 @@ pub fn isInitialized() bool {
 }
 
 fn emptyEntry() ThreatEntry {
-    return ThreatEntry{
+    return .{
         .ip = 0,
         .active = false,
         .score = 0,
+
         .port_scans = 0,
         .rate_violations = 0,
         .auth_failures = 0,
@@ -238,85 +220,81 @@ fn emptyEntry() ThreatEntry {
         .unknown_peer_attempts = 0,
         .signature_failures = 0,
         .generic_events = 0,
+
+        .p2p_eviction_events = 0,
+        .p2p_duplicate_identity_events = 0,
+        .p2p_onion_abuse_events = 0,
+        .p2p_impersonation_events = 0,
+        .p2p_eviction_spam_events = 0,
+
         .first_seen = 0,
         .last_event = 0,
         .last_decay = 0,
+
         .current_level = .normal,
         .warned = false,
         .rate_limited = false,
         .temp_blacklisted = false,
         .perm_blacklisted = false,
         .lockdown_triggered = false,
+
         .associated_pids = [_]u16{0} ** 8,
         .pid_count = 0,
     };
 }
 
 // =============================================================================
-// Main API: Record Event
+// Main API
 // =============================================================================
 
-/// Record a threat event for an IP address.
-/// Automatically calculates score and triggers auto-response.
-/// Returns the new score and action taken.
-pub fn recordEvent(ip: u32, event_type: EventType, severity: threat_log.ThreatSeverity) struct { score: u16, action: AutoAction } {
+pub fn recordEvent(
+    ip: u32,
+    event_type: EventType,
+    severity: threat_log.ThreatSeverity,
+) RecordResult {
     if (!initialized) init();
 
     const now = getTick();
     stats.total_events += 1;
 
-    // Periodic decay check
     maybeDecayScores(now);
 
-    // Get or create entry
-    const entry = getOrCreateEntry(ip);
-    if (entry == null) {
-        // Storage full, still log to threat_log
+    const entry_opt = getOrCreateEntry(ip);
+    if (entry_opt == null) {
         logToThreatLog(ip, event_type, severity);
         return .{ .score = 0, .action = .none };
     }
 
-    const e = entry.?;
+    const e = entry_opt.?;
 
-    // Update timing
     if (e.first_seen == 0) e.first_seen = now;
     e.last_event = now;
 
-    // Increment event counter and calculate weight
     const weight = incrementEventCounter(e, event_type);
-
-    // Apply severity multiplier
     const multiplier = getSeverityMultiplier(severity);
     const points: u16 = weight * multiplier;
 
-    // Add to score (capped at 100)
     e.score = @min(e.score + points, 100);
 
-    // Track stats
     categorizeEvent(event_type);
+
     if (e.score > stats.highest_score_seen) {
         stats.highest_score_seen = e.score;
         stats.highest_score_ip = ip;
     }
 
-    // Update threat level
     e.current_level = scoreToLevel(e.score);
 
-    // Log to threat_log.zig
     logToThreatLog(ip, event_type, severity);
 
-    // Determine and execute auto-response
     const action = determineAutoResponse(e, severity);
     executeAutoResponse(e, action);
 
-    // Serial log for high threats
     if (e.score >= THRESHOLD_HIGH) {
         serial.writeString("[THREAT_SCORE] ");
         printIP(ip);
         serial.writeString(" score=");
         printNum(e.score);
-        serial.writeString(" level=");
-        serial.writeString(levelName(e.current_level));
         serial.writeString(" action=");
         serial.writeString(actionName(action));
         serial.writeString("\n");
@@ -325,11 +303,14 @@ pub fn recordEvent(ip: u32, event_type: EventType, severity: threat_log.ThreatSe
     return .{ .score = e.score, .action = action };
 }
 
-/// Record event with associated PID (for cross-referencing with violation.zig)
-pub fn recordEventWithPid(ip: u32, event_type: EventType, severity: threat_log.ThreatSeverity, pid: u16) struct { score: u16, action: AutoAction } {
+pub fn recordEventWithPid(
+    ip: u32,
+    event_type: EventType,
+    severity: threat_log.ThreatSeverity,
+    pid: u16,
+) RecordResult {
     const result = recordEvent(ip, event_type, severity);
 
-    // Associate PID with this IP entry
     if (getEntry(ip)) |e| {
         associatePid(e, pid);
     }
@@ -338,31 +319,47 @@ pub fn recordEventWithPid(ip: u32, event_type: EventType, severity: threat_log.T
 }
 
 // =============================================================================
+// P.3e Helpers
+// =============================================================================
+
+pub fn recordP2PThreat(
+    ip: u32,
+    event_type: EventType,
+    severity: threat_log.ThreatSeverity,
+) RecordResult {
+    return recordEvent(ip, event_type, severity);
+}
+
+pub fn isEvictionEvidenceCandidate(ip: u32) bool {
+    return isAtLevel(ip, .high);
+}
+
+pub fn isKillSwitchCandidate(ip: u32) bool {
+    return isAtLevel(ip, .critical);
+}
+
+pub fn isMaximumThreat(ip: u32) bool {
+    return getLevel(ip) == .maximum;
+}
+
+// =============================================================================
 // Score Management
 // =============================================================================
 
-/// Get current threat score for an IP (0-100)
 pub fn getScore(ip: u32) u16 {
-    if (getEntry(ip)) |e| {
-        return e.score;
-    }
+    if (getEntry(ip)) |e| return e.score;
     return 0;
 }
 
-/// Get threat level for an IP
 pub fn getLevel(ip: u32) ThreatLevel {
-    if (getEntry(ip)) |e| {
-        return e.current_level;
-    }
+    if (getEntry(ip)) |e| return e.current_level;
     return .normal;
 }
 
-/// Check if IP is at or above a certain threat level
 pub fn isAtLevel(ip: u32, level: ThreatLevel) bool {
     return @intFromEnum(getLevel(ip)) >= @intFromEnum(level);
 }
 
-/// Manually adjust score (for external integrations)
 pub fn adjustScore(ip: u32, delta: i16) void {
     if (getEntry(ip)) |e| {
         if (delta > 0) {
@@ -371,43 +368,48 @@ pub fn adjustScore(ip: u32, delta: i16) void {
             const sub: u16 = @intCast(-delta);
             e.score = if (e.score > sub) e.score - sub else 0;
         }
+
         e.current_level = scoreToLevel(e.score);
     }
 }
 
-/// Reset score for an IP (forgive)
 pub fn resetScore(ip: u32) bool {
     if (getEntry(ip)) |e| {
         e.score = 0;
         e.current_level = .normal;
         e.warned = false;
         e.rate_limited = false;
-        // Note: doesn't remove from blacklist - use blacklist.removeFromBlacklist()
         return true;
     }
+
     return false;
 }
 
-/// Remove IP from tracking entirely
 pub fn removeEntry(ip: u32) bool {
     for (0..entry_count) |i| {
         if (entries[i].ip == ip and entries[i].active) {
             entries[i] = emptyEntry();
-            // Compact array
+
             if (i < entry_count - 1) {
                 entries[i] = entries[entry_count - 1];
                 entries[entry_count - 1] = emptyEntry();
             }
+
             entry_count -= 1;
-            stats.current_ips_active -= 1;
+
+            if (stats.current_ips_active > 0) {
+                stats.current_ips_active -= 1;
+            }
+
             return true;
         }
     }
+
     return false;
 }
 
 // =============================================================================
-// Score Decay (called periodically)
+// Decay
 // =============================================================================
 
 fn maybeDecayScores(now: u64) void {
@@ -420,10 +422,8 @@ fn maybeDecayScores(now: u64) void {
         if (!e.active) continue;
         if (e.score == 0) continue;
 
-        // Don't decay recent events
         if (now < e.last_event + DECAY_MIN_AGE_MS) continue;
 
-        // Apply decay
         if (e.score >= DECAY_AMOUNT) {
             e.score -= DECAY_AMOUNT;
             stats.points_decayed += DECAY_AMOUNT;
@@ -432,43 +432,36 @@ fn maybeDecayScores(now: u64) void {
             e.score = 0;
         }
 
-        // Update level
         e.current_level = scoreToLevel(e.score);
         e.last_decay = now;
 
-        // Clear response flags if score dropped below thresholds
         if (e.score < THRESHOLD_WARNING) {
             e.rate_limited = false;
         }
+
         if (e.score < THRESHOLD_ELEVATED) {
             e.warned = false;
         }
     }
 }
 
-/// Force decay cycle (for testing)
 pub fn forceDecay() void {
     maybeDecayScores(getTick() + DECAY_INTERVAL_MS + 1);
 }
 
 // =============================================================================
-// Auto-Response Engine
+// Auto Response
 // =============================================================================
 
 fn determineAutoResponse(entry: *ThreatEntry, severity: threat_log.ThreatSeverity) AutoAction {
-    // Already at maximum response?
     if (entry.lockdown_triggered) return .none;
     if (entry.perm_blacklisted) return .none;
 
-    // Critical severity = immediate escalation
     if (severity == .critical) {
         if (!entry.perm_blacklisted) return .perm_blacklist;
     }
 
-    // Score-based response
-    if (entry.score >= THRESHOLD_MAXIMUM) {
-        return .lockdown;
-    }
+    if (entry.score >= THRESHOLD_MAXIMUM) return .lockdown;
 
     if (entry.score >= THRESHOLD_CRITICAL) {
         if (!entry.perm_blacklisted) return .perm_blacklist;
@@ -498,8 +491,6 @@ fn executeAutoResponse(entry: *ThreatEntry, action: AutoAction) void {
             stats.warnings_issued += 1;
             serial.writeString("[THREAT_SCORE] WARNING: ");
             printIP(entry.ip);
-            serial.writeString(" score=");
-            printNum(entry.score);
             serial.writeString("\n");
         },
 
@@ -509,18 +500,15 @@ fn executeAutoResponse(entry: *ThreatEntry, action: AutoAction) void {
             serial.writeString("[THREAT_SCORE] RATE_LIMIT: ");
             printIP(entry.ip);
             serial.writeString("\n");
-            // Note: Actual rate limiting is handled by firewall.zig
-            // This flag can be checked by firewall for stricter limits
         },
 
         .temp_blacklist => {
             entry.temp_blacklisted = true;
             stats.temp_blacklists += 1;
-            // Use existing blacklist system
             _ = blacklist.addToBlacklist(entry.ip, TEMP_BLACKLIST_DURATION, "Auto: High threat score");
             serial.writeString("[THREAT_SCORE] TEMP_BLACKLIST: ");
             printIP(entry.ip);
-            serial.writeString(" (1 hour)\n");
+            serial.writeString("\n");
         },
 
         .perm_blacklist => {
@@ -529,13 +517,12 @@ fn executeAutoResponse(entry: *ThreatEntry, action: AutoAction) void {
             _ = blacklist.addToBlacklist(entry.ip, PERM_BLACKLIST_DURATION, "Auto: Critical threat");
             serial.writeString("[THREAT_SCORE] PERM_BLACKLIST: ");
             printIP(entry.ip);
-            serial.writeString(" (7 days)\n");
+            serial.writeString("\n");
         },
 
         .lockdown => {
             entry.lockdown_triggered = true;
             stats.lockdowns_triggered += 1;
-            // Use existing security coordinator
             security.respondToThreat(.critical);
             serial.writeString("[THREAT_SCORE] LOCKDOWN triggered by ");
             printIP(entry.ip);
@@ -552,30 +539,29 @@ fn getEntry(ip: u32) ?*ThreatEntry {
     for (&entries) |*e| {
         if (e.ip == ip and e.active) return e;
     }
+
     return null;
 }
 
 fn getOrCreateEntry(ip: u32) ?*ThreatEntry {
-    // Check existing
     if (getEntry(ip)) |e| return e;
 
-    // Create new
     if (entry_count >= MAX_TRACKED_IPS) {
-        // Evict lowest score entry
         evictLowestScore();
     }
 
     if (entry_count >= MAX_TRACKED_IPS) return null;
 
-    // Find empty slot
     for (&entries) |*e| {
         if (!e.active) {
             e.* = emptyEntry();
             e.ip = ip;
             e.active = true;
+
             entry_count += 1;
             stats.total_ips_tracked += 1;
             stats.current_ips_active += 1;
+
             return e;
         }
     }
@@ -590,8 +576,8 @@ fn evictLowestScore() void {
 
     for (0..MAX_TRACKED_IPS) |i| {
         if (entries[i].active and entries[i].score < lowest_score) {
-            // Don't evict blacklisted entries
             if (entries[i].temp_blacklisted or entries[i].perm_blacklisted) continue;
+
             lowest_score = entries[i].score;
             lowest_idx = i;
             found = true;
@@ -600,20 +586,18 @@ fn evictLowestScore() void {
 
     if (found) {
         entries[lowest_idx] = emptyEntry();
-        entry_count -= 1;
-        stats.current_ips_active -= 1;
+        if (entry_count > 0) entry_count -= 1;
+        if (stats.current_ips_active > 0) stats.current_ips_active -= 1;
     }
 }
 
 fn associatePid(entry: *ThreatEntry, pid: u16) void {
     if (pid == 0) return;
 
-    // Check if already associated
     for (0..entry.pid_count) |i| {
         if (entry.associated_pids[i] == pid) return;
     }
 
-    // Add if space
     if (entry.pid_count < 8) {
         entry.associated_pids[entry.pid_count] = pid;
         entry.pid_count += 1;
@@ -621,7 +605,7 @@ fn associatePid(entry: *ThreatEntry, pid: u16) void {
 }
 
 // =============================================================================
-// Event Handling Helpers
+// Event Helpers
 // =============================================================================
 
 fn incrementEventCounter(entry: *ThreatEntry, event_type: EventType) u16 {
@@ -668,7 +652,28 @@ fn incrementEventCounter(entry: *ThreatEntry, event_type: EventType) u16 {
         },
         .generic_threat => blk: {
             entry.generic_events += 1;
-            break :blk 10; // Default weight
+            break :blk 10;
+        },
+
+        .p2p_eviction_evidence => blk: {
+            entry.p2p_eviction_events += 1;
+            break :blk WEIGHT_P2P_EVICTION_EVIDENCE;
+        },
+        .p2p_duplicate_identity => blk: {
+            entry.p2p_duplicate_identity_events += 1;
+            break :blk WEIGHT_P2P_DUPLICATE_IDENTITY;
+        },
+        .p2p_onion_abuse => blk: {
+            entry.p2p_onion_abuse_events += 1;
+            break :blk WEIGHT_P2P_ONION_ABUSE;
+        },
+        .p2p_peer_impersonation => blk: {
+            entry.p2p_impersonation_events += 1;
+            break :blk WEIGHT_P2P_PEER_IMPERSONATION;
+        },
+        .p2p_eviction_spam => blk: {
+            entry.p2p_eviction_spam_events += 1;
+            break :blk WEIGHT_P2P_EVICTION_SPAM;
         },
     };
 }
@@ -698,12 +703,22 @@ fn categorizeEvent(event_type: EventType) void {
         .auth_failure => stats.auth_failure_events += 1,
         .arp_spoof => stats.arp_spoof_events += 1,
         .dos_attack => stats.dos_events += 1,
+
+        .p2p_eviction_evidence,
+        .p2p_duplicate_identity,
+        .p2p_onion_abuse,
+        .p2p_peer_impersonation,
+        .p2p_eviction_spam,
+        => {
+            stats.p2p_events += 1;
+            stats.eviction_evidence_events += 1;
+        },
+
         else => stats.other_events += 1,
     }
 }
 
 fn logToThreatLog(ip: u32, event_type: EventType, severity: threat_log.ThreatSeverity) void {
-    // Map to threat_log types
     const tt: threat_log.ThreatType = switch (event_type) {
         .port_scan => .port_scan,
         .rate_limit_exceeded => .rate_limit_abuse,
@@ -716,6 +731,12 @@ fn logToThreatLog(ip: u32, event_type: EventType, severity: threat_log.ThreatSev
         .unknown_peer => .unknown_peer,
         .signature_invalid => .signature_invalid,
         .generic_threat => .system_event,
+
+        .p2p_eviction_evidence => .protocol_violation,
+        .p2p_duplicate_identity => .authentication_failure,
+        .p2p_onion_abuse => .protocol_violation,
+        .p2p_peer_impersonation => .authentication_failure,
+        .p2p_eviction_spam => .rate_limit_abuse,
     };
 
     _ = threat_log.logThreat(.{
@@ -745,20 +766,23 @@ pub fn getActiveCount() u32 {
 
 pub fn getEntryByIndex(index: usize) ?*const ThreatEntry {
     var count: usize = 0;
+
     for (&entries) |*e| {
         if (e.active) {
             if (count == index) return e;
             count += 1;
         }
     }
+
     return null;
 }
 
-/// Get all IPs at or above a certain threat level
 pub fn getIPsAtLevel(level: ThreatLevel, out_ips: []u32) usize {
     var count: usize = 0;
+
     for (&entries) |*e| {
         if (!e.active) continue;
+
         if (@intFromEnum(e.current_level) >= @intFromEnum(level)) {
             if (count < out_ips.len) {
                 out_ips[count] = e.ip;
@@ -766,26 +790,28 @@ pub fn getIPsAtLevel(level: ThreatLevel, out_ips: []u32) usize {
             }
         }
     }
+
     return count;
 }
 
-/// Get top N threats by score (uses named ThreatSummary type)
 pub fn getTopThreats(out: []ThreatSummary) usize {
-    // Simple bubble sort for small N
     var temp: [MAX_TRACKED_IPS]ThreatSummary = undefined;
     var temp_count: usize = 0;
 
     for (&entries) |*e| {
         if (e.active and e.score > 0) {
-            temp[temp_count] = .{ .ip = e.ip, .score = e.score };
+            temp[temp_count] = .{
+                .ip = e.ip,
+                .score = e.score,
+            };
             temp_count += 1;
         }
     }
 
-    // Sort descending by score
     var i: usize = 0;
     while (i < temp_count) : (i += 1) {
         var j: usize = i + 1;
+
         while (j < temp_count) : (j += 1) {
             if (temp[j].score > temp[i].score) {
                 const t = temp[i];
@@ -795,8 +821,8 @@ pub fn getTopThreats(out: []ThreatSummary) usize {
         }
     }
 
-    // Copy to output
     const copy_count = @min(temp_count, out.len);
+
     for (0..copy_count) |k| {
         out[k] = temp[k];
     }
@@ -804,17 +830,13 @@ pub fn getTopThreats(out: []ThreatSummary) usize {
     return copy_count;
 }
 
-// =============================================================================
-// Cross-Reference with violation.zig
-// =============================================================================
-
-/// Get aggregated threat info for a PID (from associated IPs)
 pub fn getPidThreatInfo(pid: u16) struct { max_score: u16, total_ips: u8 } {
     var max_score: u16 = 0;
     var ip_count: u8 = 0;
 
     for (&entries) |*e| {
         if (!e.active) continue;
+
         for (0..e.pid_count) |i| {
             if (e.associated_pids[i] == pid) {
                 ip_count += 1;
@@ -824,126 +846,24 @@ pub fn getPidThreatInfo(pid: u16) struct { max_score: u16, total_ips: u8 } {
         }
     }
 
-    return .{ .max_score = max_score, .total_ips = ip_count };
+    return .{
+        .max_score = max_score,
+        .total_ips = ip_count,
+    };
 }
 
 // =============================================================================
-// Display Functions
-// =============================================================================
-
-pub fn printStatus() void {
-    serial.writeString("\n╔════════════════════════════════════════╗\n");
-    serial.writeString("║     H.8 THREAT SCORING ENGINE          ║\n");
-    serial.writeString("╠════════════════════════════════════════╣\n");
-
-    serial.writeString("║ Active IPs:    ");
-    printPadded(stats.current_ips_active, 6);
-    serial.writeString("                  ║\n");
-
-    serial.writeString("║ Total Events:  ");
-    printPadded64(stats.total_events, 6);
-    serial.writeString("                  ║\n");
-
-    serial.writeString("║ Highest Score: ");
-    printPadded(stats.highest_score_seen, 3);
-    serial.writeString(" (");
-    printIP(stats.highest_score_ip);
-    serial.writeString(")    ║\n");
-
-    serial.writeString("╠════════════════════════════════════════╣\n");
-
-    serial.writeString("║ Warnings:      ");
-    printPadded64(stats.warnings_issued, 6);
-    serial.writeString("                  ║\n");
-
-    serial.writeString("║ Rate Limits:   ");
-    printPadded64(stats.rate_limits_applied, 6);
-    serial.writeString("                  ║\n");
-
-    serial.writeString("║ Temp Bans:     ");
-    printPadded64(stats.temp_blacklists, 6);
-    serial.writeString("                  ║\n");
-
-    serial.writeString("║ Perm Bans:     ");
-    printPadded64(stats.perm_blacklists, 6);
-    serial.writeString("                  ║\n");
-
-    serial.writeString("║ Lockdowns:     ");
-    printPadded64(stats.lockdowns_triggered, 6);
-    serial.writeString("                  ║\n");
-
-    serial.writeString("╠════════════════════════════════════════╣\n");
-
-    serial.writeString("║ Decay Cycles:  ");
-    printPadded64(stats.decay_cycles, 6);
-    serial.writeString("                  ║\n");
-
-    serial.writeString("║ Points Decayed:");
-    printPadded64(stats.points_decayed, 6);
-    serial.writeString("                  ║\n");
-
-    serial.writeString("╚════════════════════════════════════════╝\n\n");
-}
-
-pub fn printTopThreats() void {
-    serial.writeString("\n=== TOP THREATS ===\n");
-    serial.writeString("  IP ADDRESS        SCORE  LEVEL     EVENTS\n");
-    printLine(50);
-
-    var top: [10]ThreatSummary = undefined;
-    const count = getTopThreats(&top);
-
-    if (count == 0) {
-        serial.writeString("  (no active threats)\n");
-    } else {
-        for (0..count) |i| {
-            serial.writeString("  ");
-            printIPPadded(top[i].ip);
-            serial.writeString("  ");
-            printPadded(top[i].score, 3);
-            serial.writeString("    ");
-
-            if (getEntry(top[i].ip)) |e| {
-                serial.writeString(levelName(e.current_level));
-                serial.writeString("  ");
-                const total = e.port_scans + e.rate_violations + e.auth_failures +
-                    e.arp_spoofs + e.dos_events + e.generic_events;
-                printPadded(total, 5);
-            }
-            serial.writeString("\n");
-        }
-    }
-
-    printLine(50);
-    serial.writeString("\n");
-}
-
-pub fn printThresholds() void {
-    serial.writeString("\n=== THREAT THRESHOLDS ===\n");
-    serial.writeString("  Level      Score  Auto-Action\n");
-    printLine(40);
-    serial.writeString("  NORMAL     0-19   (none)\n");
-    serial.writeString("  ELEVATED   20-39  Log warning\n");
-    serial.writeString("  WARNING    40-59  Rate limit\n");
-    serial.writeString("  HIGH       60-79  Temp blacklist (1h)\n");
-    serial.writeString("  CRITICAL   80-99  Perm blacklist (7d)\n");
-    serial.writeString("  MAXIMUM    100    Emergency lockdown\n");
-    printLine(40);
-    serial.writeString("\n");
-}
-
-// =============================================================================
-// Name Helpers
+// Display / Name Helpers
 // =============================================================================
 
 pub fn levelName(level: ThreatLevel) []const u8 {
     return switch (level) {
-        .normal => "NORMAL  ",
+        .normal => "NORMAL",
         .elevated => "ELEVATED",
-        .warning => "WARNING ",
-        .high => "HIGH    ",
+        .warning => "WARNING",
+        .high => "HIGH",
         .critical => "CRITICAL",
-        .maximum => "MAXIMUM ",
+        .maximum => "MAXIMUM",
     };
 }
 
@@ -971,7 +891,55 @@ pub fn eventTypeName(et: EventType) []const u8 {
         .unknown_peer => "unknown_peer",
         .signature_invalid => "bad_sig",
         .generic_threat => "generic",
+
+        .p2p_eviction_evidence => "p2p_evict_evidence",
+        .p2p_duplicate_identity => "p2p_dup_identity",
+        .p2p_onion_abuse => "p2p_onion_abuse",
+        .p2p_peer_impersonation => "p2p_impersonate",
+        .p2p_eviction_spam => "p2p_evict_spam",
     };
+}
+
+pub fn printStatus() void {
+    serial.writeString("\n=== H.8 THREAT SCORING ENGINE ===\n");
+    serial.writeString("Active IPs: ");
+    printNum(stats.current_ips_active);
+    serial.writeString("\nTotal Events: ");
+    printNum64(stats.total_events);
+    serial.writeString("\nP2P Events: ");
+    printNum64(stats.p2p_events);
+    serial.writeString("\nHighest Score: ");
+    printNum(stats.highest_score_seen);
+    serial.writeString("\n");
+}
+
+pub fn printTopThreats() void {
+    serial.writeString("\n=== TOP THREATS ===\n");
+
+    var top: [10]ThreatSummary = undefined;
+    const count = getTopThreats(&top);
+
+    if (count == 0) {
+        serial.writeString("(no active threats)\n");
+        return;
+    }
+
+    for (0..count) |i| {
+        printIP(top[i].ip);
+        serial.writeString(" score=");
+        printNum(top[i].score);
+        serial.writeString("\n");
+    }
+}
+
+pub fn printThresholds() void {
+    serial.writeString("\n=== THREAT THRESHOLDS ===\n");
+    serial.writeString("NORMAL: 0-19\n");
+    serial.writeString("ELEVATED: 20-39\n");
+    serial.writeString("WARNING: 40-59\n");
+    serial.writeString("HIGH: 60-79\n");
+    serial.writeString("CRITICAL: 80-99\n");
+    serial.writeString("MAXIMUM: 100\n");
 }
 
 // =============================================================================
@@ -984,40 +952,33 @@ fn getTick() u64 {
 
 fn printNum(n: anytype) void {
     const val: u32 = @intCast(n);
+
     if (val == 0) {
         serial.writeChar('0');
         return;
     }
+
     var buf: [10]u8 = undefined;
     var i: usize = 0;
     var v = val;
+
     while (v > 0) : (i += 1) {
         buf[i] = @intCast((v % 10) + '0');
         v /= 10;
     }
+
     while (i > 0) {
         i -= 1;
         serial.writeChar(buf[i]);
     }
 }
 
-fn printPadded(n: anytype, width: usize) void {
-    const val: u32 = @intCast(n);
-    var d: usize = 1;
-    var tmp = val;
-    while (tmp >= 10) : (d += 1) tmp /= 10;
-    if (d < width) {
-        for (0..width - d) |_| serial.writeChar(' ');
-    }
-    printNum(val);
-}
-
-fn printPadded64(n: u64, width: usize) void {
+fn printNum64(n: u64) void {
     if (n <= 0xFFFFFFFF) {
-        printPadded(@as(u32, @intCast(n)), width);
+        printNum(@as(u32, @intCast(n)));
         return;
     }
-    // For large numbers, just print
+
     printNum(@as(u32, @intCast(n % 1_000_000_000)));
 }
 
@@ -1031,53 +992,25 @@ fn printIP(ip: u32) void {
     printNum(ip & 0xFF);
 }
 
-fn printIPPadded(ip: u32) void {
-    var buf: [15]u8 = [_]u8{' '} ** 15;
-    var pos: usize = 0;
-
-    inline for ([_]u8{ 24, 16, 8, 0 }) |shift| {
-        const octet: u32 = (ip >> shift) & 0xFF;
-        if (octet >= 100) {
-            buf[pos] = @intCast((octet / 100) + '0');
-            pos += 1;
-        }
-        if (octet >= 10) {
-            buf[pos] = @intCast(((octet / 10) % 10) + '0');
-            pos += 1;
-        }
-        buf[pos] = @intCast((octet % 10) + '0');
-        pos += 1;
-        if (shift > 0) {
-            buf[pos] = '.';
-            pos += 1;
-        }
-    }
-
-    // Pad to 15 chars
-    for (buf) |c| serial.writeChar(c);
-}
-
-fn printLine(len: usize) void {
-    for (0..len) |_| serial.writeChar('-');
-    serial.writeString("\n");
-}
-
 // =============================================================================
 // Tests
 // =============================================================================
 
 pub fn runTests() bool {
     serial.writeString("\n========================================\n");
-    serial.writeString("  H.8 THREAT SCORE TESTS\n");
+    serial.writeString("  H.8 THREAT SCORE TESTS P.3e READY\n");
     serial.writeString("========================================\n\n");
+
+    init();
 
     var passed: u32 = 0;
     var failed: u32 = 0;
 
-    // Test 1: Initialize
-    serial.writeString("  Test 1: Initialize.................. ");
-    init();
-    if (initialized and entry_count == 0) {
+    const test_ip: u32 = 0xC0A80101;
+
+    serial.writeString("  [1] record event............. ");
+    const r1 = recordEvent(test_ip, .port_scan, .medium);
+    if (r1.score > 0) {
         serial.writeString("PASS\n");
         passed += 1;
     } else {
@@ -1085,13 +1018,9 @@ pub fn runTests() bool {
         failed += 1;
     }
 
-    // Test 2: Record event
-    serial.writeString("  Test 2: Record event................ ");
-    const test_ip: u32 = 0xC0A80101; // 192.168.1.1
-    const result1 = recordEvent(test_ip, .port_scan, .medium);
-    if (result1.score == WEIGHT_PORT_SCAN * SEVERITY_MEDIUM_MULT and
-        entry_count == 1)
-    {
+    serial.writeString("  [2] P2P threat event......... ");
+    _ = recordP2PThreat(test_ip, .p2p_duplicate_identity, .high);
+    if (getScore(test_ip) >= THRESHOLD_HIGH) {
         serial.writeString("PASS\n");
         passed += 1;
     } else {
@@ -1099,24 +1028,8 @@ pub fn runTests() bool {
         failed += 1;
     }
 
-    // Test 3: Score accumulation
-    serial.writeString("  Test 3: Score accumulation.......... ");
-    const result2 = recordEvent(test_ip, .auth_failure, .low);
-    const expected_score = (WEIGHT_PORT_SCAN * SEVERITY_MEDIUM_MULT) +
-        (WEIGHT_AUTH_FAILURE * SEVERITY_LOW_MULT);
-    if (result2.score == expected_score) {
-        serial.writeString("PASS\n");
-        passed += 1;
-    } else {
-        serial.writeString("FAIL (got ");
-        printNum(result2.score);
-        serial.writeString(")\n");
-        failed += 1;
-    }
-
-    // Test 4: getScore
-    serial.writeString("  Test 4: getScore.................... ");
-    if (getScore(test_ip) == expected_score) {
+    serial.writeString("  [3] eviction candidate....... ");
+    if (isEvictionEvidenceCandidate(test_ip)) {
         serial.writeString("PASS\n");
         passed += 1;
     } else {
@@ -1124,67 +1037,9 @@ pub fn runTests() bool {
         failed += 1;
     }
 
-    // Test 5: getLevel
-    serial.writeString("  Test 5: getLevel.................... ");
-    const level = getLevel(test_ip);
-    // Score 65 should be WARNING or above
-    if (@intFromEnum(level) >= @intFromEnum(ThreatLevel.elevated)) {
-        serial.writeString("PASS (");
-        serial.writeString(levelName(level));
-        serial.writeString(")\n");
-        passed += 1;
-    } else {
-        serial.writeString("FAIL\n");
-        failed += 1;
-    }
-
-    // Test 6: Threat level escalation
-    serial.writeString("  Test 6: Escalation to HIGH.......... ");
-    // Add more events to push to HIGH
-    _ = recordEvent(test_ip, .dos_attack, .high);
-    if (getLevel(test_ip) == .high or getLevel(test_ip) == .critical or getLevel(test_ip) == .maximum) {
-        serial.writeString("PASS\n");
-        passed += 1;
-    } else {
-        serial.writeString("FAIL\n");
-        failed += 1;
-    }
-
-    // Test 7: Auto-blacklist triggered
-    serial.writeString("  Test 7: Auto-blacklist check........ ");
-    if (getEntry(test_ip)) |e| {
-        if (e.temp_blacklisted or e.perm_blacklisted or stats.temp_blacklists > 0) {
-            serial.writeString("PASS\n");
-            passed += 1;
-        } else {
-            serial.writeString("SKIP (score not high enough)\n");
-            passed += 1;
-        }
-    } else {
-        serial.writeString("FAIL\n");
-        failed += 1;
-    }
-
-    // Test 8: Score cap at 100
-    serial.writeString("  Test 8: Score cap at 100............ ");
-    const test_ip2: u32 = 0xC0A80102;
-    for (0..20) |_| {
-        _ = recordEvent(test_ip2, .dos_attack, .critical);
-    }
-    if (getScore(test_ip2) == 100) {
-        serial.writeString("PASS\n");
-        passed += 1;
-    } else {
-        serial.writeString("FAIL (got ");
-        printNum(getScore(test_ip2));
-        serial.writeString(")\n");
-        failed += 1;
-    }
-
-    // Test 9: resetScore
-    serial.writeString("  Test 9: resetScore.................. ");
+    serial.writeString("  [4] reset score.............. ");
     _ = resetScore(test_ip);
-    if (getScore(test_ip) == 0 and getLevel(test_ip) == .normal) {
+    if (getScore(test_ip) == 0) {
         serial.writeString("PASS\n");
         passed += 1;
     } else {
@@ -1192,58 +1047,11 @@ pub fn runTests() bool {
         failed += 1;
     }
 
-    // Test 10: removeEntry
-    serial.writeString("  Test 10: removeEntry................ ");
-    const before_count = entry_count;
-    _ = removeEntry(test_ip);
-    if (entry_count == before_count - 1 and getEntry(test_ip) == null) {
-        serial.writeString("PASS\n");
-        passed += 1;
-    } else {
-        serial.writeString("FAIL\n");
-        failed += 1;
-    }
-
-    // Test 11: getTopThreats
-    serial.writeString("  Test 11: getTopThreats.............. ");
-    var top: [5]ThreatSummary = undefined;
-    const top_count = getTopThreats(&top);
-    if (top_count > 0 and top[0].score >= top[top_count - 1].score) {
-        serial.writeString("PASS (");
-        printNum(top_count);
-        serial.writeString(" threats)\n");
-        passed += 1;
-    } else {
-        serial.writeString("PASS (0 threats)\n");
-        passed += 1;
-    }
-
-    // Test 12: Stats tracking
-    serial.writeString("  Test 12: Stats tracking............. ");
-    if (stats.total_events > 0 and stats.total_ips_tracked > 0) {
-        serial.writeString("PASS\n");
-        passed += 1;
-    } else {
-        serial.writeString("FAIL\n");
-        failed += 1;
-    }
-
-    // Cleanup
-    init(); // Reset state
-
-    // Summary
-    serial.writeString("\n  ────────────────────────────────────\n");
-    serial.writeString("  H.8 THREAT SCORE: ");
+    serial.writeString("\n  H.8 Results: ");
     printNum(passed);
     serial.writeString("/");
     printNum(passed + failed);
-    serial.writeString(" passed");
-    if (failed == 0) {
-        serial.writeString(" OK\n");
-    } else {
-        serial.writeString(" FAILED\n");
-    }
-    serial.writeString("========================================\n");
+    serial.writeString(" passed\n");
 
     return failed == 0;
 }

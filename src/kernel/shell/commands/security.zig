@@ -25,6 +25,8 @@ const net_driver = @import("../../drivers/network/network.zig");
 // E3.4: Network Capability
 const net_capability = @import("../../security/net_capability.zig");
 
+const authority = @import("../../security/authority.zig");
+
 // =============================================================================
 // Main Entry Point
 // =============================================================================
@@ -160,6 +162,7 @@ fn showHelp() void {
     shell.println("  test quick          Quick health check");
     shell.println("  test h8             Run H.8 threat scoring tests");
     shell.println("  test binary         Run E3.3/E3.6 Binary Verif tests");
+    shell.println("  test authority      Run Security Authority Registry tests");
     shell.newLine();
     shell.println("+===========================================================+");
     shell.newLine();
@@ -333,6 +336,55 @@ fn showStatus() void {
         shell.newLine();
         shell.print("    Procs Killed:   ");
         helpers.printU64(ns.processes_killed);
+        shell.newLine();
+    } else {
+        shell.println("    Not initialized");
+    }
+    shell.newLine();
+
+    // Security Authority Registry
+    shell.println("  [SECURITY AUTHORITY]");
+    if (authority.isInitialized()) {
+        const auth_stats = authority.getStats();
+
+        shell.print("    Authorities:    ");
+        helpers.printUsize(authority.getAuthorityCount());
+        shell.newLine();
+
+        shell.print("    Revoked:        ");
+        helpers.printUsize(authority.getRevokedCount());
+        shell.newLine();
+
+        shell.print("    Root:           ");
+        helpers.printU64(auth_stats.root_count);
+        shell.newLine();
+
+        shell.print("    Validators:     ");
+        helpers.printU64(auth_stats.validator_count);
+        shell.newLine();
+
+        shell.print("    Members:        ");
+        helpers.printU64(auth_stats.member_count);
+        shell.newLine();
+
+        shell.print("    Guests:         ");
+        helpers.printU64(auth_stats.guest_count);
+        shell.newLine();
+
+        shell.print("    Vote Allows:    ");
+        helpers.printU64(auth_stats.vote_allows);
+        shell.newLine();
+
+        shell.print("    Vote Denies:    ");
+        helpers.printU64(auth_stats.vote_denies);
+        shell.newLine();
+
+        shell.print("    Commit Allows:  ");
+        helpers.printU64(auth_stats.commit_allows);
+        shell.newLine();
+
+        shell.print("    Commit Denies:  ");
+        helpers.printU64(auth_stats.commit_denies);
         shell.newLine();
     } else {
         shell.println("    Not initialized");
@@ -974,6 +1026,14 @@ pub fn runTest(args: []const u8) void {
         shell.print(" passed, ");
         helpers.printU32(dummy_failed);
         shell.println(" failed");
+    } else if (helpers.strEql(opt, "authority")) {
+        var dummy_failed: u32 = 0;
+        const passed = testAuthorityRegistry(&dummy_failed);
+        shell.print("  Authority test: ");
+        helpers.printU32(passed);
+        shell.print(" passed, ");
+        helpers.printU32(dummy_failed);
+        shell.println(" failed");
     } else if (helpers.strEql(opt, "rules")) {
         var dummy_failed: u32 = 0;
         const passed = testRuleManagement(&dummy_failed);
@@ -1007,7 +1067,7 @@ pub fn runTest(args: []const u8) void {
         helpers.printU32(dummy_failed);
         shell.println(" failed");
     } else {
-        shell.println("Usage: security test [all|quick|h8|binary|rules|filter|blacklist|ratelimit]");
+        shell.println("Usage: security test [all|quick|h8|binary|authority|rules|filter|blacklist|ratelimit]");
     }
 }
 
@@ -1031,7 +1091,8 @@ fn runAllTests() void {
     passed += testStateMachine(&failed);
     passed += testIntegration(&failed);
     passed += testThreatScoring(&failed);
-    passed += testBinaryVerification(&failed); // 🆕 Test Kategori 11
+    passed += testBinaryVerification(&failed);
+    passed += testAuthorityRegistry(&failed);
 
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
@@ -1056,7 +1117,6 @@ fn runAllTests() void {
     shell.println("+===========================================================+");
     shell.newLine();
 }
-
 fn runQuickTest() void {
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
@@ -1587,6 +1647,163 @@ fn testBinaryVerification(failed: *u32) u32 {
 
     // Kembalikan status asli
     binaryverify.setEnforce(orig_enforce);
+
+    return passed;
+}
+
+fn testAuthorityRegistry(failed: *u32) u32 {
+    helpers.printTestCategory(12, 12, "Security Authority Registry");
+    var passed: u32 = 0;
+
+    if (@hasDecl(authority, "resetForTest")) {
+        authority.resetForTest();
+    } else if (!authority.isInitialized()) {
+        authority.init();
+    }
+
+    var root: [32]u8 = [_]u8{0} ** 32;
+    var validator: [32]u8 = [_]u8{0} ** 32;
+    var member: [32]u8 = [_]u8{0} ** 32;
+    var guest: [32]u8 = [_]u8{0} ** 32;
+    var hw: [32]u8 = [_]u8{0} ** 32;
+
+    root[0] = 0xF0;
+    validator[0] = 0xA1;
+    member[0] = 0xB2;
+    guest[0] = 0xC3;
+    hw[0] = 0x44;
+
+    passed += helpers.doTest(
+        "Authority initialized",
+        authority.isInitialized(),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Register root",
+        authority.registerRootAuthority(&root, "root"),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Root recognized",
+        authority.isRootAuthority(&root),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Register validator",
+        authority.registerValidator(&validator, &root, &hw, true, true, "validator"),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Validator recognized",
+        authority.isValidator(&validator),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Register member",
+        authority.registerMember(&member, &root, &hw, true, true, "member"),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Member recognized",
+        authority.isMemberOrHigher(&member),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Register guest",
+        authority.registerGuest(&guest, "guest"),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Guest known",
+        authority.isKnownAuthority(&guest),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Validator can vote",
+        authority.canVoteForEviction(&validator),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Validator can commit",
+        authority.canCommitEviction(&validator),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Guest denied vote",
+        !authority.canVoteForEviction(&guest),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Guest denied commit",
+        !authority.canCommitEviction(&guest),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Quarantine member",
+        authority.quarantineAuthority(&member),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Quarantine blocks vote",
+        !authority.canVoteForEviction(&member),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Restore member",
+        authority.restoreAuthority(&member),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Restored member known",
+        authority.isMemberOrHigher(&member),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Revoke validator",
+        authority.revokeAuthority(&validator),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Validator revoked",
+        authority.isRevoked(&validator),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Revoked commit denied",
+        !authority.canCommitEviction(&validator),
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Revoked count",
+        authority.getRevokedCount() > 0,
+        failed,
+    );
+
+    passed += helpers.doTest(
+        "Authority count valid",
+        authority.getAuthorityCount() >= 2,
+        failed,
+    );
 
     return passed;
 }

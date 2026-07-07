@@ -1,6 +1,17 @@
 //! Zamrud OS - P2P Network Node Manager
-//! P.3c: Socket Listener & Broadcaster (Anti-Evil Maid Integrated)
-//! Menangani TCP Listener untuk koneksi masuk dan UDP Broadcaster untuk Peer Discovery.
+//! P.3c: Socket Listener & Broadcaster
+//! P.3e Ready: Listener Dispatch for Twin-Node Eviction
+//!
+//! Responsibilities:
+//! - TCP listener for incoming P2P peers
+//! - UDP broadcaster for local discovery
+//! - Incoming handshake validation
+//! - Dispatch received peer messages into p2p.handleIncomingMessage()
+//!
+//! P.3e note:
+//! Eviction packets are not handled directly here.
+//! They flow through:
+//!   node.zig -> p2p.handleIncomingMessage() -> protocol.zig -> eviction.zig
 
 const serial = @import("../drivers/serial/serial.zig");
 const net = @import("../net/net.zig");
@@ -8,21 +19,38 @@ const socket = @import("../net/socket.zig");
 const timer = @import("../drivers/timer/timer.zig");
 const ahci = @import("../drivers/storage/ahci.zig");
 const hash = @import("../crypto/hash.zig");
+const crypto = @import("../crypto/crypto.zig");
+
+const peer = @import("peer.zig");
+const message = @import("message.zig");
+const protocol = @import("protocol.zig");
 
 // =============================================================================
 // Konfigurasi Port P2P Zamrud OS
 // =============================================================================
-pub const ZAMRUD_P2P_PORT: u16 = 27777; // Port rahasia untuk jaringan Bawang Zamrud
-pub const ZAMRUD_DISCOVERY_PORT: u16 = 27778; // UDP Port untuk broadcast lokal
 
-var is_listening = false;
-var tcp_listener_sock: ?*socket.Socket = null; // 🛠️ FIX: API socket.zig menggunakan pointer objek
+pub const ZAMRUD_P2P_PORT: u16 = 27777;
+pub const ZAMRUD_DISCOVERY_PORT: u16 = 27778;
+
+pub const MAX_ACCEPT_PER_POLL: usize = 4;
+pub const MAX_PEER_READ_PER_POLL: usize = 16;
 
 // =============================================================================
-// P2P Listener (The Ear) - Menerima Koneksi Masuk
+// State
 // =============================================================================
 
-/// Membuka Socket TCP dan mendengarkan permintaan dari Peer lain
+var is_listening: bool = false;
+var tcp_listener_sock: ?*socket.Socket = null;
+
+// Static buffers to reduce stack pressure
+var incoming_buffer: [message.MAX_PAYLOAD_SIZE + 256]u8 = undefined;
+var ack_buffer: [512]u8 = undefined;
+
+// =============================================================================
+// P2P Listener
+// =============================================================================
+
+/// Membuka socket TCP dan mendengarkan permintaan dari peer lain.
 pub fn startListener() bool {
     if (is_listening) return true;
 
@@ -30,14 +58,13 @@ pub fn startListener() bool {
     printU16(ZAMRUD_P2P_PORT);
     serial.writeString("...\n");
 
-    // 1. Buat Socket TCP (🛠️ FIX: Hanya 1 parameter .tcp sesuai socket.zig Anda)
     tcp_listener_sock = socket.create(.tcp);
+
     if (tcp_listener_sock == null) {
         serial.writeString("[P2P-NODE] Error: Failed to create TCP socket.\n");
         return false;
     }
 
-    // 2. Bind ke Port
     if (!socket.bind(tcp_listener_sock.?, 0, ZAMRUD_P2P_PORT)) {
         serial.writeString("[P2P-NODE] Error: Failed to bind TCP socket.\n");
         socket.close(tcp_listener_sock.?);
@@ -45,7 +72,6 @@ pub fn startListener() bool {
         return false;
     }
 
-    // 3. Mulai Listen (Antrian maksimal 32 peer simultan)
     if (!socket.listen(tcp_listener_sock.?, 32)) {
         serial.writeString("[P2P-NODE] Error: Failed to start listening.\n");
         socket.close(tcp_listener_sock.?);
@@ -54,25 +80,63 @@ pub fn startListener() bool {
     }
 
     is_listening = true;
+
     serial.writeString("[P2P-NODE] P2P Listener is now ACTIVE and waiting for peers.\n");
     return true;
 }
 
-/// Fungsi yang dipanggil secara berkala untuk mengecek peers masuk
+/// Stop listener.
+pub fn stopListener() void {
+    if (!is_listening) return;
+
+    if (tcp_listener_sock) |sock| {
+        socket.close(sock);
+        tcp_listener_sock = null;
+    }
+
+    is_listening = false;
+
+    serial.writeString("[P2P-NODE] Listener stopped\n");
+}
+
+pub fn isListening() bool {
+    return is_listening;
+}
+
+/// Fungsi yang dipanggil berkala dari scheduler/timer.
+/// Tugas:
+/// 1. Accept koneksi baru.
+/// 2. Poll message dari peer connected.
 pub fn pollIncomingConnections() void {
     if (!is_listening or tcp_listener_sock == null) return;
 
-    var peer_ip: u32 = 0;
-    var peer_port: u16 = 0;
+    acceptNewPeers();
+    pollConnectedPeerMessages();
+}
 
-    // Asumsi socket.accept tersedia. Jika tidak, blok ini otomatis diabaikan kompilator via @hasDecl
-    if (@hasDecl(socket, "accept")) {
+// =============================================================================
+// Accept Incoming Peers
+// =============================================================================
+
+fn acceptNewPeers() void {
+    if (!@hasDecl(socket, "accept")) return;
+
+    var accepted: usize = 0;
+
+    while (accepted < MAX_ACCEPT_PER_POLL) : (accepted += 1) {
+        var peer_ip: u32 = 0;
+        var peer_port: u16 = 0;
+
         if (socket.accept(tcp_listener_sock.?, &peer_ip, &peer_port)) |peer_sock| {
             serial.writeString("[P2P-NODE] Incoming connection from ");
             printIp(peer_ip);
+            serial.writeString(":");
+            printU16(peer_port);
             serial.writeString("\n");
 
-            handlePeerHandshake(peer_sock, peer_ip);
+            handlePeerHandshake(peer_sock, peer_ip, peer_port);
+        } else {
+            break;
         }
     }
 }
@@ -81,53 +145,187 @@ pub fn pollIncomingConnections() void {
 // Security Gateway: Validasi Peer Masuk
 // =============================================================================
 
-fn handlePeerHandshake(peer_sock: *socket.Socket, peer_ip: u32) void {
-    _ = peer_ip; // 🛠️ FIX: Membuang peringatan 'unused parameter' secara eksplisit
+fn handlePeerHandshake(peer_sock: *socket.Socket, peer_ip: u32, peer_port: u16) void {
+    const bytes_read = socket.recv(peer_sock, &incoming_buffer);
 
-    var buffer: [512]u8 = undefined;
-
-    // 🛠️ FIX: Menggunakan recv() alih-alih receive() sesuai modul Anda
-    const bytes_read = socket.recv(peer_sock, &buffer);
-
-    if (bytes_read > 0) {
-        // Karena kita menggunakan mode Sandbox/Isolasi di tahap ini,
-        // secara default kita tolak dan putus paket yang tidak dikenal
-        serial.writeString("[P2P-NODE] [DROP] Unrecognized Payload. Disconnecting.\n");
+    if (bytes_read <= 0) {
         socket.close(peer_sock);
-    } else {
+        return;
+    }
+
+    const n: usize = @intCast(bytes_read);
+
+    const msg = message.decode(incoming_buffer[0..n]) orelse {
+        serial.writeString("[P2P-NODE] [DROP] Failed to decode incoming handshake payload\n");
         socket.close(peer_sock);
+        return;
+    };
+
+    if (msg.msg_type != .handshake) {
+        serial.writeString("[P2P-NODE] [DROP] First packet is not handshake\n");
+        socket.close(peer_sock);
+        return;
+    }
+
+    if (peer.isBanned(msg.sender_id)) {
+        serial.writeString("[P2P-NODE] [DROP] Banned peer attempted handshake\n");
+        socket.close(peer_sock);
+        return;
+    }
+
+    if (!message.verify(&msg)) {
+        serial.writeString("[P2P-NODE] [DROP] Invalid handshake signature\n");
+        socket.close(peer_sock);
+        return;
+    }
+
+    const payload_len: usize = @intCast(msg.payload_len);
+
+    const info = protocol.decodeNodeInfo(msg.payload[0..payload_len]) orelse {
+        serial.writeString("[P2P-NODE] [DROP] Invalid NodeInfo in handshake\n");
+        socket.close(peer_sock);
+        return;
+    };
+
+    if (info.version != @import("p2p.zig").VERSION) {
+        serial.writeString("[P2P-NODE] [DROP] Unsupported peer protocol version\n");
+        socket.close(peer_sock);
+        return;
+    }
+
+    const added = peer.addInbound(msg.sender_id, peer_ip, peer_port, peer_sock);
+
+    if (added == null) {
+        serial.writeString("[P2P-NODE] [DROP] Failed to add inbound peer\n");
+        socket.close(peer_sock);
+        return;
+    }
+
+    const p = added.?;
+
+    p.public_key = info.public_key;
+    p.capabilities = info.capabilities;
+
+    if (!sendHandshakeAck(peer_sock)) {
+        serial.writeString("[P2P-NODE] Failed to send handshake ack\n");
+        peer.remove(msg.sender_id);
+        return;
+    }
+
+    serial.writeString("[P2P-NODE] Inbound handshake accepted from ");
+    printIp(peer_ip);
+    serial.writeString("\n");
+}
+
+fn sendHandshakeAck(peer_sock: *socket.Socket) bool {
+    const p2p = @import("p2p.zig");
+
+    var ack = message.Message{
+        .msg_type = .handshake_ack,
+        .sender_id = p2p.getNodeId(),
+        .timestamp = getTimestamp(),
+        .payload = [_]u8{0} ** message.MAX_PAYLOAD_SIZE,
+        .payload_len = 0,
+        .signature = [_]u8{0} ** message.SIGNATURE_SIZE,
+    };
+
+    const info = protocol.NodeInfo{
+        .version = p2p.VERSION,
+        .port = ZAMRUD_P2P_PORT,
+        .public_key = p2p.getPublicKey(),
+        .capabilities = protocol.CAP_FULL_NODE,
+    };
+
+    ack.payload_len = protocol.encodeNodeInfo(&info, &ack.payload);
+
+    var local_secret32: [32]u8 = [_]u8{0} ** 32;
+    const secret_key_ptr = crypto.KeyPair.getSecretKey();
+    @memcpy(&local_secret32, secret_key_ptr[0..32]);
+
+    message.sign(&ack, &local_secret32);
+
+    const len = message.encode(&ack, &ack_buffer);
+
+    if (len == 0) {
+        return false;
+    }
+
+    return socket.send(peer_sock, ack_buffer[0..len]) >= 0;
+}
+
+// =============================================================================
+// Poll Connected Peer Messages
+// =============================================================================
+
+fn pollConnectedPeerMessages() void {
+    const p2p = @import("p2p.zig");
+
+    const peers = peer.getAll();
+
+    var reads: usize = 0;
+
+    for (peers) |*p| {
+        if (reads >= MAX_PEER_READ_PER_POLL) break;
+        if (p.status != .connected) continue;
+        if (peer.isBanned(p.id)) continue;
+
+        if (p.socket) |sock| {
+            const bytes_read = socket.recv(sock, &incoming_buffer);
+
+            if (bytes_read > 0) {
+                const n: usize = @intCast(bytes_read);
+
+                p2p.handleIncomingMessage(p, incoming_buffer[0..n]);
+
+                reads += 1;
+            } else if (bytes_read < 0) {
+                // Negative value means socket-level error in current socket API style.
+                serial.writeString("[P2P-NODE] Peer socket read error, disconnecting\n");
+                peer.disconnect(p);
+                reads += 1;
+            }
+        }
     }
 }
 
 // =============================================================================
-// P2P Broadcaster (The Mouth) - Mencari Peer di Jaringan
+// P2P Broadcaster
 // =============================================================================
 
-/// Mengirimkan KTP Jaringan ke jaringan lokal via UDP Broadcast
+/// Mengirimkan KTP jaringan / hardware hint ke jaringan lokal via UDP broadcast.
+/// Catatan:
+/// Ini bukan full handshake. Ini hanya discovery beacon.
 pub fn broadcastPresence() bool {
-    // 1. Ambil Hardware DNA (Anti-Evil Maid Check)
     var hw_hash: [32]u8 = [_]u8{0} ** 32;
+
     if (ahci.isInitialized() and ahci.getDriveCount() > 0) {
         if (ahci.getDriveSerial(0)) |serial_str| {
             hash.sha256Into(serial_str, &hw_hash);
         }
     }
 
-    // 2. Buat UDP Socket
     const udp_sock = socket.create(.udp);
-    if (udp_sock == null) return false;
+
+    if (udp_sock == null) {
+        serial.writeString("[P2P-NODE] Failed to create UDP discovery socket\n");
+        return false;
+    }
 
     if (@hasDecl(socket, "setBroadcast")) {
         socket.setBroadcast(udp_sock.?, true);
     }
 
-    // IP 255.255.255.255 (Global Broadcast)
     const broadcast_ip: u32 = 0xFFFFFFFF;
 
     serial.writeString("[P2P-NODE] Broadcasting Node Identity to Network...\n");
 
     if (@hasDecl(socket, "sendTo")) {
-        _ = socket.sendTo(udp_sock.?, &hw_hash, broadcast_ip, ZAMRUD_DISCOVERY_PORT);
+        _ = socket.sendTo(
+            udp_sock.?,
+            &hw_hash,
+            broadcast_ip,
+            ZAMRUD_DISCOVERY_PORT,
+        );
     }
 
     socket.close(udp_sock.?);
@@ -135,22 +333,66 @@ pub fn broadcastPresence() bool {
 }
 
 // =============================================================================
+// P.3e Helper: Local Detection Entry Point
+// =============================================================================
+
+/// Convenience helper.
+/// Other subsystems may call this when node-level logic detects malicious peer behavior.
+pub fn reportPeerForEviction(
+    target_id: [32]u8,
+    target_ip: u32,
+    reason: @import("eviction.zig").EvictionReason,
+    detail: []const u8,
+) bool {
+    const eviction = @import("eviction.zig");
+
+    if (!@hasDecl(eviction, "reportLocalEvidence")) {
+        return false;
+    }
+
+    return eviction.reportLocalEvidence(target_id, target_ip, reason, detail);
+}
+
+// =============================================================================
+// Status
+// =============================================================================
+
+pub fn getListenerSocket() ?*socket.Socket {
+    return tcp_listener_sock;
+}
+
+pub fn getPort() u16 {
+    return ZAMRUD_P2P_PORT;
+}
+
+pub fn getDiscoveryPort() u16 {
+    return ZAMRUD_DISCOVERY_PORT;
+}
+
+// =============================================================================
 // Helpers untuk Mencetak Log
 // =============================================================================
+
+fn getTimestamp() u64 {
+    return timer.getSeconds();
+}
 
 fn printU16(val: u16) void {
     var buf: [5]u8 = undefined;
     var i: usize = 0;
     var v = val;
+
     if (v == 0) {
         serial.writeChar('0');
         return;
     }
+
     while (v > 0) {
         buf[i] = @intCast((v % 10) + '0');
         v /= 10;
         i += 1;
     }
+
     while (i > 0) {
         i -= 1;
         serial.writeChar(buf[i]);
@@ -158,12 +400,76 @@ fn printU16(val: u16) void {
 }
 
 fn printIp(ip: u32) void {
-    // Asumsi IP dalam format Little Endian (A.B.C.D)
-    printU16(@intCast(ip & 0xFF));
-    serial.writeChar('.');
-    printU16(@intCast((ip >> 8) & 0xFF));
+    printU16(@intCast((ip >> 24) & 0xFF));
     serial.writeChar('.');
     printU16(@intCast((ip >> 16) & 0xFF));
     serial.writeChar('.');
-    printU16(@intCast((ip >> 24) & 0xFF));
+    printU16(@intCast((ip >> 8) & 0xFF));
+    serial.writeChar('.');
+    printU16(@intCast(ip & 0xFF));
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+pub fn runTests() bool {
+    serial.writeString("\n========================================\n");
+    serial.writeString("  P2P NODE TESTS P.3c/P.3e\n");
+    serial.writeString("========================================\n\n");
+
+    var passed: u32 = 0;
+    var failed: u32 = 0;
+
+    serial.writeString("  [1] port constants........... ");
+    if (ZAMRUD_P2P_PORT == 27777 and ZAMRUD_DISCOVERY_PORT == 27778) {
+        serial.writeString("PASS\n");
+        passed += 1;
+    } else {
+        serial.writeString("FAIL\n");
+        failed += 1;
+    }
+
+    serial.writeString("  [2] listener state query..... ");
+    _ = isListening();
+    serial.writeString("PASS\n");
+    passed += 1;
+
+    serial.writeString("  [3] get ports................ ");
+    if (getPort() == ZAMRUD_P2P_PORT and getDiscoveryPort() == ZAMRUD_DISCOVERY_PORT) {
+        serial.writeString("PASS\n");
+        passed += 1;
+    } else {
+        serial.writeString("FAIL\n");
+        failed += 1;
+    }
+
+    serial.writeString("\n  Node Results: ");
+    printU32(passed);
+    serial.writeString("/");
+    printU32(passed + failed);
+    serial.writeString(" passed\n");
+
+    return failed == 0;
+}
+
+fn printU32(val: u32) void {
+    if (val == 0) {
+        serial.writeChar('0');
+        return;
+    }
+
+    var buf: [10]u8 = undefined;
+    var i: usize = 0;
+    var v = val;
+
+    while (v > 0) : (i += 1) {
+        buf[i] = @intCast((v % 10) + '0');
+        v /= 10;
+    }
+
+    while (i > 0) {
+        i -= 1;
+        serial.writeChar(buf[i]);
+    }
 }

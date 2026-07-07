@@ -2,6 +2,7 @@
 //! Stealth-mode firewall with Zero Trust architecture
 //! Updated: E3.4 Per-Process Network Filtering
 //! Updated: H.8 Threat Scoring Integration
+//! Updated: P.3e P2P Eviction Network Kill-Switch Integration
 
 const std = @import("std");
 const serial = @import("../drivers/serial/serial.zig");
@@ -10,7 +11,15 @@ const timer = @import("../drivers/timer/timer.zig");
 // ============================================================================
 // H.8 Integration
 // ============================================================================
+
 const threat_score = @import("../security/threat_score.zig");
+
+// ============================================================================
+// P.3e Eviction Firewall Integration
+// ============================================================================
+
+pub const P2P_EVICTION_BLACKLIST_DURATION_SEC: u64 = 86400 * 7; // 7 days
+pub const P2P_QUARANTINE_DURATION_SEC: u64 = 3600; // 1 hour
 
 // ============================================================================
 // Configuration
@@ -149,6 +158,12 @@ pub const FirewallStats = struct {
     blocked_syn_flood: u64 = 0,
     blocked_port_scan: u64 = 0,
     blocked_process_cap: u64 = 0,
+
+    // P.3e Network Kill-Switch
+    p2p_eviction_blocks: u64 = 0,
+    p2p_quarantine_blocks: u64 = 0,
+    flows_dropped_by_eviction: u64 = 0,
+
     connections_total: u64 = 0,
     connections_active: u64 = 0,
     last_reset: u64 = 0,
@@ -196,6 +211,12 @@ const PortScanTracker = struct {
 var scan_trackers: [MAX_SCAN_TRACKERS]PortScanTracker = undefined;
 var scan_tracker_count: usize = 0;
 
+// P.3e test mode.
+// When true, P.3e firewall calls still blacklist/drop flows,
+// but do not feed H.8 threat_score. This prevents p2p tests from
+// generating permanent threat escalation.
+var p3e_test_mode: bool = false;
+
 // ============================================================================
 // Initialization
 // ============================================================================
@@ -229,6 +250,7 @@ pub fn init() void {
     }
     scan_tracker_count = 0;
 
+    p3e_test_mode = false;
     stats = FirewallStats{};
 
     addDefaultRules();
@@ -250,13 +272,13 @@ pub fn init() void {
     if (config.stealth_mode) {
         serial.writeString("[FIREWALL] Stealth mode: ENABLED\n");
     }
+
     if (config.p2p_only_mode) {
         serial.writeString("[FIREWALL] P2P-only mode: ENABLED\n");
     }
 }
 
 fn addDefaultRules() void {
-    // Rule 1: Allow loopback
     _ = addRule(.{
         .id = 1,
         .priority = 0,
@@ -279,7 +301,6 @@ fn addDefaultRules() void {
         .description = makeDescription("Allow loopback"),
     });
 
-    // Rule 2: Block ICMP
     if (config.block_icmp) {
         _ = addRule(.{
             .id = 2,
@@ -304,7 +325,6 @@ fn addDefaultRules() void {
         });
     }
 
-    // Rule 3: Allow established (disabled)
     _ = addRule(.{
         .id = 3,
         .priority = 20,
@@ -324,10 +344,9 @@ fn addDefaultRules() void {
         .peer_id = null,
         .match_count = 0,
         .last_match = 0,
-        .description = makeDescription("Allow established (disabled)"),
+        .description = makeDescription("Allow established disabled"),
     });
 
-    // Rule 4: QEMU gateway
     _ = addRule(.{
         .id = 4,
         .priority = 15,
@@ -350,7 +369,6 @@ fn addDefaultRules() void {
         .description = makeDescription("QEMU gateway"),
     });
 
-    // Rule 5: QEMU DNS
     _ = addRule(.{
         .id = 5,
         .priority = 15,
@@ -373,7 +391,6 @@ fn addDefaultRules() void {
         .description = makeDescription("QEMU DNS"),
     });
 
-    // Rule 6: QEMU local subnet
     _ = addRule(.{
         .id = 6,
         .priority = 25,
@@ -396,7 +413,6 @@ fn addDefaultRules() void {
         .description = makeDescription("QEMU local subnet"),
     });
 
-    // Rule 100: Default deny inbound
     _ = addRule(.{
         .id = 100,
         .priority = 65534,
@@ -419,7 +435,6 @@ fn addDefaultRules() void {
         .description = makeDescription("Default deny inbound"),
     });
 
-    // Rule 101: Allow all outbound
     _ = addRule(.{
         .id = 101,
         .priority = 65535,
@@ -446,9 +461,11 @@ fn addDefaultRules() void {
 fn makeDescription(text: []const u8) [64]u8 {
     var desc: [64]u8 = [_]u8{0} ** 64;
     const len = @min(text.len, 63);
+
     for (0..len) |i| {
         desc[i] = text[i];
     }
+
     return desc;
 }
 
@@ -460,6 +477,7 @@ pub fn addRule(rule: Rule) bool {
     if (rule_count >= MAX_RULES) return false;
 
     var insert_pos: usize = rule_count;
+
     for (0..rule_count) |i| {
         if (rule.priority < rules[i].priority) {
             insert_pos = i;
@@ -476,6 +494,7 @@ pub fn addRule(rule: Rule) bool {
 
     rules[insert_pos] = rule;
     rule_count += 1;
+
     return true;
 }
 
@@ -485,10 +504,12 @@ pub fn removeRule(id: u32) bool {
             for (i..rule_count - 1) |j| {
                 rules[j] = rules[j + 1];
             }
+
             rule_count -= 1;
             return true;
         }
     }
+
     return false;
 }
 
@@ -499,6 +520,7 @@ pub fn enableRule(id: u32, enabled: bool) bool {
             return true;
         }
     }
+
     return false;
 }
 
@@ -541,6 +563,7 @@ pub fn addToBlacklist(ip: u32, duration_sec: u64, reason: []const u8) bool {
             for (oldest_idx..blacklist_count - 1) |j| {
                 blacklist[j] = blacklist[j + 1];
             }
+
             blacklist_count -= 1;
         } else {
             return false;
@@ -549,11 +572,12 @@ pub fn addToBlacklist(ip: u32, duration_sec: u64, reason: []const u8) bool {
 
     var r: [64]u8 = [_]u8{0} ** 64;
     const len = @min(reason.len, 63);
+
     for (0..len) |i| {
         r[i] = reason[i];
     }
 
-    blacklist[blacklist_count] = BlacklistEntry{
+    blacklist[blacklist_count] = .{
         .ip = ip,
         .added_at = now,
         .expires_at = now + (duration_sec * 1000),
@@ -561,6 +585,7 @@ pub fn addToBlacklist(ip: u32, duration_sec: u64, reason: []const u8) bool {
         .reason = r,
         .hit_count = 1,
     };
+
     blacklist_count += 1;
 
     if (config.log_to_serial) {
@@ -576,20 +601,25 @@ pub fn isBlacklisted(ip: u32) bool {
     const now = getTimestamp();
 
     var i: usize = 0;
+
     while (i < blacklist_count) {
         if (blacklist[i].ip == ip) {
             if (!blacklist[i].permanent and blacklist[i].expires_at < now) {
                 for (i..blacklist_count - 1) |j| {
                     blacklist[j] = blacklist[j + 1];
                 }
+
                 blacklist_count -= 1;
                 return false;
             }
+
             blacklist[i].hit_count += 1;
             return true;
         }
+
         i += 1;
     }
+
     return false;
 }
 
@@ -599,10 +629,12 @@ pub fn removeFromBlacklist(ip: u32) bool {
             for (i..blacklist_count - 1) |j| {
                 blacklist[j] = blacklist[j + 1];
             }
+
             blacklist_count -= 1;
             return true;
         }
     }
+
     return false;
 }
 
@@ -613,6 +645,98 @@ pub fn getBlacklistCount() usize {
 pub fn getBlacklistEntry(index: usize) ?*const BlacklistEntry {
     if (index >= blacklist_count) return null;
     return &blacklist[index];
+}
+
+// ============================================================================
+// P.3e Network Kill-Switch API
+// ============================================================================
+
+pub fn setP3eTestMode(enabled: bool) void {
+    p3e_test_mode = enabled;
+}
+
+pub fn blockEvictedPeerIp(ip: u32, reason: []const u8) bool {
+    if (ip == 0) return false;
+
+    stats.p2p_eviction_blocks += 1;
+
+    if (!p3e_test_mode) {
+        _ = threat_score.recordP2PThreat(
+            ip,
+            .p2p_eviction_evidence,
+            .high,
+        );
+    }
+
+    return addToBlacklist(
+        ip,
+        P2P_EVICTION_BLACKLIST_DURATION_SEC,
+        reason,
+    );
+}
+
+pub fn quarantinePeerIp(ip: u32, reason: []const u8) bool {
+    if (ip == 0) return false;
+
+    stats.p2p_quarantine_blocks += 1;
+
+    if (!p3e_test_mode) {
+        _ = threat_score.recordP2PThreat(
+            ip,
+            .p2p_eviction_evidence,
+            .medium,
+        );
+    }
+
+    return addToBlacklist(
+        ip,
+        P2P_QUARANTINE_DURATION_SEC,
+        reason,
+    );
+}
+
+pub fn dropExistingFlows(ip: u32) void {
+    if (ip == 0) return;
+
+    var write_idx: usize = 0;
+    var dropped: u64 = 0;
+
+    for (0..connection_count) |read_idx| {
+        const conn = connections[read_idx];
+
+        if (conn.src_ip == ip or conn.dst_ip == ip) {
+            dropped += 1;
+            continue;
+        }
+
+        if (write_idx != read_idx) {
+            connections[write_idx] = connections[read_idx];
+        }
+
+        write_idx += 1;
+    }
+
+    connection_count = write_idx;
+
+    if (stats.connections_active >= dropped) {
+        stats.connections_active -= dropped;
+    } else {
+        stats.connections_active = 0;
+    }
+
+    stats.flows_dropped_by_eviction += dropped;
+
+    if (config.log_to_serial) {
+        serial.writeString("[FW] Dropped flows for evicted IP: ");
+        printIP(ip);
+        serial.writeString(" count=");
+        printNumber(dropped);
+        serial.writeString("\n");
+    }
+}
+
+pub fn isBlockedByFirewall(ip: u32) bool {
+    return isBlacklisted(ip);
 }
 
 // ============================================================================
@@ -649,16 +773,17 @@ pub fn filterInbound(
 
     if (config.enable_rate_limit) {
         const rate_result = checkRateLimit(src_ip, protocol);
+
         if (!rate_result.allowed) {
             stats.packets_dropped += 1;
             stats.blocked_rate_limit += 1;
 
-            // ⭐ H.8 INTEGRATION: Record rate limit violation
             _ = threat_score.recordEvent(src_ip, .rate_limit_exceeded, .medium);
 
             if (config.auto_blacklist) {
                 recordViolation(src_ip);
             }
+
             return .{ .action = .drop, .rule_id = 0, .reason = rate_result.reason };
         }
     }
@@ -672,7 +797,6 @@ pub fn filterInbound(
                 stats.packets_dropped += 1;
                 stats.blocked_no_peer += 1;
 
-                // ⭐ H.8 INTEGRATION: Record unknown peer
                 _ = threat_score.recordEvent(src_ip, .unknown_peer, .medium);
 
                 return .{ .action = .drop, .rule_id = 0, .reason = "Unknown peer" };
@@ -696,8 +820,8 @@ pub fn filterInbound(
         if (rule.direction != .inbound and rule.direction != .both) continue;
 
         if (matchRule(rule, src_ip, dst_ip, proto, src_port, dst_port, peer_id)) {
-            rule.match_count += 1;
-            rule.last_match = getTimestamp();
+            rules[i].match_count += 1;
+            rules[i].last_match = getTimestamp();
 
             switch (rule.action) {
                 .allow => {
@@ -721,6 +845,7 @@ pub fn filterInbound(
 
     stats.packets_dropped += 1;
     stats.blocked_no_rule += 1;
+
     return .{ .action = .drop, .rule_id = 0, .reason = "Default deny" };
 }
 
@@ -744,6 +869,7 @@ pub fn filterOutbound(
 
     if (isBlacklisted(dst_ip)) {
         stats.packets_dropped += 1;
+        stats.blocked_blacklist += 1;
         return .{ .action = .drop, .rule_id = 0, .reason = "Dst blacklisted" };
     }
 
@@ -756,14 +882,16 @@ pub fn filterOutbound(
         if (rule.direction != .outbound and rule.direction != .both) continue;
 
         if (matchRule(rule, src_ip, dst_ip, proto, src_port, dst_port, null)) {
-            rule.match_count += 1;
-            rule.last_match = getTimestamp();
+            rules[i].match_count += 1;
+            rules[i].last_match = getTimestamp();
 
             if (rule.action == .allow) {
                 stats.packets_allowed += 1;
+
                 if (protocol == 6) {
                     trackConnection(src_ip, src_port, dst_ip, dst_port, proto);
                 }
+
                 return .{ .action = .allow, .rule_id = rule.id, .reason = "Rule" };
             } else if (rule.action == .drop) {
                 stats.packets_dropped += 1;
@@ -809,8 +937,10 @@ fn matchRule(
 
     if (rule.require_peer_id) {
         if (peer_id == null) return false;
+
         if (rule.peer_id) |required_peer| {
             const pid = peer_id.?;
+
             for (0..32) |j| {
                 if (pid[j] != required_peer[j]) return false;
             }
@@ -846,7 +976,7 @@ fn checkRateLimit(ip: u32, protocol: u8) RateLimitResult {
             rate_limit_count -= 1;
         }
 
-        rate_limits[rate_limit_count] = RateLimitEntry{
+        rate_limits[rate_limit_count] = .{
             .ip = ip,
             .packets_this_second = 0,
             .connections_active = 0,
@@ -854,6 +984,7 @@ fn checkRateLimit(ip: u32, protocol: u8) RateLimitResult {
             .last_reset = now,
             .violations = 0,
         };
+
         entry = &rate_limits[rate_limit_count];
         rate_limit_count += 1;
     }
@@ -870,17 +1001,16 @@ fn checkRateLimit(ip: u32, protocol: u8) RateLimitResult {
 
     if (e.packets_this_second > config.max_packets_per_second) {
         e.violations += 1;
-        // ⭐ H.8 INTEGRATION: Record rate limit exceeded
         _ = threat_score.recordEvent(ip, .rate_limit_exceeded, .medium);
         return .{ .allowed = false, .reason = "Rate limit" };
     }
 
     if (protocol == 6) {
         e.syn_count += 1;
+
         if (e.syn_count > config.syn_flood_threshold) {
             stats.blocked_syn_flood += 1;
             e.violations += 1;
-            // ⭐ H.8 INTEGRATION: Record DoS attack (SYN flood)
             _ = threat_score.recordEvent(ip, .dos_attack, .high);
             return .{ .allowed = false, .reason = "SYN flood" };
         }
@@ -888,7 +1018,6 @@ fn checkRateLimit(ip: u32, protocol: u8) RateLimitResult {
 
     if (e.connections_active > config.max_connections_per_ip) {
         e.violations += 1;
-        // ⭐ H.8 INTEGRATION: Record too many connections
         _ = threat_score.recordEvent(ip, .rate_limit_exceeded, .medium);
         return .{ .allowed = false, .reason = "Too many connections" };
     }
@@ -900,9 +1029,11 @@ fn recordViolation(ip: u32) void {
     for (0..rate_limit_count) |i| {
         if (rate_limits[i].ip == ip) {
             rate_limits[i].violations += 1;
+
             if (rate_limits[i].violations >= config.blacklist_threshold) {
                 _ = addToBlacklist(ip, config.blacklist_duration_sec, "Auto: violations");
             }
+
             break;
         }
     }
@@ -917,10 +1048,11 @@ fn trackConnection(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16, proto
         for (0..MAX_CONNECTIONS - 1) |i| {
             connections[i] = connections[i + 1];
         }
+
         connection_count = MAX_CONNECTIONS - 1;
     }
 
-    connections[connection_count] = Connection{
+    connections[connection_count] = .{
         .src_ip = src_ip,
         .src_port = src_port,
         .dst_ip = dst_ip,
@@ -935,6 +1067,7 @@ fn trackConnection(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16, proto
         .bytes_out = 0,
         .peer_id = null,
     };
+
     connection_count += 1;
     stats.connections_total += 1;
     stats.connections_active += 1;
@@ -943,6 +1076,7 @@ fn trackConnection(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16, proto
 fn isEstablishedConnection(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16) bool {
     for (0..connection_count) |i| {
         const conn = &connections[i];
+
         if (conn.dst_ip == src_ip and conn.dst_port == src_port and
             conn.src_ip == dst_ip and conn.src_port == dst_port)
         {
@@ -954,6 +1088,7 @@ fn isEstablishedConnection(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u1
             }
         }
     }
+
     return false;
 }
 
@@ -981,13 +1116,15 @@ pub fn detectPortScan(src_ip: u32, dst_port: u16) bool {
 
     if (tracker == null) {
         if (scan_tracker_count >= MAX_SCAN_TRACKERS) return false;
-        scan_trackers[scan_tracker_count] = PortScanTracker{
+
+        scan_trackers[scan_tracker_count] = .{
             .ip = src_ip,
             .ports_accessed = [_]u16{0} ** 64,
             .port_count = 0,
             .first_seen = now,
             .last_seen = now,
         };
+
         tracker = &scan_trackers[scan_tracker_count];
         scan_tracker_count += 1;
     }
@@ -1000,6 +1137,7 @@ pub fn detectPortScan(src_ip: u32, dst_port: u16) bool {
     }
 
     var port_exists = false;
+
     for (0..t.port_count) |i| {
         if (t.ports_accessed[i] == dst_port) {
             port_exists = true;
@@ -1017,7 +1155,6 @@ pub fn detectPortScan(src_ip: u32, dst_port: u16) bool {
     if (t.port_count >= SCAN_THRESHOLD) {
         stats.blocked_port_scan += 1;
 
-        // ⭐ H.8 INTEGRATION: Record port scan
         _ = threat_score.recordEvent(src_ip, .port_scan, .high);
 
         if (config.log_to_serial) {
@@ -1029,6 +1166,7 @@ pub fn detectPortScan(src_ip: u32, dst_port: u16) bool {
         if (config.auto_blacklist) {
             _ = addToBlacklist(src_ip, config.blacklist_duration_sec, "Port scan");
         }
+
         t.port_count = 0;
         return true;
     }
@@ -1084,18 +1222,22 @@ fn printIP(ip: u32) void {
 }
 
 fn printNumber(n: anytype) void {
-    const val: u32 = @intCast(n);
+    const val: u64 = @intCast(n);
+
     if (val == 0) {
         serial.writeChar('0');
         return;
     }
-    var buf: [10]u8 = undefined;
+
+    var buf: [20]u8 = undefined;
     var i: usize = 0;
     var v = val;
+
     while (v > 0) : (i += 1) {
         buf[i] = @intCast((v % 10) + '0');
         v /= 10;
     }
+
     while (i > 0) {
         i -= 1;
         serial.writeChar(buf[i]);
@@ -1104,9 +1246,11 @@ fn printNumber(n: anytype) void {
 
 fn printLine(len: usize) void {
     var i: usize = 0;
+
     while (i < len) : (i += 1) {
         serial.writeChar('-');
     }
+
     serial.writeString("\n");
 }
 
@@ -1125,6 +1269,7 @@ pub fn setState(new_state: FirewallState) void {
 pub fn setStateWithLog(new_state: FirewallState) void {
     const old_state = state;
     state = new_state;
+
     serial.writeString("[FIREWALL] ");
     serial.writeString(switch (old_state) {
         .disabled => "DISABLED",
@@ -1132,13 +1277,16 @@ pub fn setStateWithLog(new_state: FirewallState) void {
         .enforcing => "ENFORCING",
         .lockdown => "LOCKDOWN",
     });
+
     serial.writeString(" -> ");
+
     serial.writeString(switch (new_state) {
         .disabled => "DISABLED",
         .permissive => "PERMISSIVE",
         .enforcing => "ENFORCING",
         .lockdown => "LOCKDOWN",
     });
+
     serial.writeString("\n");
 }
 
@@ -1206,6 +1354,18 @@ pub fn printStatus() void {
     printNumber(stats.blocked_process_cap);
     serial.writeString("\n");
 
+    serial.writeString("  P2P Evict:   ");
+    printNumber(stats.p2p_eviction_blocks);
+    serial.writeString("\n");
+
+    serial.writeString("  P2P Quar:    ");
+    printNumber(stats.p2p_quarantine_blocks);
+    serial.writeString("\n");
+
+    serial.writeString("  FlowsDrop:   ");
+    printNumber(stats.flows_dropped_by_eviction);
+    serial.writeString("\n");
+
     serial.writeString("  Connections: ");
     printNumber(connection_count);
     serial.writeString("\n");
@@ -1220,7 +1380,6 @@ pub fn printStatus() void {
 
 const net_cap = @import("../security/net_capability.zig");
 
-/// Filter outbound with per-process CAP_NET enforcement
 pub fn filterProcessOutbound(
     pid: u16,
     src_ip: u32,
@@ -1231,16 +1390,22 @@ pub fn filterProcessOutbound(
 ) FilterResult {
     if (pid != 0 and net_cap.isInitialized()) {
         const cap_result = net_cap.checkConnect(pid, dst_ip, dst_port);
+
         if (cap_result.action != .allowed) {
             stats.packets_dropped += 1;
             stats.blocked_process_cap += 1;
-            return .{ .action = .drop, .rule_id = 0, .reason = "Process CAP_NET denied" };
+
+            return .{
+                .action = .drop,
+                .rule_id = 0,
+                .reason = "Process CAP_NET denied",
+            };
         }
     }
+
     return filterOutbound(src_ip, dst_ip, protocol, src_port, dst_port);
 }
 
-/// Filter inbound with socket owner enforcement
 pub fn filterProcessInbound(
     socket_idx: u8,
     src_ip: u32,
@@ -1256,20 +1421,31 @@ pub fn filterProcessInbound(
                 if (net_cap.isKilled(pid)) {
                     stats.packets_dropped += 1;
                     stats.blocked_process_cap += 1;
-                    return .{ .action = .drop, .rule_id = 0, .reason = "Owner killed" };
+
+                    return .{
+                        .action = .drop,
+                        .rule_id = 0,
+                        .reason = "Owner killed",
+                    };
                 }
+
                 if (!net_cap.hasNetCapability(pid)) {
                     stats.packets_dropped += 1;
                     stats.blocked_process_cap += 1;
-                    return .{ .action = .drop, .rule_id = 0, .reason = "Owner no CAP_NET" };
+
+                    return .{
+                        .action = .drop,
+                        .rule_id = 0,
+                        .reason = "Owner no CAP_NET",
+                    };
                 }
             }
         }
     }
+
     return filterInbound(src_ip, dst_ip, protocol, src_port, dst_port, peer_id);
 }
 
-/// Add per-process rule via firewall API
 pub fn addProcessNetRule(
     pid: u16,
     remote_ip: u32,
@@ -1279,5 +1455,13 @@ pub fn addProcessNetRule(
     allow: bool,
 ) bool {
     if (!net_cap.isInitialized()) return false;
-    return net_cap.addNetRule(pid, remote_ip, remote_mask, port_start, port_end, allow) != null;
+
+    return net_cap.addNetRule(
+        pid,
+        remote_ip,
+        remote_mask,
+        port_start,
+        port_end,
+        allow,
+    ) != null;
 }

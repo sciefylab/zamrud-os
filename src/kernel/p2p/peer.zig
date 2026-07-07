@@ -1,24 +1,25 @@
-//! Zamrud OS - P2P Peer Management (H.3+H.4 HARDENED)
+//! Zamrud OS - P2P Peer Management (H.3 + H.4 + P.3e READY)
 //! Manages connected peers with Sybil + Eclipse defense integration
 //!
-//! H.3 CHANGES:
-//! ✅ Added proof_of_work field to Peer struct
-//! ✅ Added first_seen field for age tracking
-//! ✅ Added trust_level from reputation system
-//! ✅ New addWithVerification() with full Sybil checks
-//! ✅ Reputation delegates to reputation module
-//! ✅ Disconnect removes from subnet tracking
+//! H.3:
+//! - Proof-of-Work verification
+//! - Reputation integration
+//! - Subnet tracking
 //!
-//! H.4 CHANGES:
-//! ✅ Added conn_type field (inbound/outbound/anchor)
-//! ✅ Eclipse defense integration
-//! ✅ Connection type tracking
-//! ✅ Anchor peer support
+//! H.4:
+//! - Eclipse defense integration
+//! - Connection type tracking
+//! - Anchor peer support
+//!
+//! P.3e:
+//! - Twin-Node Eviction support
+//! - Safer static cached peer list slices
+//! - Evicted/banned peer handling
+//! - Compatible with eviction.zig
 
 const serial = @import("../drivers/serial/serial.zig");
 const socket = @import("../net/socket.zig");
-const crypto = @import("../crypto/crypto.zig");
-const ct = @import("../crypto/constant_time.zig");
+
 const reputation_mod = @import("reputation.zig");
 const sybil = @import("sybil_defense.zig");
 const eclipse = @import("eclipse_defense.zig");
@@ -29,6 +30,8 @@ const eclipse = @import("eclipse_defense.zig");
 
 pub const MAX_PEERS: usize = 64;
 pub const PEER_TIMEOUT_MS: u64 = 120000;
+
+pub const MAX_BANNED_IDS: usize = 64;
 
 // =============================================================================
 // Types
@@ -61,7 +64,7 @@ pub const Peer = struct {
     last_block: u64,
     capabilities: u32,
 
-    // H.3: Enhanced reputation
+    // H.3: Reputation
     reputation: i32,
     proof_of_work: u64,
     first_seen: u64,
@@ -91,9 +94,16 @@ var peers: [MAX_PEERS]Peer = undefined;
 var peer_count: usize = 0;
 var initialized: bool = false;
 
-// Banned peers (by ID hash)
-var banned_ids: [64][32]u8 = undefined;
+// Banned peers by ID hash
+var banned_ids: [MAX_BANNED_IDS][32]u8 = undefined;
 var banned_count: usize = 0;
+
+// Static result caches.
+// Important: do not return slices pointing to local stack arrays.
+var connected_cache: [MAX_PEERS]*Peer = undefined;
+var inbound_cache: [MAX_PEERS]*Peer = undefined;
+var outbound_cache: [MAX_PEERS]*Peer = undefined;
+var anchor_cache: [MAX_PEERS]*Peer = undefined;
 
 // =============================================================================
 // Initialization
@@ -111,15 +121,13 @@ pub fn init() void {
         id.* = [_]u8{0} ** 32;
     }
 
-    // Initialize H.3 subsystems
     reputation_mod.init();
     sybil.init();
-
-    // Initialize H.4 subsystem
     eclipse.init();
 
     initialized = true;
-    serial.writeString("[PEER] Peer manager initialized (H.3+H.4 hardened)\n");
+
+    serial.writeString("[PEER] Peer manager initialized (H.3 + H.4 + P.3e ready)\n");
 }
 
 pub fn isInitialized() bool {
@@ -134,18 +142,22 @@ fn emptyPeer() Peer {
         .status = .disconnected,
         .socket = null,
         .public_key = [_]u8{0} ** 32,
+
         .connected_at = 0,
         .last_seen = 0,
         .messages_sent = 0,
         .messages_received = 0,
         .bytes_sent = 0,
         .bytes_received = 0,
+
         .last_block = 0,
         .capabilities = 0,
+
         .reputation = 0,
         .proof_of_work = 0,
         .first_seen = 0,
         .trust_level = .untrusted,
+
         .conn_type = .inbound,
     };
 }
@@ -154,51 +166,51 @@ fn emptyPeer() Peer {
 // Peer Operations
 // =============================================================================
 
-/// Original add function — backward compatible (no PoW required)
-/// Used for internal/trusted connections (treated as outbound)
+/// Backward-compatible add function.
+/// Internal/trusted connections are treated as outbound.
 pub fn add(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket) ?*Peer {
     return addWithType(id, ip, port, sock, .outbound);
 }
 
-/// Add peer with specific connection type
-pub fn addWithType(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket, conn_type: eclipse.ConnectionType) ?*Peer {
-    // Check if banned
+pub fn addWithType(
+    id: [32]u8,
+    ip: u32,
+    port: u16,
+    sock: *socket.Socket,
+    conn_type: eclipse.ConnectionType,
+) ?*Peer {
     if (isBanned(id)) {
         serial.writeString("[PEER] Rejecting banned peer\n");
         return null;
     }
 
-    // H.4: Check eclipse defense
     if (!eclipse.allowConnection(ip, conn_type)) {
         serial.writeString("[PEER] Rejected by eclipse defense\n");
         return null;
     }
 
-    // Check if already exists
     if (getById(id)) |existing| {
         existing.ip = ip;
         existing.port = port;
         existing.socket = sock;
         existing.status = .connected;
         existing.last_seen = getTimestamp();
+        existing.conn_type = conn_type;
         return existing;
     }
 
     return addToSlot(id, ip, port, sock, 0, .provisional, conn_type);
 }
 
-/// Add inbound connection (peer connected to us)
 pub fn addInbound(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket) ?*Peer {
     return addWithType(id, ip, port, sock, .inbound);
 }
 
-/// Add outbound connection (we connected to peer)
 pub fn addOutbound(id: [32]u8, ip: u32, port: u16, sock: *socket.Socket) ?*Peer {
     return addWithType(id, ip, port, sock, .outbound);
 }
 
-/// H.3: Add peer with full Sybil defense verification
-/// Used for incoming P2P connections
+/// H.3: Add peer with full Sybil defense verification.
 pub fn addWithVerification(
     id: [32]u8,
     ip: u32,
@@ -208,49 +220,51 @@ pub fn addWithVerification(
     pow_difficulty: u8,
     conn_type: eclipse.ConnectionType,
 ) ?*Peer {
-    // Check if banned
     if (isBanned(id)) {
         serial.writeString("[PEER] Rejecting banned peer\n");
         return null;
     }
 
-    // H.4: Check eclipse defense first
     if (!eclipse.allowConnection(ip, conn_type)) {
         serial.writeString("[PEER] Rejected by eclipse defense\n");
         return null;
     }
 
-    // Check if already exists
     if (getById(id)) |existing| {
         existing.ip = ip;
         existing.port = port;
         existing.socket = sock;
         existing.status = .connected;
         existing.last_seen = getTimestamp();
+        existing.conn_type = conn_type;
         return existing;
     }
 
-    // H.3: Full Sybil defense check
     const result = sybil.checkRegistration(ip, &id, pow_nonce, pow_difficulty);
 
     switch (result) {
         .allowed => {},
+
         .denied_no_pow => {
             serial.writeString("[PEER] DENIED: No Proof-of-Work\n");
             return null;
         },
+
         .denied_invalid_pow => {
             serial.writeString("[PEER] DENIED: Invalid Proof-of-Work\n");
             return null;
         },
+
         .denied_rate_limit => {
             serial.writeString("[PEER] DENIED: Rate limit exceeded\n");
             return null;
         },
+
         .denied_subnet_limit => {
             serial.writeString("[PEER] DENIED: Too many peers from subnet\n");
             return null;
         },
+
         .denied_sybil_detected => {
             serial.writeString("[PEER] DENIED: Sybil attack pattern detected\n");
             ban(id);
@@ -258,14 +272,12 @@ pub fn addWithVerification(
         },
     }
 
-    // Register in reputation system
     const rep = reputation_mod.registerPeer(&id, pow_nonce, pow_difficulty);
     const trust = if (rep) |r| r.trust_level else reputation_mod.TrustLevel.provisional;
 
     return addToSlot(id, ip, port, sock, pow_nonce, trust, conn_type);
 }
 
-/// Internal: add peer to a slot
 fn addToSlot(
     id: [32]u8,
     ip: u32,
@@ -278,6 +290,7 @@ fn addToSlot(
     for (&peers) |*p| {
         if (p.status == .disconnected) {
             const now = getTimestamp();
+
             p.* = .{
                 .id = id,
                 .ip = ip,
@@ -285,38 +298,46 @@ fn addToSlot(
                 .status = .connected,
                 .socket = sock,
                 .public_key = [_]u8{0} ** 32,
+
                 .connected_at = now,
                 .last_seen = now,
                 .messages_sent = 0,
                 .messages_received = 0,
                 .bytes_sent = 0,
                 .bytes_received = 0,
+
                 .last_block = 0,
                 .capabilities = 0,
+
                 .reputation = 50,
                 .proof_of_work = pow_nonce,
                 .first_seen = now,
                 .trust_level = trust,
+
                 .conn_type = conn_type,
             };
+
             peer_count += 1;
 
-            // H.4: Register with eclipse defense
             _ = eclipse.registerConnection(&id, ip, conn_type);
 
             serial.writeString("[PEER] Added peer (");
+
             switch (conn_type) {
                 .inbound => serial.writeString("inbound"),
                 .outbound => serial.writeString("outbound"),
                 .anchor => serial.writeString("anchor"),
             }
+
             serial.writeString(", trust=");
+
             switch (trust) {
                 .untrusted => serial.writeString("untrusted"),
                 .provisional => serial.writeString("provisional"),
                 .member => serial.writeString("member"),
                 .trusted => serial.writeString("trusted"),
             }
+
             serial.writeString("), total: ");
             printUsize(peer_count);
             serial.writeString("\n");
@@ -329,21 +350,35 @@ fn addToSlot(
     return null;
 }
 
+/// Remove peer from active table.
+/// If peer is already banned, keep reputation entry so P.3e ban score remains auditable.
 pub fn remove(id: [32]u8) void {
     for (&peers) |*p| {
-        if (eqlBytes(&p.id, &id)) {
+        if (p.status != .disconnected and eqlBytes(p.id[0..], id[0..])) {
+            const was_banned = isBanned(id);
+
             if (p.socket) |sock| {
                 socket.close(sock);
             }
-            // H.3: Remove from subnet tracking
+
             sybil.removeSubnetPeer(p.ip);
-            // H.3: Remove from reputation
-            reputation_mod.removePeer(&p.id);
-            // H.4: Remove from eclipse tracking
-            eclipse.removeConnection(&p.id);
+
+            if (!was_banned) {
+                reputation_mod.removePeer(&p.id);
+            }
+
+            if (@hasDecl(eclipse, "removeEvictedConnection") and was_banned) {
+                eclipse.removeEvictedConnection(&p.id);
+            } else {
+                eclipse.removeConnection(&p.id);
+            }
 
             p.* = emptyPeer();
-            if (peer_count > 0) peer_count -= 1;
+
+            if (peer_count > 0) {
+                peer_count -= 1;
+            }
+
             serial.writeString("[PEER] Removed peer\n");
             return;
         }
@@ -355,21 +390,47 @@ pub fn disconnect(p: *Peer) void {
         socket.close(sock);
         p.socket = null;
     }
-    // H.3: Remove from subnet tracking on disconnect
+
     sybil.removeSubnetPeer(p.ip);
-    // H.4: Remove from eclipse tracking
     eclipse.removeConnection(&p.id);
 
     p.status = .disconnected;
+
+    if (peer_count > 0) {
+        peer_count -= 1;
+    }
 }
 
 pub fn disconnectAll() void {
     for (&peers) |*p| {
-        if (p.status == .connected) {
-            disconnect(p);
+        if (p.status == .connected or p.status == .connecting) {
+            if (p.socket) |sock| {
+                socket.close(sock);
+            }
+
+            sybil.removeSubnetPeer(p.ip);
+            eclipse.removeConnection(&p.id);
+
+            p.* = emptyPeer();
         }
     }
+
     peer_count = 0;
+}
+
+// =============================================================================
+// P.3e Eviction Helpers
+// =============================================================================
+
+/// Execute local peer-level eviction.
+/// This is a convenience helper. The full Twin-Node logic lives in eviction.zig.
+pub fn evict(id: [32]u8) void {
+    ban(id);
+    remove(id);
+}
+
+pub fn isEvicted(id: [32]u8) bool {
+    return isBanned(id);
 }
 
 // =============================================================================
@@ -378,10 +439,11 @@ pub fn disconnectAll() void {
 
 pub fn getById(id: [32]u8) ?*Peer {
     for (&peers) |*p| {
-        if (p.status != .disconnected and eqlBytes(&p.id, &id)) {
+        if (p.status != .disconnected and eqlBytes(p.id[0..], id[0..])) {
             return p;
         }
     }
+
     return null;
 }
 
@@ -391,32 +453,44 @@ pub fn getByIp(ip: u32) ?*Peer {
             return p;
         }
     }
+
     return null;
 }
 
+/// Returns full peer storage slice.
+/// Caller should check status.
 pub fn getAll() []Peer {
     return peers[0..MAX_PEERS];
 }
 
+pub fn getPeerByIndex(index: usize) ?*Peer {
+    if (index >= MAX_PEERS) return null;
+    return &peers[index];
+}
+
+/// Safe static-cache list of connected peers.
 pub fn getConnected() []*Peer {
-    var result: [MAX_PEERS]*Peer = undefined;
     var count: usize = 0;
 
     for (&peers) |*p| {
         if (p.status == .connected) {
-            result[count] = p;
+            connected_cache[count] = p;
             count += 1;
         }
     }
 
-    return result[0..count];
+    return connected_cache[0..count];
 }
 
 pub fn getConnectedCount() usize {
     var count: usize = 0;
+
     for (peers) |p| {
-        if (p.status == .connected) count += 1;
+        if (p.status == .connected) {
+            count += 1;
+        }
     }
+
     return count;
 }
 
@@ -428,103 +502,91 @@ pub fn getTotalCount() usize {
 // H.4: Connection Type Queries
 // =============================================================================
 
-/// Get all outbound peers (including anchors)
 pub fn getOutbound() []*Peer {
-    var result: [MAX_PEERS]*Peer = undefined;
     var count: usize = 0;
 
     for (&peers) |*p| {
         if (p.status == .connected and p.isOutbound()) {
-            result[count] = p;
+            outbound_cache[count] = p;
             count += 1;
         }
     }
 
-    return result[0..count];
+    return outbound_cache[0..count];
 }
 
-/// Get all inbound peers
 pub fn getInbound() []*Peer {
-    var result: [MAX_PEERS]*Peer = undefined;
     var count: usize = 0;
 
     for (&peers) |*p| {
         if (p.status == .connected and p.conn_type == .inbound) {
-            result[count] = p;
+            inbound_cache[count] = p;
             count += 1;
         }
     }
 
-    return result[0..count];
+    return inbound_cache[0..count];
 }
 
-/// Get anchor peers
 pub fn getAnchors() []*Peer {
-    var result: [MAX_PEERS]*Peer = undefined;
     var count: usize = 0;
 
     for (&peers) |*p| {
         if (p.status == .connected and p.conn_type == .anchor) {
-            result[count] = p;
+            anchor_cache[count] = p;
             count += 1;
         }
     }
 
-    return result[0..count];
+    return anchor_cache[0..count];
 }
 
-/// Get outbound count
 pub fn getOutboundCount() usize {
     return eclipse.getOutboundCount();
 }
 
-/// Get inbound count
 pub fn getInboundCount() usize {
     return eclipse.getInboundCount();
 }
 
-/// Get anchor count
 pub fn getAnchorCount() usize {
     return eclipse.getAnchorCount();
 }
 
-/// Promote peer to anchor
 pub fn promoteToAnchor(p: *Peer) bool {
     if (eclipse.promoteToAnchor(&p.id)) {
         p.conn_type = .anchor;
         serial.writeString("[PEER] Promoted to anchor\n");
         return true;
     }
+
     return false;
 }
 
 // =============================================================================
-// Reputation System (H.3: delegates to reputation module)
+// Reputation System
 // =============================================================================
 
-/// Record good behavior — delegates to reputation module
 pub fn increaseReputation(p: *Peer, amount: i32) void {
     _ = amount;
+
     reputation_mod.addGoodAction(&p.id);
 
-    // Sync cached values
     if (reputation_mod.getReputation(&p.id)) |rep| {
         p.reputation = rep.score;
         p.trust_level = rep.trust_level;
     }
 }
 
-/// Record bad behavior — delegates to reputation module
 pub fn decreaseReputation(p: *Peer, amount: i32) void {
     _ = amount;
+
     reputation_mod.addViolation(&p.id);
 
-    // Sync cached values
     if (reputation_mod.getReputation(&p.id)) |rep| {
         p.reputation = rep.score;
         p.trust_level = rep.trust_level;
 
-        // Auto-ban if score drops below threshold
         if (rep.score <= reputation_mod.SCORE_BAN) {
             ban(p.id);
             disconnect(p);
@@ -532,28 +594,77 @@ pub fn decreaseReputation(p: *Peer, amount: i32) void {
     }
 }
 
-/// Get trust level for a peer
+pub fn recordSevereViolation(p: *Peer) void {
+    if (@hasDecl(reputation_mod, "recordSevereViolation")) {
+        reputation_mod.recordSevereViolation(&p.id);
+    } else {
+        reputation_mod.addViolation(&p.id);
+        reputation_mod.addViolation(&p.id);
+        reputation_mod.addViolation(&p.id);
+    }
+
+    if (reputation_mod.getReputation(&p.id)) |rep| {
+        p.reputation = rep.score;
+        p.trust_level = rep.trust_level;
+
+        if (rep.score <= reputation_mod.SCORE_BAN) {
+            ban(p.id);
+            disconnect(p);
+        }
+    }
+}
+
 pub fn getTrustLevel(p: *const Peer) reputation_mod.TrustLevel {
     return p.trust_level;
 }
 
+pub fn getReputationScore(p: *const Peer) i32 {
+    return p.reputation;
+}
+
+// =============================================================================
+// Ban List
+// =============================================================================
+
 pub fn ban(id: [32]u8) void {
-    if (banned_count >= banned_ids.len) return;
+    if (isBanned(id)) {
+        return;
+    }
+
+    if (banned_count >= banned_ids.len) {
+        serial.writeString("[PEER] Ban list full\n");
+        return;
+    }
 
     banned_ids[banned_count] = id;
     banned_count += 1;
+
+    // Mark active peer as banned and close socket if present.
+    if (getById(id)) |p| {
+        if (p.socket) |sock| {
+            socket.close(sock);
+            p.socket = null;
+        }
+
+        p.status = .banned;
+    }
 
     serial.writeString("[PEER] Banned peer\n");
 }
 
 pub fn unban(id: [32]u8) void {
     for (0..banned_count) |i| {
-        if (eqlBytes(&banned_ids[i], &id)) {
+        if (eqlBytes(banned_ids[i][0..], id[0..])) {
             var j = i;
+
             while (j + 1 < banned_count) : (j += 1) {
                 banned_ids[j] = banned_ids[j + 1];
             }
+
+            banned_ids[banned_count - 1] = [_]u8{0} ** 32;
             banned_count -= 1;
+
+            serial.writeString("[PEER] Unbanned peer\n");
             return;
         }
     }
@@ -561,26 +672,35 @@ pub fn unban(id: [32]u8) void {
 
 pub fn isBanned(id: [32]u8) bool {
     for (banned_ids[0..banned_count]) |bid| {
-        if (eqlBytes(&bid, &id)) return true;
+        if (eqlBytes(bid[0..], id[0..])) {
+            return true;
+        }
     }
+
     return false;
+}
+
+pub fn getBannedCount() usize {
+    return banned_count;
+}
+
+pub fn getBannedId(index: usize) ?[32]u8 {
+    if (index >= banned_count) return null;
+    return banned_ids[index];
 }
 
 // =============================================================================
 // H.3: Sybil Defense Accessors
 // =============================================================================
 
-/// Get peer diversity score (0-100)
 pub fn getDiversityScore() u8 {
     return sybil.getDiversityScore();
 }
 
-/// Get Sybil alert count
 pub fn getSybilAlertCount() usize {
     return sybil.getAlertCount();
 }
 
-/// Get total denied registrations
 pub fn getDeniedCount() u64 {
     return sybil.getTotalDenials();
 }
@@ -589,22 +709,18 @@ pub fn getDeniedCount() u64 {
 // H.4: Eclipse Defense Accessors
 // =============================================================================
 
-/// Get eclipse defense status
 pub fn getEclipseStatus() eclipse.EclipseStatus {
     return eclipse.getStatus();
 }
 
-/// Get eclipse alert count
 pub fn getEclipseAlertCount() usize {
     return eclipse.getAlertCount();
 }
 
-/// Check if node is safe from eclipse
 pub fn isEclipseSafe() bool {
     return eclipse.getStatus().is_safe;
 }
 
-/// Get eclipse risk level (0-100)
 pub fn getEclipseRisk() u8 {
     return eclipse.getStatus().risk_level;
 }
@@ -625,7 +741,6 @@ pub fn checkTimeouts() void {
         }
     }
 
-    // H.4: Check eclipse health and rotate connections
     eclipse.checkHealth();
     eclipse.rotateConnections();
     eclipse.autoPromoteAnchors();
@@ -646,13 +761,132 @@ fn getTimestamp() u64 {
 
 fn eqlBytes(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
+
     for (a, b) |x, y| {
         if (x != y) return false;
     }
+
     return true;
 }
 
 fn printUsize(val: usize) void {
-    if (val >= 10) printUsize(val / 10);
+    if (val >= 10) {
+        printUsize(val / 10);
+    }
+
     serial.writeChar('0' + @as(u8, @intCast(val % 10)));
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+pub fn runTests() bool {
+    serial.writeString("\n========================================\n");
+    serial.writeString("  PEER MANAGER TESTS H.3/H.4/P.3e\n");
+    serial.writeString("========================================\n\n");
+
+    if (!initialized) {
+        init();
+    }
+
+    var passed: u32 = 0;
+    var failed: u32 = 0;
+
+    serial.writeString("  [1] initialized.............. ");
+    if (initialized) {
+        serial.writeString("PASS\n");
+        passed += 1;
+    } else {
+        serial.writeString("FAIL\n");
+        failed += 1;
+    }
+
+    serial.writeString("  [2] ban/unban................ ");
+    {
+        var id: [32]u8 = [_]u8{0} ** 32;
+        id[0] = 0xAA;
+
+        ban(id);
+
+        if (isBanned(id)) {
+            unban(id);
+
+            if (!isBanned(id)) {
+                serial.writeString("PASS\n");
+                passed += 1;
+            } else {
+                serial.writeString("FAIL\n");
+                failed += 1;
+            }
+        } else {
+            serial.writeString("FAIL\n");
+            failed += 1;
+        }
+    }
+
+    serial.writeString("  [3] static connected cache... ");
+    {
+        const list = getConnected();
+
+        if (list.len <= MAX_PEERS) {
+            serial.writeString("PASS\n");
+            passed += 1;
+        } else {
+            serial.writeString("FAIL\n");
+            failed += 1;
+        }
+    }
+
+    serial.writeString("  [4] ban duplicate safe....... ");
+    {
+        var id: [32]u8 = [_]u8{0} ** 32;
+        id[0] = 0xBB;
+
+        const before = getBannedCount();
+
+        ban(id);
+        ban(id);
+
+        const after = getBannedCount();
+
+        if (after == before + 1 or isBanned(id)) {
+            serial.writeString("PASS\n");
+            passed += 1;
+        } else {
+            serial.writeString("FAIL\n");
+            failed += 1;
+        }
+
+        unban(id);
+    }
+
+    serial.writeString("\n  Peer Results: ");
+    printU32(passed);
+    serial.writeString("/");
+    printU32(passed + failed);
+    serial.writeString(" passed\n");
+
+    return failed == 0;
+}
+
+fn printU32(val: u32) void {
+    if (val == 0) {
+        serial.writeChar('0');
+        return;
+    }
+
+    var buf: [10]u8 = undefined;
+    var i: usize = 0;
+    var v = val;
+
+    while (v > 0) : (i += 1) {
+        buf[i] = @intCast((v % 10) + '0');
+        v /= 10;
+    }
+
+    while (i > 0) {
+        i -= 1;
+        serial.writeChar(buf[i]);
+    }
 }
