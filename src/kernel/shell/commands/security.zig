@@ -1,6 +1,7 @@
 //! Zamrud OS - Security Commands
 //! Security management, firewall control, threat monitoring
 //! Updated: H.8 Threat Scoring & E3.3/E3.6 Anti-Quantum Binary Verify Tests
+//! Updated: Security Authority Registry Shell Commands
 
 const helpers = @import("helpers.zig");
 const shell = @import("../shell.zig");
@@ -11,6 +12,7 @@ const firewall = @import("../../net/firewall.zig");
 const blacklist = @import("../../security/blacklist.zig");
 const threat_log = @import("../../security/threat_log.zig");
 const threat_score = @import("../../security/threat_score.zig");
+const authority = @import("../../security/authority.zig");
 
 // E3.3 & Integrity imports
 const binaryverify = @import("../../security/binaryverify.zig");
@@ -24,8 +26,6 @@ const net_driver = @import("../../drivers/network/network.zig");
 
 // E3.4: Network Capability
 const net_capability = @import("../../security/net_capability.zig");
-
-const authority = @import("../../security/authority.zig");
 
 // =============================================================================
 // Main Entry Point
@@ -51,8 +51,9 @@ pub fn execute(args: []const u8) void {
     } else if (helpers.strEql(parsed.cmd, "threats")) {
         cmdThreats(parsed.rest);
     } else if (helpers.strEql(parsed.cmd, "score")) {
-        // H.8: Delegate to threat.zig
         threat_cmd.execute(parsed.rest);
+    } else if (helpers.strEql(parsed.cmd, "authority")) {
+        cmdAuthority(parsed.rest);
     } else if (helpers.strEql(parsed.cmd, "test")) {
         runTest(parsed.rest);
     } else {
@@ -156,6 +157,17 @@ fn showHelp() void {
     shell.newLine();
 
     shell.println("+-----------------------------------------------------------+");
+    shell.println("|  SECURITY AUTHORITY                                       |");
+    shell.println("+-----------------------------------------------------------+");
+    shell.println("  authority             Show authority registry status");
+    shell.println("  authority status      Show authority registry status");
+    shell.println("  authority list        List active authorities");
+    shell.println("  authority revoked     List revoked authorities");
+    shell.println("  authority stats       Show authority vote/commit stats");
+    shell.println("  authority test        Run authority registry tests");
+    shell.newLine();
+
+    shell.println("+-----------------------------------------------------------+");
     shell.println("|  TESTING                                                  |");
     shell.println("+-----------------------------------------------------------+");
     shell.println("  test                Run all security tests");
@@ -164,6 +176,7 @@ fn showHelp() void {
     shell.println("  test binary         Run E3.3/E3.6 Binary Verif tests");
     shell.println("  test authority      Run Security Authority Registry tests");
     shell.newLine();
+
     shell.println("+===========================================================+");
     shell.newLine();
 }
@@ -179,7 +192,6 @@ fn showStatus() void {
     shell.println("+===========================================================+");
     shell.newLine();
 
-    // Security Level
     shell.println("  [SECURITY LEVEL]");
     shell.print("    Current:        ");
     const level = security.getSecurityLevel();
@@ -192,7 +204,6 @@ fn showStatus() void {
     }
     shell.newLine();
 
-    // Firewall Status
     shell.println("  [FIREWALL]");
     shell.print("    State:          ");
     switch (firewall.state) {
@@ -238,102 +249,128 @@ fn showStatus() void {
     }
     shell.newLine();
 
-    // H.8: Threat Scoring - delegate to threat_cmd
     shell.println("  [H.8 THREAT SCORING]");
     threat_cmd.printSummary();
     shell.newLine();
 
-    // Traffic Statistics
     const fw_stats = firewall.getStats();
+
     shell.println("  [TRAFFIC STATISTICS]");
     shell.print("    Total Packets:  ");
     helpers.printU64(fw_stats.packets_total);
     shell.newLine();
+
     shell.print("    Allowed:        ");
     shell.printSuccess("");
     helpers.printU64(fw_stats.packets_allowed);
     shell.newLine();
+
     shell.print("    Dropped:        ");
     if (fw_stats.packets_dropped > 0) {
         shell.printError("");
     }
     helpers.printU64(fw_stats.packets_dropped);
     shell.newLine();
+
     shell.print("    Rejected:       ");
     helpers.printU64(fw_stats.packets_rejected);
     shell.newLine();
+
     shell.print("    ProcCap(E3.4):  ");
     helpers.printU64(fw_stats.blocked_process_cap);
     shell.newLine();
+
+    shell.print("    P2P Evict:      ");
+    helpers.printU64(fw_stats.p2p_eviction_blocks);
     shell.newLine();
 
-    // Block Reasons
+    shell.print("    P2P Quarantine: ");
+    helpers.printU64(fw_stats.p2p_quarantine_blocks);
+    shell.newLine();
+
+    shell.print("    Flows Dropped:  ");
+    helpers.printU64(fw_stats.flows_dropped_by_eviction);
+    shell.newLine();
+    shell.newLine();
+
     shell.println("  [BLOCK REASONS]");
     shell.print("    ICMP Blocked:   ");
     helpers.printU64(fw_stats.icmp_blocked);
     shell.newLine();
+
     shell.print("    TCP Blocked:    ");
     helpers.printU64(fw_stats.tcp_blocked);
     shell.newLine();
+
     shell.print("    UDP Blocked:    ");
     helpers.printU64(fw_stats.udp_blocked);
     shell.newLine();
+
     shell.print("    No Rule Match:  ");
     helpers.printU64(fw_stats.blocked_no_rule);
     shell.newLine();
+
     shell.print("    Rate Limited:   ");
     helpers.printU64(fw_stats.blocked_rate_limit);
     shell.newLine();
+
     shell.print("    Blacklisted:    ");
     helpers.printU64(fw_stats.blocked_blacklist);
     shell.newLine();
+
     shell.print("    No Peer ID:     ");
     helpers.printU64(fw_stats.blocked_no_peer);
     shell.newLine();
+
     shell.print("    SYN Flood:      ");
     helpers.printU64(fw_stats.blocked_syn_flood);
     shell.newLine();
+
     shell.print("    Port Scan:      ");
     helpers.printU64(fw_stats.blocked_port_scan);
     shell.newLine();
     shell.newLine();
 
-    // Connections
     shell.println("  [CONNECTIONS]");
     shell.print("    Total:          ");
     helpers.printU64(fw_stats.connections_total);
     shell.newLine();
+
     shell.print("    Active:         ");
     helpers.printU64(fw_stats.connections_active);
     shell.newLine();
     shell.newLine();
 
-    // Rules & Blacklist
     shell.println("  [RULES & BLACKLIST]");
     shell.print("    Firewall Rules: ");
     helpers.printUsize(firewall.getRuleCount());
     shell.newLine();
+
     shell.print("    Blacklist IPs:  ");
     helpers.printUsize(firewall.getBlacklistCount());
     shell.newLine();
     shell.newLine();
 
-    // E3.4: Network Capability
     shell.println("  [NETWORK CAPABILITY (E3.4)]");
     if (net_capability.isInitialized()) {
         const ns = net_capability.getStats();
+
         shell.print("    Registered:     ");
         helpers.printUsize(net_capability.getProcessCount());
         shell.println(" processes");
+
         shell.print("    Active Sockets: ");
         helpers.printUsize(net_capability.getActiveSocketCount());
         shell.newLine();
+
         shell.print("    Net Rules:      ");
         helpers.printUsize(net_capability.getNetRuleCount());
         shell.newLine();
+
         shell.print("    Net Violations: ");
         helpers.printU64(ns.violations_total);
         shell.newLine();
+
         shell.print("    Procs Killed:   ");
         helpers.printU64(ns.processes_killed);
         shell.newLine();
@@ -342,7 +379,6 @@ fn showStatus() void {
     }
     shell.newLine();
 
-    // Security Authority Registry
     shell.println("  [SECURITY AUTHORITY]");
     if (authority.isInitialized()) {
         const auth_stats = authority.getStats();
@@ -354,6 +390,13 @@ fn showStatus() void {
         shell.print("    Revoked:        ");
         helpers.printUsize(authority.getRevokedCount());
         shell.newLine();
+
+        shell.print("    Small Network:  ");
+        if (authority.isSmallNetwork()) {
+            shell.printWarningLine("YES");
+        } else {
+            shell.printSuccessLine("NO");
+        }
 
         shell.print("    Root:           ");
         helpers.printU64(auth_stats.root_count);
@@ -391,11 +434,11 @@ fn showStatus() void {
     }
     shell.newLine();
 
-    // Threats
     shell.println("  [THREAT LOG]");
     shell.print("    Total Threats:  ");
     helpers.printU64(threat_log.getTotalThreats());
     shell.newLine();
+
     shell.print("    Recent Entries: ");
     helpers.printUsize(threat_log.getThreatCount());
     shell.newLine();
@@ -416,6 +459,7 @@ fn cmdLevel(args: []const u8) void {
         shell.newLine();
         shell.println("  Current Security Level:");
         shell.print("    ");
+
         const level = security.getSecurityLevel();
         switch (level) {
             .minimal => {
@@ -448,6 +492,7 @@ fn cmdLevel(args: []const u8) void {
                 shell.println("    - All blocked except whitelist");
             },
         }
+
         shell.newLine();
     } else if (helpers.strEql(opt, "minimal")) {
         security.setSecurityLevel(.minimal);
@@ -475,7 +520,9 @@ fn cmdLockdown() void {
     shell.printErrorLine("|          !!! EMERGENCY LOCKDOWN ACTIVATED !!!            |");
     shell.println("+===========================================================+");
     shell.newLine();
+
     security.emergencyLockdown();
+
     shell.println("  All incoming connections BLOCKED");
     shell.println("  Only whitelisted IPs allowed");
     shell.println("  Use 'security disarm' to deactivate");
@@ -514,6 +561,7 @@ fn cmdFirewall(args: []const u8) void {
     } else if (helpers.strEql(parsed.cmd, "stealth")) {
         const current = firewall.config.stealth_mode;
         firewall.setStealthMode(!current);
+
         if (!current) {
             shell.printSuccessLine("[+] Stealth mode ENABLED");
         } else {
@@ -522,6 +570,7 @@ fn cmdFirewall(args: []const u8) void {
     } else if (helpers.strEql(parsed.cmd, "p2p")) {
         const current = firewall.config.p2p_only_mode;
         firewall.setP2POnlyMode(!current);
+
         if (!current) {
             shell.printSuccessLine("[+] P2P-only mode ENABLED");
         } else {
@@ -596,6 +645,7 @@ fn showFirewallStatus() void {
     }
 
     shell.newLine();
+
     shell.print("  Rules:            ");
     helpers.printUsize(firewall.getRuleCount());
     shell.newLine();
@@ -611,18 +661,30 @@ fn showFirewallStatus() void {
     shell.newLine();
 
     const fw_stats = firewall.getStats();
+
     shell.println("  Traffic:");
     shell.print("    Packets:        ");
     helpers.printU64(fw_stats.packets_total);
     shell.newLine();
+
     shell.print("    Allowed:        ");
     helpers.printU64(fw_stats.packets_allowed);
     shell.newLine();
+
     shell.print("    Dropped:        ");
     helpers.printU64(fw_stats.packets_dropped);
     shell.newLine();
+
     shell.print("    ProcCap(E3.4):  ");
     helpers.printU64(fw_stats.blocked_process_cap);
+    shell.newLine();
+
+    shell.print("    P2P Evict:      ");
+    helpers.printU64(fw_stats.p2p_eviction_blocks);
+    shell.newLine();
+
+    shell.print("    P2P Quarantine: ");
+    helpers.printU64(fw_stats.p2p_quarantine_blocks);
     shell.newLine();
 
     shell.newLine();
@@ -636,6 +698,7 @@ fn showRules() void {
     shell.println("|                   FIREWALL RULES                          |");
     shell.println("+-----------------------------------------------------------+");
     shell.newLine();
+
     shell.println("  ID   Pri   Dir    Proto   Action      Enabled  Matches");
     shell.println("  ---- ----- ------ ------- ----------- -------- --------");
 
@@ -645,6 +708,7 @@ fn showRules() void {
         shell.println("  (no rules defined)");
     } else {
         var i: usize = 0;
+
         while (i < rule_count) : (i += 1) {
             if (firewall.getRule(i)) |rule| {
                 shell.print("  ");
@@ -704,19 +768,35 @@ fn showFirewallStats() void {
     shell.print("    Total Packets:      ");
     helpers.printU64(fw_stats.packets_total);
     shell.newLine();
+
     shell.print("    Allowed:            ");
     shell.printSuccess("");
     helpers.printU64(fw_stats.packets_allowed);
     shell.newLine();
+
     shell.print("    Dropped:            ");
     if (fw_stats.packets_dropped > 0) shell.printError("");
     helpers.printU64(fw_stats.packets_dropped);
     shell.newLine();
+
     shell.print("    Rejected:           ");
     helpers.printU64(fw_stats.packets_rejected);
     shell.newLine();
+
     shell.print("    ProcCap Blocked:    ");
     helpers.printU64(fw_stats.blocked_process_cap);
+    shell.newLine();
+
+    shell.print("    P2P Eviction:       ");
+    helpers.printU64(fw_stats.p2p_eviction_blocks);
+    shell.newLine();
+
+    shell.print("    P2P Quarantine:     ");
+    helpers.printU64(fw_stats.p2p_quarantine_blocks);
+    shell.newLine();
+
+    shell.print("    Flows Dropped:      ");
+    helpers.printU64(fw_stats.flows_dropped_by_eviction);
     shell.newLine();
     shell.newLine();
 
@@ -724,9 +804,11 @@ fn showFirewallStats() void {
     shell.print("    ICMP:               ");
     helpers.printU64(fw_stats.icmp_blocked);
     shell.newLine();
+
     shell.print("    TCP:                ");
     helpers.printU64(fw_stats.tcp_blocked);
     shell.newLine();
+
     shell.print("    UDP:                ");
     helpers.printU64(fw_stats.udp_blocked);
     shell.newLine();
@@ -736,18 +818,23 @@ fn showFirewallStats() void {
     shell.print("    No Matching Rule:   ");
     helpers.printU64(fw_stats.blocked_no_rule);
     shell.newLine();
+
     shell.print("    Rate Limited:       ");
     helpers.printU64(fw_stats.blocked_rate_limit);
     shell.newLine();
+
     shell.print("    Blacklisted IP:     ");
     helpers.printU64(fw_stats.blocked_blacklist);
     shell.newLine();
+
     shell.print("    No Peer ID:         ");
     helpers.printU64(fw_stats.blocked_no_peer);
     shell.newLine();
+
     shell.print("    SYN Flood:          ");
     helpers.printU64(fw_stats.blocked_syn_flood);
     shell.newLine();
+
     shell.print("    Port Scan:          ");
     helpers.printU64(fw_stats.blocked_port_scan);
     shell.newLine();
@@ -757,6 +844,7 @@ fn showFirewallStats() void {
     shell.print("    Total Tracked:      ");
     helpers.printU64(fw_stats.connections_total);
     shell.newLine();
+
     shell.print("    Currently Active:   ");
     helpers.printU64(fw_stats.connections_active);
     shell.newLine();
@@ -766,15 +854,19 @@ fn showFirewallStats() void {
     shell.print("    Max Packets/Sec:    ");
     helpers.printU32(firewall.config.max_packets_per_second);
     shell.newLine();
+
     shell.print("    Max Conns/IP:       ");
     helpers.printU32(firewall.config.max_connections_per_ip);
     shell.newLine();
+
     shell.print("    SYN Flood Thresh:   ");
     helpers.printU32(firewall.config.syn_flood_threshold);
     shell.newLine();
+
     shell.print("    Blacklist Thresh:   ");
     helpers.printU32(firewall.config.blacklist_threshold);
     shell.println(" violations");
+
     shell.print("    Blacklist Duration: ");
     helpers.printU64(firewall.config.blacklist_duration_sec);
     shell.println(" seconds");
@@ -810,14 +902,17 @@ fn showBlacklist() void {
     shell.println("|                    BLACKLIST                              |");
     shell.println("+-----------------------------------------------------------+");
     shell.newLine();
+
     shell.println("  IP Address          Reason            Hits   Permanent");
     shell.println("  ------------------- ----------------- ------ ---------");
 
     const count = blacklist.getActiveCount();
+
     if (count == 0) {
         shell.println("  (no entries)");
     } else {
         var i: usize = 0;
+
         while (i < count) : (i += 1) {
             if (blacklist.getEntry(i)) |entry| {
                 shell.print("  ");
@@ -828,9 +923,11 @@ fn showBlacklist() void {
                 while (j < 17 and j < entry.reason_len) : (j += 1) {
                     shell.printChar(entry.reason[j]);
                 }
+
                 while (j < 17) : (j += 1) {
                     shell.printChar(' ');
                 }
+
                 shell.print(" ");
 
                 helpers.printU64Padded(entry.hit_count, 6);
@@ -871,6 +968,7 @@ fn addBlacklist(args: []const u8) void {
 
     var duration: u64 = 3600;
     const dur_str = helpers.trim(parsed.rest);
+
     if (dur_str.len > 0) {
         if (helpers.parseU32(dur_str)) |d| {
             duration = d;
@@ -913,8 +1011,10 @@ fn removeBlacklist(args: []const u8) void {
 
 fn clearBlacklist() void {
     var removed: u32 = 0;
+
     while (firewall.getBlacklistCount() > 0) {
         const count = blacklist.getActiveCount();
+
         if (count > 0) {
             if (blacklist.getEntry(0)) |entry| {
                 _ = firewall.removeFromBlacklist(entry.ip);
@@ -923,6 +1023,7 @@ fn clearBlacklist() void {
         } else {
             break;
         }
+
         if (removed > 1000) break;
     }
 
@@ -954,14 +1055,17 @@ fn showThreats() void {
     shell.println("|                    THREAT LOG                             |");
     shell.println("+-----------------------------------------------------------+");
     shell.newLine();
+
     shell.println("  ID     Type              Severity   Source IP");
     shell.println("  ------ ----------------- ---------- ---------------");
 
     const count = threat_log.getThreatCount();
+
     if (count == 0) {
         shell.println("  (no threats recorded)");
     } else {
         var i: usize = 0;
+
         while (i < count) : (i += 1) {
             if (threat_log.getThreat(i)) |threat| {
                 shell.print("  ");
@@ -981,6 +1085,7 @@ fn showThreats() void {
                     .dos_attack => "DoS Attack       ",
                     .system_event => "System Event     ",
                 };
+
                 shell.print(type_str);
 
                 switch (threat.severity) {
@@ -1003,6 +1108,304 @@ fn showThreats() void {
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
     shell.newLine();
+}
+
+// =============================================================================
+// Security Authority Commands
+// =============================================================================
+
+fn cmdAuthority(args: []const u8) void {
+    const parsed = helpers.parseArgs(args);
+
+    if (parsed.cmd.len == 0 or helpers.strEql(parsed.cmd, "status")) {
+        showAuthorityStatus();
+    } else if (helpers.strEql(parsed.cmd, "list")) {
+        showAuthorityList();
+    } else if (helpers.strEql(parsed.cmd, "revoked")) {
+        showAuthorityRevoked();
+    } else if (helpers.strEql(parsed.cmd, "stats")) {
+        showAuthorityStats();
+    } else if (helpers.strEql(parsed.cmd, "test")) {
+        shell.newLine();
+
+        if (authority.runTests()) {
+            shell.printSuccessLine("[+] Authority registry tests PASSED");
+        } else {
+            shell.printErrorLine("[-] Authority registry tests FAILED");
+        }
+
+        shell.newLine();
+    } else if (helpers.strEql(parsed.cmd, "help")) {
+        showAuthorityHelp();
+    } else {
+        showAuthorityHelp();
+    }
+}
+
+fn showAuthorityHelp() void {
+    shell.newLine();
+    shell.println("  Security Authority Commands:");
+    shell.println("    authority           Show status");
+    shell.println("    authority status    Show status");
+    shell.println("    authority list      List active authorities");
+    shell.println("    authority revoked   List revoked authorities");
+    shell.println("    authority stats     Show vote/commit statistics");
+    shell.println("    authority test      Run authority tests");
+    shell.newLine();
+}
+
+fn showAuthorityStatus() void {
+    shell.newLine();
+    shell.println("+===========================================================+");
+    shell.println("|              SECURITY AUTHORITY STATUS                    |");
+    shell.println("+===========================================================+");
+    shell.newLine();
+
+    if (!authority.isInitialized()) {
+        shell.printWarningLine("  Authority registry is not initialized.");
+        shell.newLine();
+        return;
+    }
+
+    const stats = authority.getStats();
+
+    shell.print("  Initialized:       ");
+    shell.printSuccessLine("YES");
+
+    shell.print("  Authorities:       ");
+    helpers.printUsize(authority.getAuthorityCount());
+    shell.newLine();
+
+    shell.print("  Revoked:           ");
+    helpers.printUsize(authority.getRevokedCount());
+    shell.newLine();
+
+    shell.print("  Small Network:     ");
+    if (authority.isSmallNetwork()) {
+        shell.printWarningLine("YES");
+    } else {
+        shell.printSuccessLine("NO");
+    }
+
+    shell.newLine();
+    shell.println("  [LEVEL COUNTS]");
+
+    shell.print("    Root:            ");
+    helpers.printU64(stats.root_count);
+    shell.newLine();
+
+    shell.print("    Validators:      ");
+    helpers.printU64(stats.validator_count);
+    shell.newLine();
+
+    shell.print("    Members:         ");
+    helpers.printU64(stats.member_count);
+    shell.newLine();
+
+    shell.print("    Guests:          ");
+    helpers.printU64(stats.guest_count);
+    shell.newLine();
+
+    shell.newLine();
+    shell.println("  [ATTESTATION]");
+
+    shell.print("    Hardware:        ");
+    helpers.printU64(stats.attestations);
+    shell.newLine();
+
+    shell.print("    Chain Verified:  ");
+    helpers.printU64(stats.chain_verified);
+    shell.newLine();
+
+    shell.print("    Signature OK:    ");
+    helpers.printU64(stats.signature_verified);
+    shell.newLine();
+
+    shell.newLine();
+    shell.println("+===========================================================+");
+    shell.newLine();
+}
+
+fn showAuthorityStats() void {
+    shell.newLine();
+    shell.println("+===========================================================+");
+    shell.println("|              SECURITY AUTHORITY STATS                     |");
+    shell.println("+===========================================================+");
+    shell.newLine();
+
+    if (!authority.isInitialized()) {
+        shell.printWarningLine("  Authority registry is not initialized.");
+        shell.newLine();
+        return;
+    }
+
+    const stats = authority.getStats();
+
+    shell.print("  Registrations:     ");
+    helpers.printU64(stats.registrations);
+    shell.newLine();
+
+    shell.print("  Revocations:       ");
+    helpers.printU64(stats.revocations);
+    shell.newLine();
+
+    shell.print("  Quarantines:       ");
+    helpers.printU64(stats.quarantines);
+    shell.newLine();
+
+    shell.newLine();
+    shell.println("  [VOTE / COMMIT]");
+
+    shell.print("    Vote Allows:     ");
+    helpers.printU64(stats.vote_allows);
+    shell.newLine();
+
+    shell.print("    Vote Denies:     ");
+    helpers.printU64(stats.vote_denies);
+    shell.newLine();
+
+    shell.print("    Commit Allows:   ");
+    helpers.printU64(stats.commit_allows);
+    shell.newLine();
+
+    shell.print("    Commit Denies:   ");
+    helpers.printU64(stats.commit_denies);
+    shell.newLine();
+
+    shell.newLine();
+    shell.println("+===========================================================+");
+    shell.newLine();
+}
+
+fn showAuthorityList() void {
+    shell.newLine();
+    shell.println("+===========================================================+");
+    shell.println("|              ACTIVE SECURITY AUTHORITIES                  |");
+    shell.println("+===========================================================+");
+    shell.newLine();
+
+    if (!authority.isInitialized()) {
+        shell.printWarningLine("  Authority registry is not initialized.");
+        shell.newLine();
+        return;
+    }
+
+    const count = authority.getAuthorityCount();
+
+    if (count == 0) {
+        shell.println("  (no active authorities)");
+        shell.newLine();
+        return;
+    }
+
+    shell.println("  IDX  ID-PREFIX   LEVEL       STATUS      ATTEST      VOTES  COMMITS");
+    shell.println("  ---- ----------- ----------- ----------- ----------- ------ -------");
+
+    var i: usize = 0;
+
+    while (i < count) : (i += 1) {
+        if (authority.getEntryByIndex(i)) |entry| {
+            shell.print("  ");
+            helpers.printU32Padded(@intCast(i), 4);
+            shell.print(" ");
+
+            printAuthorityIdShort(&entry.id);
+            shell.print(" ");
+
+            printPadded(authority.levelName(entry.level), 11);
+            shell.print(" ");
+
+            printPadded(authority.statusName(entry.status), 11);
+            shell.print(" ");
+
+            printPadded(authority.attestationName(entry.attestation_state), 11);
+            shell.print(" ");
+
+            helpers.printU64Padded(entry.vote_count, 6);
+            shell.print(" ");
+
+            helpers.printU64Padded(entry.commit_count, 7);
+            shell.newLine();
+        }
+    }
+
+    shell.newLine();
+    shell.println("+===========================================================+");
+    shell.newLine();
+}
+
+fn showAuthorityRevoked() void {
+    shell.newLine();
+    shell.println("+===========================================================+");
+    shell.println("|              REVOKED SECURITY AUTHORITIES                 |");
+    shell.println("+===========================================================+");
+    shell.newLine();
+
+    if (!authority.isInitialized()) {
+        shell.printWarningLine("  Authority registry is not initialized.");
+        shell.newLine();
+        return;
+    }
+
+    const count = authority.getRevokedCount();
+
+    if (count == 0) {
+        shell.println("  (no revoked authorities)");
+        shell.newLine();
+        return;
+    }
+
+    shell.println("  IDX  ID-PREFIX");
+    shell.println("  ---- -----------");
+
+    var i: usize = 0;
+
+    while (i < count) : (i += 1) {
+        if (authority.getRevokedId(i)) |rid| {
+            shell.print("  ");
+            helpers.printU32Padded(@intCast(i), 4);
+            shell.print(" ");
+            printAuthorityIdShort(&rid);
+            shell.newLine();
+        }
+    }
+
+    shell.newLine();
+    shell.println("+===========================================================+");
+    shell.newLine();
+}
+
+fn printAuthorityIdShort(id: *const [32]u8) void {
+    printHexByte(id.*[0]);
+    printHexByte(id.*[1]);
+    printHexByte(id.*[2]);
+    printHexByte(id.*[3]);
+    shell.print("...");
+}
+
+fn printHexByte(v: u8) void {
+    const hi = (v >> 4) & 0x0F;
+    const lo = v & 0x0F;
+
+    shell.printChar(hexChar(hi));
+    shell.printChar(hexChar(lo));
+}
+
+fn hexChar(v: u8) u8 {
+    if (v < 10) return '0' + v;
+    return 'a' + (v - 10);
+}
+
+fn printPadded(text: []const u8, width: usize) void {
+    var i: usize = 0;
+
+    while (i < text.len and i < width) : (i += 1) {
+        shell.printChar(text[i]);
+    }
+
+    while (i < width) : (i += 1) {
+        shell.printChar(' ');
+    }
 }
 
 // =============================================================================
@@ -1101,11 +1504,13 @@ fn runAllTests() void {
     shell.printSuccess(" passed");
     shell.print(", ");
     helpers.printU32(failed);
+
     if (failed > 0) {
         shell.printError(" failed");
     } else {
         shell.print(" failed");
     }
+
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
 
@@ -1114,9 +1519,11 @@ fn runAllTests() void {
     } else {
         shell.printErrorLine("|  [-] SOME TESTS FAILED                                   |");
     }
+
     shell.println("+===========================================================+");
     shell.newLine();
 }
+
 fn runQuickTest() void {
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
@@ -1158,6 +1565,7 @@ fn runQuickTest() void {
         80,
         null,
     );
+
     if (test_result.action == .allow or test_result.action == .drop) {
         shell.printSuccessLine("PASS");
     } else {
@@ -1186,6 +1594,7 @@ fn runQuickTest() void {
         shell.printSuccessLine("PASS");
     } else {
         threat_score.init();
+
         if (threat_score.isInitialized()) {
             shell.printSuccessLine("PASS (auto-init)");
         } else {
@@ -1202,13 +1611,29 @@ fn runQuickTest() void {
         ok = false;
     }
 
+    shell.print("  Authority Registry:       ");
+    if (authority.isInitialized()) {
+        shell.printSuccessLine("PASS");
+    } else {
+        authority.init();
+
+        if (authority.isInitialized()) {
+            shell.printSuccessLine("PASS (auto-init)");
+        } else {
+            shell.printErrorLine("FAIL");
+            ok = false;
+        }
+    }
+
     shell.newLine();
     shell.print("  Quick Test Result: ");
+
     if (ok) {
         shell.printSuccessLine("ALL PASSED");
     } else {
         shell.printErrorLine("SOME FAILED");
     }
+
     shell.newLine();
     shell.println("+-----------------------------------------------------------+");
     shell.newLine();
@@ -1219,7 +1644,7 @@ fn runQuickTest() void {
 // =============================================================================
 
 fn testInitialization(failed: *u32) u32 {
-    helpers.printTestCategory(1, 11, "Initialization");
+    helpers.printTestCategory(1, 12, "Initialization");
     var passed: u32 = 0;
 
     passed += helpers.doTest("Firewall initialized", firewall.isInitialized(), failed);
@@ -1235,7 +1660,7 @@ fn testInitialization(failed: *u32) u32 {
 }
 
 fn testRuleManagement(failed: *u32) u32 {
-    helpers.printTestCategory(2, 11, "Rule Management");
+    helpers.printTestCategory(2, 12, "Rule Management");
     var passed: u32 = 0;
 
     const initial_count = firewall.getRuleCount();
@@ -1286,7 +1711,7 @@ fn testRuleManagement(failed: *u32) u32 {
 }
 
 fn testPacketFiltering(failed: *u32) u32 {
-    helpers.printTestCategory(3, 11, "Packet Filtering");
+    helpers.printTestCategory(3, 12, "Packet Filtering");
     var passed: u32 = 0;
 
     const lo_ip = net_driver.ipToU32(127, 0, 0, 1);
@@ -1328,7 +1753,7 @@ fn testPacketFiltering(failed: *u32) u32 {
 }
 
 fn testBlacklistSystem(failed: *u32) u32 {
-    helpers.printTestCategory(4, 11, "Blacklist System");
+    helpers.printTestCategory(4, 12, "Blacklist System");
     var passed: u32 = 0;
 
     const test_ip = net_driver.ipToU32(192, 168, 99, 99);
@@ -1367,7 +1792,7 @@ fn testBlacklistSystem(failed: *u32) u32 {
 }
 
 fn testRateLimiting(failed: *u32) u32 {
-    helpers.printTestCategory(5, 11, "Rate Limiting");
+    helpers.printTestCategory(5, 12, "Rate Limiting");
     var passed: u32 = 0;
 
     if (!firewall.config.enable_rate_limit) {
@@ -1397,13 +1822,14 @@ fn testRateLimiting(failed: *u32) u32 {
 }
 
 fn testPortScanDetection(failed: *u32) u32 {
-    helpers.printTestCategory(6, 11, "Port Scan Detection");
+    helpers.printTestCategory(6, 12, "Port Scan Detection");
     var passed: u32 = 0;
 
     const scanner_ip = net_driver.ipToU32(192, 168, 77, 77);
 
     var detected = false;
     var port: u16 = 1000;
+
     while (port < 1015) : (port += 1) {
         detected = firewall.detectPortScan(scanner_ip, port);
         if (detected) break;
@@ -1438,7 +1864,7 @@ fn testPortScanDetection(failed: *u32) u32 {
 }
 
 fn testConnectionTracking(failed: *u32) u32 {
-    helpers.printTestCategory(7, 11, "Connection Tracking");
+    helpers.printTestCategory(7, 12, "Connection Tracking");
     var passed: u32 = 0;
 
     const local_ip = net_driver.ipToU32(10, 0, 2, 15);
@@ -1463,7 +1889,7 @@ fn testConnectionTracking(failed: *u32) u32 {
 }
 
 fn testStateMachine(failed: *u32) u32 {
-    helpers.printTestCategory(8, 11, "State Machine");
+    helpers.printTestCategory(8, 12, "State Machine");
     var passed: u32 = 0;
 
     const original_state = firewall.state;
@@ -1516,7 +1942,7 @@ fn testStateMachine(failed: *u32) u32 {
 }
 
 fn testIntegration(failed: *u32) u32 {
-    helpers.printTestCategory(9, 11, "Integration");
+    helpers.printTestCategory(9, 12, "Integration");
     var passed: u32 = 0;
 
     passed += helpers.doTest("Security init", security.isInitialized(), failed);
@@ -1537,7 +1963,11 @@ fn testIntegration(failed: *u32) u32 {
     });
     passed += helpers.doTest("Threat logging", threat_id > 0, failed);
 
-    const bl_added = blacklist.addToBlacklist(net_driver.ipToU32(5, 6, 7, 8), 60, "Integration test");
+    const bl_added = blacklist.addToBlacklist(
+        net_driver.ipToU32(5, 6, 7, 8),
+        60,
+        "Integration test",
+    );
     passed += helpers.doTest("Blacklist integ", bl_added, failed);
     _ = blacklist.removeFromBlacklist(net_driver.ipToU32(5, 6, 7, 8));
 
@@ -1561,7 +1991,7 @@ fn testIntegration(failed: *u32) u32 {
 }
 
 fn testThreatScoring(failed: *u32) u32 {
-    helpers.printTestCategory(10, 11, "H.8 Threat Scoring");
+    helpers.printTestCategory(10, 12, "H.8 Threat Scoring");
     var passed: u32 = 0;
 
     if (!threat_score.isInitialized()) {
@@ -1605,9 +2035,9 @@ fn testThreatScoring(failed: *u32) u32 {
     return passed;
 }
 
-// 🆕 Test Kategori 11: E3.3 & E3.6 Anti-Quantum Binary Verify Simulation
+// Test Category 11: E3.3 & E3.6 Anti-Quantum Binary Verify Simulation
 fn testBinaryVerification(failed: *u32) u32 {
-    helpers.printTestCategory(11, 11, "E3.3/E3.6 Binary Verify & Quantum Sign");
+    helpers.printTestCategory(11, 12, "E3.3/E3.6 Binary Verify & Quantum Sign");
     var passed: u32 = 0;
 
     if (!binaryverify.isInitialized()) {
@@ -1624,28 +2054,22 @@ fn testBinaryVerification(failed: *u32) u32 {
     const malware_data = "MALWARE_RANSOMWARE_123";
     const app_resmi_data = "ZAMRUD_OFFICIAL_APP_123";
 
-    // Pastikan Enforce Mode aktif saat tes
     const orig_enforce = binaryverify.isEnforcing();
     binaryverify.setEnforce(true);
 
-    // 1. Blok Malware
     const is_malware_allowed = binaryverify.checkExec(malware_data);
     passed += helpers.doTest("Block unknown malware", !is_malware_allowed, failed);
 
-    // 2. Daftar App ke Ledger
     var app_hash = binaryverify.computeHash(app_resmi_data);
     const registered = registry.registerFile("test_app.zam", &app_hash, .user_app, 1);
     passed += helpers.doTest("Register valid app", registered, failed);
 
-    // 3. User jalankan App
     const is_app_allowed = binaryverify.checkExec(app_resmi_data);
     passed += helpers.doTest("Allow valid app", is_app_allowed, failed);
 
-    // 4. Cache Hit
     const is_app_allowed_again = binaryverify.checkExec(app_resmi_data);
     passed += helpers.doTest("Cache fast-path", is_app_allowed_again, failed);
 
-    // Kembalikan status asli
     binaryverify.setEnforce(orig_enforce);
 
     return passed;
@@ -1840,6 +2264,7 @@ fn parseIpAddr(s: []const u8) ?u32 {
 
 fn printIpAddr(addr: u32) void {
     const octets = net_driver.u32ToIp(addr);
+
     helpers.printU8(octets.a);
     shell.printChar('.');
     helpers.printU8(octets.b);
@@ -1856,17 +2281,21 @@ fn printIpAddrPadded(addr: u32) void {
     var pos: usize = 0;
 
     const vals = [_]u8{ octets.a, octets.b, octets.c, octets.d };
+
     for (vals, 0..) |v, i| {
         if (v >= 100) {
             buf[pos] = '0' + v / 100;
             pos += 1;
         }
+
         if (v >= 10) {
             buf[pos] = '0' + (v / 10) % 10;
             pos += 1;
         }
+
         buf[pos] = '0' + v % 10;
         pos += 1;
+
         if (i < 3) {
             buf[pos] = '.';
             pos += 1;

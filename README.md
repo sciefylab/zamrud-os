@@ -4,7 +4,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  ZAMRUD OS - GLOBAL PROJECT STATUS                              │
 │  "Security = Identity × Integrity × Isolation × Blockchain"     │
-│  Last Updated: P.3e Twin-Node Eviction + Firewall Kill-Switch ✅│
+│  Last Updated: STAGE GOV Added + Authority Shell VERIFIED ✅    │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
@@ -25,8 +25,10 @@
 │  ─────────────────────────────────────────────────────────      │
 │                                                                 │
 │  Latest verified modules:                                      │
-│  ✅ security test: 109 passed, 0 failed                         │
-│  ✅ p2p test:       8/8 passed                                  │
+│  ✅ security test:   109 passed, 0 failed                       │
+│  ✅ p2p test:        8/8 passed                                 │
+│  ✅ chain test:      28 passed, 0 failed                        │
+│  ✅ authority shell: 10/10 authority command test PASS          │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -130,7 +132,7 @@
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE P2P: Decentralized Network Trust        ✅ PASS          │
+│  STAGE P2P: Decentralized Network Trust        ✅ 8/8 (100%)    │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
 │  ✅ P2P Core Module                             PASS           │
@@ -144,9 +146,109 @@
 │                                                                 │
 │  Core Trust Flow:                                               │
 │  security/authority.zig  = authority source-of-truth            │
+│  chain/authority.zig     = PoA adapter/cache only               │
 │  p2p/reputation.zig      = behavior score + forced ban          │
 │  p2p/eviction.zig        = twin-node eviction enforcement       │
 │  net/firewall.zig        = network kill-switch                  │
+│                                                                 │
+│  Double Authority Status: RESOLVED ✅                           │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ═══════════════════════════════════════════════════════════    │
+│  STAGE CHAIN: Blockchain Ledger & PoA          ✅ 6/6 (100%)    │
+│  ═══════════════════════════════════════════════════════════    │
+│                                                                 │
+│  ✅ Block Structure                             PASS           │
+│  ✅ Block Entries                               PASS           │
+│  ✅ PoA Authority Adapter                       PASS           │
+│  ✅ Ledger                                      PASS           │
+│  ✅ Persistence Save                            PASS           │
+│  ✅ Persistence Restore                         PASS           │
+│                                                                 │
+│  Chain Test Result: 28 passed, 0 failed                         │
+│                                                                 │
+│  Important Rule:                                                │
+│  chain/authority.zig must remain adapter/cache only.             │
+│  Runtime authority decision belongs to security/authority.zig.   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ═══════════════════════════════════════════════════════════    │
+│  STAGE SHELL: Security Commands                ✅ UPDATED       │
+│  ═══════════════════════════════════════════════════════════    │
+│                                                                 │
+│  ✅ security authority                          VERIFIED        │
+│  ✅ security authority status                   VERIFIED        │
+│  ✅ security authority list                     VERIFIED        │
+│  ✅ security authority revoked                  VERIFIED        │
+│  ✅ security authority stats                    VERIFIED        │
+│  ✅ security authority test                     10/10 PASS      │
+│                                                                 │
+│  Notes:                                                         │
+│  - Command is visibility/control surface only.                  │
+│  - No new authority database created.                           │
+│  - Reads from security/authority.zig source-of-truth.           │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ═══════════════════════════════════════════════════════════    │
+│  STAGE GOV: Authority Governance & Blockchain Trust ⬚ 0/7 (0%) │
+│  ═══════════════════════════════════════════════════════════    │
+│                                                                 │
+│  Goal:                                                          │
+│  Make authority, governance, eviction, and firewall actions      │
+│  auditable, signed, persistent, and chain-verifiable.            │
+│                                                                 │
+│  ⬚  GOV.1: Blockchain Governance Audit           PENDING        │
+│  │  ├── authority registered                                    │
+│  │  ├── authority revoked                                       │
+│  │  ├── authority quarantined                                   │
+│  │  ├── authority restored                                      │
+│  │  ├── P.3e eviction executed                                  │
+│  │  └── firewall kill-switch triggered                          │
+│                                                                 │
+│  ⬚  GOV.2: Signed Governance Actions            PENDING        │
+│  │  ├── signed eviction_vote                                    │
+│  │  ├── signed eviction_commit                                  │
+│  │  ├── signed authority action                                 │
+│  │  ├── reject forged vote                                      │
+│  │  └── reject unsigned commit                                  │
+│                                                                 │
+│  ⬚  GOV.3: Persistent Authority Registry         PENDING        │
+│  │  ├── save authority registry                                 │
+│  │  ├── load authority registry                                 │
+│  │  ├── persist revoked IDs                                     │
+│  │  ├── persist quarantine state                                │
+│  │  └── optional chain reconciliation                           │
+│                                                                 │
+│  ⬚  GOV.4: Authority Lifecycle Commands          PARTIAL        │
+│  │  ├── add-root                                                │
+│  │  ├── add-validator                                           │
+│  │  ├── add-member                                              │
+│  │  ├── add-guest                                               │
+│  │  ├── quarantine                                              │
+│  │  ├── restore                                                 │
+│  │  └── revoke                                                  │
+│                                                                 │
+│  ⬚  GOV.5: Chain-Based Authority Verification    PENDING        │
+│  │  ├── verify authority from ledger                            │
+│  │  ├── verify validator registration record                    │
+│  │  ├── verify revocation record                                │
+│  │  └── prevent chain/security mismatch                         │
+│                                                                 │
+│  ⬚  GOV.6: Hardware Attestation Enforcement      PENDING        │
+│  │  ├── verify hardware hash                                    │
+│  │  ├── detect hardware mismatch                                │
+│  │  ├── record violation                                        │
+│  │  └── feed P.3e evidence path                                 │
+│                                                                 │
+│  ⬚  GOV.7: Distributed Authority Synchronization PENDING        │
+│     ├── authority sync packet                                   │
+│     ├── authority delta sync                                    │
+│     ├── revoked authority propagation                           │
+│     ├── quarantine propagation                                  │
+│     └── chain proof validation                                  │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -195,6 +297,7 @@
 │  App Signing (Lattice): ⭐⭐⭐⭐⭐   <- E3.6 ENFORCING            │
 │  Hardware Sovereignty:  ⭐⭐⭐⭐⭐   <- F4.3 ANTI-EVIL MAID     ✅│
 │  Authority Governance:  ⭐⭐⭐⭐⭐   <- H.12 SOURCE-OF-TRUTH    ✅│
+│  Chain PoA Adapter:     ⭐⭐⭐⭐⭐   <- NO DOUBLE AUTHORITY     ✅│
 │  Network Kill-Switch:   ⭐⭐⭐⭐⭐   <- P.3e FIREWALL ENFORCED  ✅│
 │                                                                 │
 │  OVERALL:  ⭐⭐⭐⭐⭐ (Nation-State Grade Security)               │
@@ -213,6 +316,9 @@
 │  Stage P:  ████████████████████  5/5   complete (100%) ✅     🧅│
 │  Stage H:  ████████████████████ 12/12  complete (100%) ✅       │
 │  Stage P2P:████████████████████  8/8   complete (100%) ✅       │
+│  Stage Chain:██████████████████  6/6   complete (100%) ✅       │
+│  Stage Shell:██████████████████  Authority command DONE ✅      │
+│  Stage GOV:░░░░░░░░░░░░░░░░░░░░  0/7   complete (0%)            │
 │  Stage G:  ░░░░░░░░░░░░░░░░░░░░  0/6   complete (0%)            │
 │  Stage F6: ░░░░░░░░░░░░░░░░░░░░  0/6   complete (0%)            │
 │                                                                 │
@@ -230,6 +336,16 @@
 │  ✅ p2p test                                                     │
 │     └── 8/8 passed OK                                           │
 │                                                                 │
+│  ✅ chain test                                                   │
+│     └── 28 passed, 0 failed                                     │
+│                                                                 │
+│  ✅ security authority                                           │
+│     ├── status display PASS                                     │
+│     ├── list display PASS                                       │
+│     ├── stats display PASS                                      │
+│     ├── revoked display PASS                                    │
+│     └── authority test 10/10 PASS                               │
+│                                                                 │
 │  ✅ P.3e firewall integration                                    │
 │     ├── peer ban PASS                                           │
 │     ├── discovery cleanup PASS                                  │
@@ -240,32 +356,24 @@
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  NEXT PRIORITIES                                                │
+│  NEXT STAGE TARGETS                                             │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  1. Security Authority Shell Command                           🔐│
-│     ├── security authority                                      │
-│     ├── security authority status                               │
-│     ├── security authority list                                 │
-│     ├── security authority revoked                              │
-│     └── security authority stats                                │
+│  STAGE GOV.1 : Blockchain Governance Audit                     ⛓️│
+│  STAGE GOV.2 : Signed Governance Actions                       🧾│
+│  STAGE GOV.3 : Persistent Authority Registry                   💾│
+│  STAGE GOV.4 : Authority Lifecycle Commands                    🔐│
+│  STAGE GOV.5 : Chain-Based Authority Verification              ⛓️│
+│  STAGE GOV.6 : Hardware Attestation Enforcement                🧬│
+│  STAGE GOV.7 : Distributed Authority Synchronization           🌐│
 │                                                                 │
-│  2. Blockchain Audit Hooks                                      ⛓️│
-│     ├── authority registered                                    │
-│     ├── authority revoked                                       │
-│     ├── authority quarantined                                   │
-│     ├── P.3e eviction executed                                  │
-│     └── firewall kill-switch triggered                          │
+│  After STAGE GOV:                                              │
+│  STAGE G.1   : Zamrud Secure Shell Protocol Definition          │
+│  STAGE G.2   : Peer Discovery & Handshake                       │
+│  STAGE F6.1  : Framebuffer Compositor (GUI Foundation)          │
 │                                                                 │
-│  3. P.3 Vote / Commit Signature Verification                    🧾│
-│     ├── signed eviction_vote                                    │
-│     ├── signed eviction_commit                                  │
-│     ├── reject forged vote                                      │
-│     └── reject unsigned commit                                  │
-│                                                                 │
-│  4. G.1 : Zamrud Secure Shell (ZSH Protocol Definition)         │
-│  5. G.2 : Peer Discovery & Handshake                            │
-│  6. F6.1: Framebuffer Compositor (GUI Foundation)               │
+│  Current Focus:                                                │
+│  STAGE GOV.1 → GOV.2 → GOV.3                                   │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
