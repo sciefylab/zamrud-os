@@ -1,5 +1,7 @@
 //! Zamrud OS - Blockchain Module
 //! Lightweight integrity ledger with PoA consensus and persistence
+//! Updated: GOV.1a Runtime Governance Audit wrappers
+//! Updated: Lightweight audit checkpoint API
 
 const serial = @import("../drivers/serial/serial.zig");
 const fat32 = @import("../fs/fat32.zig");
@@ -25,8 +27,17 @@ var chain_initialized: bool = false;
 var static_chain_auth_key: [32]u8 = [_]u8{0} ** 32;
 var static_config_entry: entry.Entry = undefined;
 
-/// Initialize the blockchain subsystem
-/// Tries to load from disk first, falls back to fresh init
+// =============================================================================
+// Initialization
+// =============================================================================
+
+/// Initialize the blockchain subsystem.
+/// Tries to load from disk first, falls back to fresh init.
+///
+/// Important:
+/// - This does not automatically create a genesis ledger if no saved chain exists.
+/// - initWithGenesis() creates the first ledger state.
+/// - GOV.1a audit append can lazily initialize ledger with a GOV audit key.
 pub fn init() bool {
     serial.writeString("[CHAIN] Initializing integrity ledger...\n");
 
@@ -34,9 +45,10 @@ pub fn init() bool {
     authority.init();
     serial.writeString("[CHAIN] Step 1: Done\n");
 
-    // Step 2: Try to load persisted chain from disk
+    // Step 2: Try to load persisted chain from disk.
     if (fat32.isMounted()) {
         serial.writeString("[CHAIN] Step 2: Checking for saved chain...\n");
+
         if (ledger.loadFromDisk()) {
             serial.writeString("[CHAIN] Step 2: Chain restored from disk!\n");
             chain_initialized = true;
@@ -49,7 +61,6 @@ pub fn init() bool {
         serial.writeString("[CHAIN] Step 2: Disk not available, skip persistence\n");
     }
 
-    serial.writeString("[CHAIN] Setting chain_initialized=true\n");
     chain_initialized = true;
 
     serial.writeString("[CHAIN] Integrity ledger ready\n");
@@ -57,21 +68,21 @@ pub fn init() bool {
     return true;
 }
 
-/// Initialize with genesis (PoA)
+/// Initialize with genesis using PoA authority key.
 pub fn initWithGenesis(authority_pubkey: *const [32]u8) bool {
     if (!chain_initialized) {
-        // Don't call full init() here to avoid double-load
+        // Don't call full init() here to avoid double-load.
         authority.init();
         chain_initialized = true;
     }
 
-    // Add genesis authority
+    // Add genesis authority through chain PoA adapter.
     _ = authority.addAuthority(authority_pubkey, "genesis");
 
-    // Initialize ledger
+    // Initialize ledger.
     if (!ledger.init(authority_pubkey)) return false;
 
-    // Auto-save genesis to disk
+    // Auto-save genesis to disk.
     if (fat32.isMounted()) {
         _ = ledger.saveToDisk();
     }
@@ -79,62 +90,166 @@ pub fn initWithGenesis(authority_pubkey: *const [32]u8) bool {
     return true;
 }
 
-/// Check if initialized
+/// Check if chain wrapper is initialized.
 pub fn isInitialized() bool {
     return chain_initialized;
 }
 
-/// Get chain height
+/// Check if underlying ledger is initialized.
+pub fn isLedgerInitialized() bool {
+    return ledger.isInitialized();
+}
+
+// =============================================================================
+// Chain Query API
+// =============================================================================
+
+/// Get chain height.
 pub fn getHeight() u32 {
     return ledger.getHeight();
 }
 
-/// Get block count
+/// Get block count.
 pub fn getBlockCount() u32 {
     return ledger.getBlockCount();
 }
 
-/// Get tip hash
+/// Get tip hash.
 pub fn getTipHash() *const [32]u8 {
     return ledger.getTipHash();
 }
 
-/// Add a new block (auto-saves to disk)
+/// Get genesis hash.
+pub fn getGenesisHash() *const [32]u8 {
+    return ledger.getGenesisHash();
+}
+
+/// Add a new block.
 pub fn addBlock(blk: *const Block) bool {
+    chain_initialized = true;
     return ledger.addBlock(blk);
 }
 
-/// Create block template
+/// Create block template.
 pub fn createBlockTemplate(authority_pubkey: *const [32]u8) *Block {
     return ledger.createBlockTemplate(authority_pubkey);
+}
+
+// =============================================================================
+// GOV.1a: Runtime Governance Audit Wrappers
+// =============================================================================
+//
+// These wrappers keep chain/chain.zig as the public blockchain API.
+// Internal modules that risk import cycles may still import ledger.zig directly.
+//
+// No new audit database is created here.
+// Everything goes through the existing chain ledger.
+//
+// Lightweight rules:
+// - Audit auto-save is OFF by default in ledger.zig.
+// - Audit events are runtime hash-committed.
+// - If MAX_BLOCKS is full, audit folds into tip hash.
+// - Full persistent audit detail is deferred to GOV.1b bounded ring buffer.
+
+pub fn appendAuditEntry(ent: *const Entry) bool {
+    chain_initialized = true;
+    return ledger.appendAuditEntry(ent);
+}
+
+pub fn appendAuthorityAudit(
+    authority_id: *const [32]u8,
+    action: u8,
+    level: u8,
+    status: u8,
+) bool {
+    chain_initialized = true;
+
+    return ledger.appendAuthorityAudit(
+        authority_id,
+        action,
+        level,
+        status,
+    );
+}
+
+pub fn appendEvictionAudit(
+    target_id: *const [32]u8,
+    target_ip: u32,
+    reason: u8,
+    evidence_hash: *const [32]u8,
+) bool {
+    chain_initialized = true;
+
+    return ledger.appendEvictionAudit(
+        target_id,
+        target_ip,
+        reason,
+        evidence_hash,
+    );
+}
+
+pub fn appendFirewallAudit(
+    ip: u32,
+    action: u8,
+    reason_code: u8,
+) bool {
+    chain_initialized = true;
+
+    return ledger.appendFirewallAudit(
+        ip,
+        action,
+        reason_code,
+    );
+}
+
+/// Enable/disable audit auto-save.
+///
+/// Recommended default:
+/// - false for lightweight OS operation
+/// - true only for explicit audit checkpoint experiments
+pub fn setAuditAutoSave(enabled: bool) void {
+    ledger.setAuditAutoSave(enabled);
+}
+
+/// Query audit auto-save status.
+pub fn isAuditAutoSaveEnabled() bool {
+    return ledger.isAuditAutoSaveEnabled();
+}
+
+/// Save current hash-committed audit checkpoint manually.
+///
+/// This keeps the default runtime lightweight while still allowing
+/// explicit disk checkpointing when wanted.
+pub fn saveAuditCheckpoint() bool {
+    return ledger.saveToDisk();
 }
 
 // =============================================================================
 // Config Change Recording (D3)
 // =============================================================================
 
-/// Add a config change entry to the blockchain
-/// Creates a new block with the config_change entry
+/// Add a config change entry to the blockchain.
+/// Creates a new block with the config_change entry.
 pub fn addConfigEntry(config_entry: *const entry.Entry) bool {
     if (!chain_initialized) return false;
-    if (!ledger.isInitialized()) return false;
 
-    // Use a default authority key for config changes
+    // Use a default authority key for config changes.
     var auth_key: [32]u8 = [_]u8{0} ** 32;
     auth_key[0] = 0xCF; // 'CF' for ConFig
 
-    // Ensure ledger has genesis
-    if (ledger.getBlockCount() == 0) {
+    // Ensure ledger has genesis.
+    if (!ledger.isInitialized()) {
         if (!ledger.init(&auth_key)) return false;
     }
 
-    // Create a new block with this entry
+    // Create a new block with this entry.
     const blk = ledger.createBlockTemplate(&auth_key);
 
-    // Copy entry to static storage and add to block
+    // Copy entry to static storage and add to block.
     var i: usize = 0;
     static_config_entry.entry_type = config_entry.entry_type;
     static_config_entry.timestamp = config_entry.timestamp;
+
     while (i < 32) : (i += 1) {
         static_config_entry.target_hash[i] = config_entry.target_hash[i];
         static_config_entry.data[i] = config_entry.data[i];
@@ -149,27 +264,38 @@ pub fn addConfigEntry(config_entry: *const entry.Entry) bool {
 // Persistence API
 // =============================================================================
 
-/// Manually save chain to disk
+/// Manually save chain to disk.
 pub fn saveChain() bool {
     return ledger.saveToDisk();
 }
 
-/// Manually load chain from disk
+/// Manually load chain from disk.
 pub fn loadChain() bool {
-    return ledger.loadFromDisk();
+    const ok = ledger.loadFromDisk();
+
+    if (ok) {
+        chain_initialized = true;
+    }
+
+    return ok;
 }
 
-/// Check if a saved chain exists on disk
+/// Check if a saved chain exists on disk.
 pub fn hasSavedChain() bool {
     return ledger.hasSavedChain();
 }
 
-/// Enable/disable auto-save
+/// Enable/disable normal block auto-save.
 pub fn setAutoSave(enabled: bool) void {
     ledger.setAutoSave(enabled);
 }
 
-/// Get last saved height
+/// Check normal block auto-save.
+pub fn isAutoSaveEnabled() bool {
+    return ledger.isAutoSaveEnabled();
+}
+
+/// Get last saved height.
 pub fn getLastSaveHeight() u32 {
     return ledger.getLastSaveHeight();
 }
@@ -246,6 +372,10 @@ pub fn runAllTests() bool {
         return false;
     }
 }
+
+// =============================================================================
+// Utility
+// =============================================================================
 
 fn printU32(val: u32) void {
     if (val == 0) {

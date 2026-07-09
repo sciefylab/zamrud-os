@@ -4,7 +4,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  ZAMRUD OS - GLOBAL PROJECT STATUS                              │
 │  "Security = Identity × Integrity × Isolation × Blockchain"     │
-│  Last Updated: STAGE GOV Added + Authority Shell VERIFIED ✅    │
+│  Last Updated: GOV.1b Persistent Bounded Audit VERIFIED ✅       │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
@@ -27,8 +27,9 @@
 │  Latest verified modules:                                      │
 │  ✅ security test:   109 passed, 0 failed                       │
 │  ✅ p2p test:        8/8 passed                                 │
-│  ✅ chain test:      28 passed, 0 failed                        │
+│  ✅ chain test:      36 passed, 0 failed                        │
 │  ✅ authority shell: 10/10 authority command test PASS          │
+│  ✅ GOV.1b audit:    persistent bounded ring VERIFIED           │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -150,8 +151,10 @@
 │  p2p/reputation.zig      = behavior score + forced ban          │
 │  p2p/eviction.zig        = twin-node eviction enforcement       │
 │  net/firewall.zig        = network kill-switch                  │
+│  chain/ledger.zig        = bounded audit ledger                 │
 │                                                                 │
 │  Double Authority Status: RESOLVED ✅                           │
+│  Double Ledger Status:    AVOIDED ✅                            │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -166,11 +169,22 @@
 │  ✅ Persistence Save                            PASS           │
 │  ✅ Persistence Restore                         PASS           │
 │                                                                 │
-│  Chain Test Result: 28 passed, 0 failed                         │
+│  Chain Test Result: 36 passed, 0 failed                         │
 │                                                                 │
-│  Important Rule:                                                │
+│  Important Rules:                                               │
 │  chain/authority.zig must remain adapter/cache only.             │
 │  Runtime authority decision belongs to security/authority.zig.   │
+│  chain/ledger.zig stores proof/audit only, not authority truth.  │
+│                                                                 │
+│  GOV.1b Persistence:                                            │
+│  ✅ CHAIN.DAT V2 format                                         │
+│  ✅ V1 compatibility loader                                     │
+│  ✅ bounded audit ring                                          │
+│  ✅ max 8 persistent audit records                              │
+│  ✅ manual checkpoint support                                   │
+│  ✅ audit auto-save OFF by default                              │
+│  ✅ tip-hash folding when block capacity is full                 │
+│  ✅ lightweight file size policy                                │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -184,35 +198,52 @@
 │  ✅ security authority revoked                  VERIFIED        │
 │  ✅ security authority stats                    VERIFIED        │
 │  ✅ security authority test                     10/10 PASS      │
+│  ✅ chain audit                                 VERIFIED        │
+│  ✅ chain audit latest                          VERIFIED        │
+│  ✅ chain audit checkpoint                      VERIFIED        │
+│  ✅ chain load audit restore                    VERIFIED        │
 │                                                                 │
 │  Notes:                                                         │
-│  - Command is visibility/control surface only.                  │
+│  - Commands are visibility/control surfaces only.               │
 │  - No new authority database created.                           │
-│  - Reads from security/authority.zig source-of-truth.           │
+│  - No new ledger database created.                              │
+│  - Reads from security/authority.zig and chain/ledger.zig.      │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE GOV: Authority Governance & Blockchain Trust ⬚ 0/7 (0%) │
+│  STAGE GOV: Authority Governance & Blockchain Trust 2/7 (28%)  │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
 │  Goal:                                                          │
 │  Make authority, governance, eviction, and firewall actions      │
-│  auditable, signed, persistent, and chain-verifiable.            │
+│  auditable, signed, persistent, and chain-verifiable while       │
+│  keeping Zamrud OS lightweight.                                 │
 │                                                                 │
-│  ⬚  GOV.1: Blockchain Governance Audit           PENDING        │
-│  │  ├── authority registered                                    │
-│  │  ├── authority revoked                                       │
-│  │  ├── authority quarantined                                   │
-│  │  ├── authority restored                                      │
-│  │  ├── P.3e eviction executed                                  │
-│  │  └── firewall kill-switch triggered                          │
+│  ✅ GOV.1: Blockchain Governance Audit            DONE          │
+│  │  ├── authority registered audit                              │
+│  │  ├── authority revoked audit                                 │
+│  │  ├── authority quarantined audit                             │
+│  │  ├── authority restored audit                                │
+│  │  ├── P.3e eviction executed audit                            │
+│  │  ├── firewall kill-switch audit                              │
+│  │  ├── GOV.1a runtime hash-committed audit                     │
+│  │  ├── GOV.1b bounded persistent audit ring                    │
+│  │  ├── CHAIN.DAT V2 lightweight persistence                    │
+│  │  ├── V1 compatibility loader                                 │
+│  │  ├── manual audit checkpoint                                 │
+│  │  ├── audit auto-save OFF by default                          │
+│  │  └── tip-hash folding when full                              │
 │                                                                 │
-│  ⬚  GOV.2: Signed Governance Actions            PENDING        │
+│  ⬚  GOV.2: Signed Governance Actions             NEXT          │
 │  │  ├── signed eviction_vote                                    │
 │  │  ├── signed eviction_commit                                  │
 │  │  ├── signed authority action                                 │
+│  │  ├── verify vote signature                                   │
+│  │  ├── verify commit signature                                 │
 │  │  ├── reject forged vote                                      │
+│  │  ├── reject unsigned vote                                    │
+│  │  ├── reject forged commit                                    │
 │  │  └── reject unsigned commit                                  │
 │                                                                 │
 │  ⬚  GOV.3: Persistent Authority Registry         PENDING        │
@@ -299,6 +330,8 @@
 │  Authority Governance:  ⭐⭐⭐⭐⭐   <- H.12 SOURCE-OF-TRUTH    ✅│
 │  Chain PoA Adapter:     ⭐⭐⭐⭐⭐   <- NO DOUBLE AUTHORITY     ✅│
 │  Network Kill-Switch:   ⭐⭐⭐⭐⭐   <- P.3e FIREWALL ENFORCED  ✅│
+│  Governance Audit:      ⭐⭐⭐⭐⭐   <- GOV.1b BOUNDED AUDIT   ✅│
+│  Lightweight Chain:     ⭐⭐⭐⭐⭐   <- RING BUFFER + FOLDING  ✅│
 │                                                                 │
 │  OVERALL:  ⭐⭐⭐⭐⭐ (Nation-State Grade Security)               │
 │                                                                 │
@@ -308,19 +341,19 @@
 │  PROGRESS SUMMARY                                               │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  Stage B2: ████████████████████ 11/11  complete (100%) ✅       │
-│  Stage E:  ████████████████████  6/6   complete (100%) ✅     🚀│
-│  Stage F:  ████████████████████  4/4   complete (100%) ✅     🛡️│
-│  Stage S:  ████████████████████  6/6   complete (100%) ✅       │
-│  Stage R:  ████████████████████  5/5   complete (100%) ✅       │
-│  Stage P:  ████████████████████  5/5   complete (100%) ✅     🧅│
-│  Stage H:  ████████████████████ 12/12  complete (100%) ✅       │
-│  Stage P2P:████████████████████  8/8   complete (100%) ✅       │
-│  Stage Chain:██████████████████  6/6   complete (100%) ✅       │
-│  Stage Shell:██████████████████  Authority command DONE ✅      │
-│  Stage GOV:░░░░░░░░░░░░░░░░░░░░  0/7   complete (0%)            │
-│  Stage G:  ░░░░░░░░░░░░░░░░░░░░  0/6   complete (0%)            │
-│  Stage F6: ░░░░░░░░░░░░░░░░░░░░  0/6   complete (0%)            │
+│  Stage B2:   ████████████████████ 11/11  complete (100%) ✅     │
+│  Stage E:    ████████████████████  6/6   complete (100%) ✅   🚀│
+│  Stage F:    ████████████████████  4/4   complete (100%) ✅   🛡️│
+│  Stage S:    ████████████████████  6/6   complete (100%) ✅     │
+│  Stage R:    ████████████████████  5/5   complete (100%) ✅     │
+│  Stage P:    ████████████████████  5/5   complete (100%) ✅   🧅│
+│  Stage H:    ████████████████████ 12/12  complete (100%) ✅     │
+│  Stage P2P:  ████████████████████  8/8   complete (100%) ✅     │
+│  Stage Chain:████████████████████  6/6   complete (100%) ✅     │
+│  Stage Shell:████████████████████  Authority + Audit DONE ✅    │
+│  Stage GOV:  ██████░░░░░░░░░░░░░░  2/7   complete (28%)         │
+│  Stage G:    ░░░░░░░░░░░░░░░░░░░░  0/6   complete (0%)          │
+│  Stage F6:   ░░░░░░░░░░░░░░░░░░░░  0/6   complete (0%)          │
 │                                                                 │
 │  OVERALL:  ██████████████████████████████░ 97%                🚀│
 │                                                                 │
@@ -337,7 +370,7 @@
 │     └── 8/8 passed OK                                           │
 │                                                                 │
 │  ✅ chain test                                                   │
-│     └── 28 passed, 0 failed                                     │
+│     └── 36 passed, 0 failed                                     │
 │                                                                 │
 │  ✅ security authority                                           │
 │     ├── status display PASS                                     │
@@ -345,6 +378,14 @@
 │     ├── stats display PASS                                      │
 │     ├── revoked display PASS                                    │
 │     └── authority test 10/10 PASS                               │
+│                                                                 │
+│  ✅ chain audit                                                  │
+│     ├── GOV.1b status display PASS                              │
+│     ├── bounded ring status PASS                                │
+│     ├── audit latest display PASS                               │
+│     ├── audit checkpoint PASS                                   │
+│     ├── audit restore after load PASS                           │
+│     └── audit auto-save OFF by default PASS                     │
 │                                                                 │
 │  ✅ P.3e firewall integration                                    │
 │     ├── peer ban PASS                                           │
@@ -359,7 +400,6 @@
 │  NEXT STAGE TARGETS                                             │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  STAGE GOV.1 : Blockchain Governance Audit                     ⛓️│
 │  STAGE GOV.2 : Signed Governance Actions                       🧾│
 │  STAGE GOV.3 : Persistent Authority Registry                   💾│
 │  STAGE GOV.4 : Authority Lifecycle Commands                    🔐│
@@ -373,7 +413,7 @@
 │  STAGE F6.1  : Framebuffer Compositor (GUI Foundation)          │
 │                                                                 │
 │  Current Focus:                                                │
-│  STAGE GOV.1 → GOV.2 → GOV.3                                   │
+│  STAGE GOV.2 → signed vote/commit → anti-forgery governance     │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```

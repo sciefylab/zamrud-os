@@ -1,6 +1,7 @@
 //! Zamrud OS - Block Entry Types
 //! Entries that can be recorded in a block
 //! Updated: F3 identity/role entries
+//! Updated: GOV.1a governance audit entries
 
 const serial = @import("../drivers/serial/serial.zig");
 
@@ -12,10 +13,13 @@ pub const EntryType = enum(u8) {
     file_register = 0,
     file_update = 1,
     file_revoke = 2,
+
     authority_add = 10,
     authority_remove = 11,
+
     system_update = 20,
     config_change = 21,
+
     quarantine = 30,
     incident = 31,
 
@@ -23,6 +27,11 @@ pub const EntryType = enum(u8) {
     identity_register = 40,
     role_assign = 41,
     role_revoke = 42,
+
+    // GOV.1a: Governance / Security Audit Entries
+    authority_audit = 50,
+    eviction_audit = 60,
+    firewall_audit = 70,
 };
 
 // =============================================================================
@@ -33,6 +42,20 @@ pub const ROLE_ROOT: u8 = 0;
 pub const ROLE_ADMIN: u8 = 1;
 pub const ROLE_USER: u8 = 2;
 pub const ROLE_GUEST: u8 = 3;
+
+// =============================================================================
+// GOV.1a: Governance Audit Action Codes
+// =============================================================================
+
+pub const AUDIT_AUTH_REGISTER: u8 = 1;
+pub const AUDIT_AUTH_REVOKE: u8 = 2;
+pub const AUDIT_AUTH_QUARANTINE: u8 = 3;
+pub const AUDIT_AUTH_RESTORE: u8 = 4;
+
+pub const AUDIT_EVICTION_EXECUTED: u8 = 10;
+
+pub const AUDIT_FIREWALL_KILLSWITCH: u8 = 20;
+pub const AUDIT_FIREWALL_QUARANTINE: u8 = 21;
 
 // =============================================================================
 // Static storage for entries
@@ -52,7 +75,7 @@ pub const Entry = struct {
     data: [32]u8,
     timestamp: u32,
 
-    /// Initialize into provided pointer (safe - no return by value)
+    /// Initialize into provided pointer.
     pub fn initInto(dest: *Entry) void {
         dest.entry_type = .file_register;
         dest.timestamp = 0;
@@ -64,13 +87,13 @@ pub const Entry = struct {
         }
     }
 
-    /// Initialize static entry and return pointer
+    /// Initialize static entry and return pointer.
     pub fn initPtr() *Entry {
         initInto(&static_entry);
         return &static_entry;
     }
 
-    /// Legacy init - uses static, returns copy
+    /// Legacy init - uses static, returns copy.
     pub fn init() Entry {
         initInto(&static_entry);
 
@@ -87,7 +110,7 @@ pub const Entry = struct {
         return result;
     }
 
-    /// Create file registration entry into destination
+    /// Create file registration entry into destination.
     pub fn fileRegisterInto(dest: *Entry, file_hash: *const [32]u8, version: u16) void {
         initInto(dest);
         dest.entry_type = .file_register;
@@ -101,7 +124,7 @@ pub const Entry = struct {
         dest.data[1] = @intCast((version >> 8) & 0xFF);
     }
 
-    /// Create quarantine entry into destination
+    /// Create quarantine entry into destination.
     pub fn quarantineFileInto(dest: *Entry, file_hash: *const [32]u8, reason: u8) void {
         initInto(dest);
         dest.entry_type = .quarantine;
@@ -118,7 +141,7 @@ pub const Entry = struct {
     // F3: Identity/Role Entry Builders
     // =========================================================================
 
-    /// Create identity_register entry
+    /// Create identity_register entry.
     /// target_hash = user's pubkey
     /// data[0] = role, data[1..16] = name
     pub fn identityRegisterInto(
@@ -137,7 +160,6 @@ pub const Entry = struct {
 
         dest.data[0] = role;
 
-        // Copy name to data[1..16] (max 15 chars)
         const nlen = if (name.len > 15) @as(usize, 15) else name.len;
         i = 0;
         while (i < nlen) : (i += 1) {
@@ -145,7 +167,7 @@ pub const Entry = struct {
         }
     }
 
-    /// Create role_assign entry
+    /// Create role_assign entry.
     /// target_hash = target user's pubkey
     /// data[0] = new role, data[1..16] = assigner's pubkey prefix
     pub fn roleAssignInto(
@@ -164,14 +186,13 @@ pub const Entry = struct {
 
         dest.data[0] = new_role;
 
-        // Copy first 15 bytes of assigner's pubkey as identifier
         i = 0;
         while (i < 15) : (i += 1) {
             dest.data[1 + i] = assigner_pubkey[i];
         }
     }
 
-    /// Create role_revoke entry
+    /// Create role_revoke entry.
     /// target_hash = target user's pubkey
     /// data[0] = reason code, data[1..16] = revoker's pubkey prefix
     pub fn roleRevokeInto(
@@ -196,22 +217,122 @@ pub const Entry = struct {
         }
     }
 
-    /// Get role from identity_register or role_assign entry
+    // =========================================================================
+    // GOV.1a: Governance Audit Entry Builders
+    // =========================================================================
+
+    /// Create authority_audit entry.
+    ///
+    /// target_hash = authority id
+    /// data[0] = audit action
+    /// data[1] = authority level
+    /// data[2] = authority status
+    pub fn authorityAuditInto(
+        dest: *Entry,
+        authority_id: *const [32]u8,
+        action: u8,
+        level: u8,
+        status: u8,
+        timestamp: u32,
+    ) void {
+        initInto(dest);
+        dest.entry_type = .authority_audit;
+        dest.timestamp = timestamp;
+
+        var i: usize = 0;
+        while (i < 32) : (i += 1) {
+            dest.target_hash[i] = authority_id[i];
+        }
+
+        dest.data[0] = action;
+        dest.data[1] = level;
+        dest.data[2] = status;
+    }
+
+    /// Create eviction_audit entry.
+    ///
+    /// target_hash = evicted peer id
+    /// data[0] = AUDIT_EVICTION_EXECUTED
+    /// data[1] = eviction reason
+    /// data[2..5] = target_ip big-endian
+    /// data[6..31] = evidence hash prefix
+    pub fn evictionAuditInto(
+        dest: *Entry,
+        target_id: *const [32]u8,
+        target_ip: u32,
+        reason: u8,
+        evidence_hash: *const [32]u8,
+        timestamp: u32,
+    ) void {
+        initInto(dest);
+        dest.entry_type = .eviction_audit;
+        dest.timestamp = timestamp;
+
+        var i: usize = 0;
+        while (i < 32) : (i += 1) {
+            dest.target_hash[i] = target_id[i];
+        }
+
+        dest.data[0] = AUDIT_EVICTION_EXECUTED;
+        dest.data[1] = reason;
+
+        dest.data[2] = @intCast((target_ip >> 24) & 0xFF);
+        dest.data[3] = @intCast((target_ip >> 16) & 0xFF);
+        dest.data[4] = @intCast((target_ip >> 8) & 0xFF);
+        dest.data[5] = @intCast(target_ip & 0xFF);
+
+        i = 0;
+        while (i < 26) : (i += 1) {
+            dest.data[6 + i] = evidence_hash[i];
+        }
+    }
+
+    /// Create firewall_audit entry.
+    ///
+    /// target_hash[0..3] = ip big-endian
+    /// data[0] = firewall action
+    /// data[1] = reason code
+    pub fn firewallAuditInto(
+        dest: *Entry,
+        ip: u32,
+        action: u8,
+        reason_code: u8,
+        timestamp: u32,
+    ) void {
+        initInto(dest);
+        dest.entry_type = .firewall_audit;
+        dest.timestamp = timestamp;
+
+        dest.target_hash[0] = @intCast((ip >> 24) & 0xFF);
+        dest.target_hash[1] = @intCast((ip >> 16) & 0xFF);
+        dest.target_hash[2] = @intCast((ip >> 8) & 0xFF);
+        dest.target_hash[3] = @intCast(ip & 0xFF);
+
+        dest.data[0] = action;
+        dest.data[1] = reason_code;
+    }
+
+    /// Get role from identity_register or role_assign entry.
     pub fn getRole(self: *const Entry) u8 {
         return self.data[0];
     }
 
-    /// Get name from identity_register entry (data[1..16])
+    /// Get name from identity_register entry.
     pub fn getEntryName(self: *const Entry) []const u8 {
         var len: usize = 0;
         while (len < 15) : (len += 1) {
             if (self.data[1 + len] == 0) break;
         }
+
         if (len == 0) return "";
         return self.data[1 .. 1 + len];
     }
 
-    /// Serialize entry to bytes
+    /// Serialize entry to bytes.
+    ///
+    /// NOTE:
+    /// Kept at legacy 66-byte format for GOV.1a compatibility.
+    /// Full timestamp serialization is deferred to GOV.1b persistent audit detail.
     pub fn serialize(self: *const Entry, out: []u8) usize {
         if (out.len < 66) return 0;
 
@@ -324,6 +445,79 @@ pub fn test_entry() bool {
         }
     } else {
         serial.writeString("    FAIL (role)\n");
+        failed += 1;
+    }
+
+    // Test 6: GOV authority audit
+    serial.writeString("  Test 6: GOV authority audit\n");
+
+    Entry.authorityAuditInto(
+        &static_entry,
+        &test_pubkey,
+        AUDIT_AUTH_REGISTER,
+        ROLE_ADMIN,
+        1,
+        1700000001,
+    );
+
+    if (static_entry.entry_type == .authority_audit and
+        static_entry.target_hash[0] == 0x42 and
+        static_entry.data[0] == AUDIT_AUTH_REGISTER)
+    {
+        serial.writeString("    OK\n");
+        passed += 1;
+    } else {
+        serial.writeString("    FAIL\n");
+        failed += 1;
+    }
+
+    // Test 7: GOV eviction audit
+    serial.writeString("  Test 7: GOV eviction audit\n");
+
+    var ev_hash: [32]u8 = [_]u8{0} ** 32;
+    ev_hash[0] = 0xEE;
+
+    Entry.evictionAuditInto(
+        &static_entry2,
+        &test_pubkey,
+        0xC0A80101,
+        7,
+        &ev_hash,
+        1700000002,
+    );
+
+    if (static_entry2.entry_type == .eviction_audit and
+        static_entry2.data[0] == AUDIT_EVICTION_EXECUTED and
+        static_entry2.data[2] == 0xC0 and
+        static_entry2.data[5] == 0x01)
+    {
+        serial.writeString("    OK\n");
+        passed += 1;
+    } else {
+        serial.writeString("    FAIL\n");
+        failed += 1;
+    }
+
+    // Test 8: GOV firewall audit
+    serial.writeString("  Test 8: GOV firewall audit\n");
+
+    Entry.firewallAuditInto(
+        &static_entry,
+        0xC0A8FA77,
+        AUDIT_FIREWALL_KILLSWITCH,
+        1,
+        1700000003,
+    );
+
+    if (static_entry.entry_type == .firewall_audit and
+        static_entry.target_hash[0] == 0xC0 and
+        static_entry.target_hash[3] == 0x77 and
+        static_entry.data[0] == AUDIT_FIREWALL_KILLSWITCH)
+    {
+        serial.writeString("    OK\n");
+        passed += 1;
+    } else {
+        serial.writeString("    FAIL\n");
         failed += 1;
     }
 

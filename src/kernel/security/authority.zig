@@ -21,9 +21,14 @@
 //!   member         -> trusted member
 //!   validator      -> may participate in consensus / eviction voting
 //!   root_authority -> bootstrap/root authority
+//!
+//! Updated: GOV.1a Blockchain Governance Audit Hook
 
 const serial = @import("../drivers/serial/serial.zig");
 const timer = @import("../drivers/timer/timer.zig");
+
+const ledger = @import("../chain/ledger.zig");
+const chain_entry = @import("../chain/entry.zig");
 
 // =============================================================================
 // Configuration
@@ -184,6 +189,30 @@ fn emptyAuthority() AuthorityEntry {
 }
 
 // =============================================================================
+// GOV.1a Blockchain Governance Audit Hook
+// =============================================================================
+//
+// Important:
+// - security/authority.zig remains the source-of-truth.
+// - Chain ledger is audit/proof only.
+// - Audit failure must NOT cancel authority state changes.
+// - This uses the existing chain ledger, not a new audit database.
+
+fn auditAuthorityEvent(
+    id: *const [32]u8,
+    action: u8,
+    level: AuthorityLevel,
+    status: AuthorityStatus,
+) void {
+    _ = ledger.appendAuthorityAudit(
+        id,
+        action,
+        @intFromEnum(level),
+        @intFromEnum(status),
+    );
+}
+
+// =============================================================================
 // Registration API
 // =============================================================================
 
@@ -329,6 +358,13 @@ pub fn registerAuthority(
     serial.writeString("[AUTHORITY] Registered ");
     serial.writeString(levelName(level));
     serial.writeString("\n");
+
+    auditAuthorityEvent(
+        id,
+        chain_entry.AUDIT_AUTH_REGISTER,
+        level,
+        .active,
+    );
 
     return true;
 }
@@ -579,8 +615,6 @@ fn canVoteEntry(entry: *const AuthorityEntry) bool {
             entry.hardware_attested;
     }
 
-    // Small network bootstrap:
-    // Validators/root may vote if they are attested OR authority-signed.
     switch (entry.level) {
         .root_authority, .validator => {
             return entry.hardware_attested or entry.authority_signature_verified;
@@ -684,7 +718,10 @@ pub fn recordAuthorityViolation(id: *const [32]u8) void {
 pub fn revokeAuthority(id: *const [32]u8) bool {
     const now = getTimestamp();
 
+    var old_level: AuthorityLevel = .unknown;
+
     if (getEntry(id)) |entry| {
+        old_level = entry.level;
         entry.status = .revoked;
         entry.active = false;
         entry.revoked_at = now;
@@ -704,6 +741,14 @@ pub fn revokeAuthority(id: *const [32]u8) bool {
     stats.revocations += 1;
 
     serial.writeString("[AUTHORITY] Revoked authority\n");
+
+    auditAuthorityEvent(
+        id,
+        chain_entry.AUDIT_AUTH_REVOKE,
+        old_level,
+        .revoked,
+    );
+
     return true;
 }
 
@@ -714,6 +759,14 @@ pub fn quarantineAuthority(id: *const [32]u8) bool {
         stats.quarantines += 1;
 
         serial.writeString("[AUTHORITY] Quarantined authority\n");
+
+        auditAuthorityEvent(
+            id,
+            chain_entry.AUDIT_AUTH_QUARANTINE,
+            entry.level,
+            .quarantined,
+        );
+
         return true;
     }
 
@@ -727,6 +780,14 @@ pub fn restoreAuthority(id: *const [32]u8) bool {
         if (entry.status == .quarantined) {
             entry.status = .active;
             entry.last_seen = getTimestamp();
+
+            auditAuthorityEvent(
+                id,
+                chain_entry.AUDIT_AUTH_RESTORE,
+                entry.level,
+                .active,
+            );
+
             return true;
         }
     }

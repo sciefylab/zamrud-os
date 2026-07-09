@@ -18,6 +18,8 @@
 //! 6. firewall.blockEvictedPeerIp(target_ip)
 //! 7. firewall.dropExistingFlows(target_ip)
 //! 8. broadcast eviction_commit
+//!
+//! Updated: GOV.1a Blockchain Governance Audit Hook
 
 const serial = @import("../drivers/serial/serial.zig");
 const timer = @import("../drivers/timer/timer.zig");
@@ -34,6 +36,7 @@ const authority = @import("../security/authority.zig");
 const threat_score = @import("../security/threat_score.zig");
 const violation = @import("../security/violation.zig");
 const firewall = @import("../net/firewall.zig");
+const ledger = @import("../chain/ledger.zig");
 
 // =============================================================================
 // Constants
@@ -155,8 +158,8 @@ var executed_count: usize = 0;
 var initialized: bool = false;
 
 /// Test flag.
-/// When enabled, executeEviction() skips security evidence scoring to prevent
-/// tests from escalating into global lockdown.
+/// When enabled, executeEviction() skips security evidence scoring and GOV audit
+/// to prevent tests from escalating into global lockdown or polluting chain state.
 var test_mode: bool = false;
 
 pub var stats = EvictionStats{};
@@ -205,6 +208,32 @@ fn emptyRecord() EvictionRecord {
         .created_at = 0,
         .executed_at = 0,
     };
+}
+
+// =============================================================================
+// GOV.1a Blockchain Governance Audit Hook
+// =============================================================================
+//
+// Important:
+// - p2p/eviction.zig remains the enforcement layer.
+// - Chain ledger only records audit evidence.
+// - Audit failure must NOT cancel eviction enforcement.
+// - Test mode skips audit to avoid polluting chain during unit tests.
+
+fn auditEvictionExecuted(
+    target_id: *const [32]u8,
+    target_ip: u32,
+    reason: EvictionReason,
+    evidence_hash: *const [32]u8,
+) void {
+    if (test_mode) return;
+
+    _ = ledger.appendEvictionAudit(
+        target_id,
+        target_ip,
+        @intFromEnum(reason),
+        evidence_hash,
+    );
 }
 
 // =============================================================================
@@ -549,6 +578,13 @@ fn executeEviction(
     storeExecutedRecord(target_id, target_ip, reason, evidence_hash, voter_a, voter_b);
 
     stats.evictions_executed += 1;
+
+    auditEvictionExecuted(
+        &target_id,
+        target_ip,
+        reason,
+        &evidence_hash,
+    );
 
     if (should_broadcast_commit) {
         const commit = EvictionCommit{

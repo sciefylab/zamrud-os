@@ -3,6 +3,7 @@
 //! Updated: E3.4 Per-Process Network Filtering
 //! Updated: H.8 Threat Scoring Integration
 //! Updated: P.3e P2P Eviction Network Kill-Switch Integration
+//! Updated: GOV.1a Blockchain Governance Audit Hook
 
 const std = @import("std");
 const serial = @import("../drivers/serial/serial.zig");
@@ -13,6 +14,13 @@ const timer = @import("../drivers/timer/timer.zig");
 // ============================================================================
 
 const threat_score = @import("../security/threat_score.zig");
+
+// ============================================================================
+// GOV.1a Blockchain Governance Audit
+// ============================================================================
+
+const ledger = @import("../chain/ledger.zig");
+const chain_entry = @import("../chain/entry.zig");
 
 // ============================================================================
 // P.3e Eviction Firewall Integration
@@ -213,8 +221,9 @@ var scan_tracker_count: usize = 0;
 
 // P.3e test mode.
 // When true, P.3e firewall calls still blacklist/drop flows,
-// but do not feed H.8 threat_score. This prevents p2p tests from
-// generating permanent threat escalation.
+// but do not feed H.8 threat_score or GOV audit.
+// This prevents p2p tests from generating permanent threat escalation
+// or polluting the chain.
 var p3e_test_mode: bool = false;
 
 // ============================================================================
@@ -470,6 +479,26 @@ fn makeDescription(text: []const u8) [64]u8 {
 }
 
 // ============================================================================
+// GOV.1a Blockchain Governance Audit Hook
+// ============================================================================
+//
+// Important:
+// - net/firewall.zig remains the enforcement layer.
+// - Chain ledger only records audit evidence.
+// - Audit failure must NOT cancel firewall enforcement.
+// - p3e_test_mode skips audit to avoid polluting chain during unit tests.
+
+fn auditFirewallEvent(ip: u32, action: u8, reason_code: u8) void {
+    if (p3e_test_mode) return;
+
+    _ = ledger.appendFirewallAudit(
+        ip,
+        action,
+        reason_code,
+    );
+}
+
+// ============================================================================
 // Rule Management
 // ============================================================================
 
@@ -666,6 +695,12 @@ pub fn blockEvictedPeerIp(ip: u32, reason: []const u8) bool {
             .p2p_eviction_evidence,
             .high,
         );
+
+        auditFirewallEvent(
+            ip,
+            chain_entry.AUDIT_FIREWALL_KILLSWITCH,
+            1,
+        );
     }
 
     return addToBlacklist(
@@ -685,6 +720,12 @@ pub fn quarantinePeerIp(ip: u32, reason: []const u8) bool {
             ip,
             .p2p_eviction_evidence,
             .medium,
+        );
+
+        auditFirewallEvent(
+            ip,
+            chain_entry.AUDIT_FIREWALL_QUARANTINE,
+            2,
         );
     }
 
@@ -1043,7 +1084,13 @@ fn recordViolation(ip: u32) void {
 // Connection Tracking
 // ============================================================================
 
-fn trackConnection(src_ip: u32, src_port: u16, dst_ip: u32, dst_port: u16, protocol: Protocol) void {
+fn trackConnection(
+    src_ip: u32,
+    src_port: u16,
+    dst_ip: u32,
+    dst_port: u16,
+    protocol: Protocol,
+) void {
     if (connection_count >= MAX_CONNECTIONS) {
         for (0..MAX_CONNECTIONS - 1) |i| {
             connections[i] = connections[i + 1];

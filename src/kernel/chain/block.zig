@@ -1,5 +1,6 @@
 //! Zamrud OS - Block Structure
 //! Lightweight block for integrity ledger (NO MINING)
+//! Updated: GOV.1a audit-safe entries hashing
 
 const serial = @import("../drivers/serial/serial.zig");
 const hash = @import("../crypto/hash.zig");
@@ -32,7 +33,11 @@ pub const BlockHeader = struct {
 
 var static_block_data: [256]u8 = [_]u8{0} ** 256;
 var static_block_hash: [32]u8 = [_]u8{0} ** 32;
-var static_entries_data: [128]u8 = [_]u8{0} ** 128;
+
+// Each entry hash material:
+// entry_type(1) + target_hash(32) + data(32) + timestamp(4) = 69 bytes.
+// MAX_ENTRIES=8 => 552 bytes. Keep 576 for alignment/safety.
+var static_entries_data: [576]u8 = [_]u8{0} ** 576;
 
 pub var static_block: Block = undefined;
 var static_block_initialized: bool = false;
@@ -61,6 +66,7 @@ pub const Block = struct {
             static_block.header.entries_hash[i] = 0;
             static_block.header.authority[i] = 0;
         }
+
         i = 0;
         while (i < 64) : (i += 1) {
             static_block.header.signature[i] = 0;
@@ -87,19 +93,38 @@ pub const Block = struct {
         return true;
     }
 
+    /// Calculate hash of all entries.
+    ///
+    /// GOV.1a hardening:
+    /// Previously only entry_type + target_hash were hashed.
+    /// Governance audit entries require data + timestamp to be committed too.
     pub fn calculateEntriesHash(self: *Block) void {
         var pos: usize = 0;
 
         var i: usize = 0;
-        while (i < self.entry_count and pos + 33 < 128) : (i += 1) {
-            static_entries_data[pos] = @intFromEnum(self.entries[i].entry_type);
+        while (i < self.entry_count and pos + 69 <= static_entries_data.len) : (i += 1) {
+            const ent = &self.entries[i];
+
+            static_entries_data[pos] = @intFromEnum(ent.entry_type);
             pos += 1;
 
             var j: usize = 0;
-            while (j < 32 and pos < 128) : (j += 1) {
-                static_entries_data[pos] = self.entries[i].target_hash[j];
+            while (j < 32) : (j += 1) {
+                static_entries_data[pos] = ent.target_hash[j];
                 pos += 1;
             }
+
+            j = 0;
+            while (j < 32) : (j += 1) {
+                static_entries_data[pos] = ent.data[j];
+                pos += 1;
+            }
+
+            static_entries_data[pos] = @intCast(ent.timestamp & 0xFF);
+            static_entries_data[pos + 1] = @intCast((ent.timestamp >> 8) & 0xFF);
+            static_entries_data[pos + 2] = @intCast((ent.timestamp >> 16) & 0xFF);
+            static_entries_data[pos + 3] = @intCast((ent.timestamp >> 24) & 0xFF);
+            pos += 4;
         }
 
         hash.sha256Into(static_entries_data[0..pos], &self.header.entries_hash);
@@ -209,6 +234,7 @@ pub fn test_blockchain() bool {
 
     static_test_entry.entry_type = .file_register;
     static_test_entry.timestamp = 0;
+
     var j: usize = 0;
     while (j < 32) : (j += 1) {
         static_test_entry.target_hash[j] = 0;
@@ -226,6 +252,7 @@ pub fn test_blockchain() bool {
 
     // Test 3: Genesis block
     serial.writeString("  Test 3: Genesis block\n");
+
     j = 0;
     while (j < 32) : (j += 1) {
         test_auth_key[j] = 0;
@@ -243,18 +270,70 @@ pub fn test_blockchain() bool {
 
     // Test 4: Block hash
     serial.writeString("  Test 4: Block hash\n");
+
     const block_hash = genesis.getHash();
+
     var has_data = false;
     var i: usize = 0;
     while (i < 32) : (i += 1) {
         if (block_hash[i] != 0) has_data = true;
     }
+
     if (has_data) {
         serial.writeString("    OK\n");
         passed += 1;
     } else {
         serial.writeString("    FAIL\n");
         failed += 1;
+    }
+
+    // Test 5: Entry data affects entries_hash
+    serial.writeString("  Test 5: Entry data hash\n");
+    {
+        _ = Block.initStatic();
+
+        var e1: entry_mod.Entry = undefined;
+        entry_mod.Entry.initInto(&e1);
+        e1.entry_type = .authority_audit;
+        e1.target_hash[0] = 0xAA;
+        e1.data[0] = entry_mod.AUDIT_AUTH_REGISTER;
+        e1.timestamp = 1700000001;
+
+        _ = static_block.addEntry(&e1);
+
+        var h1: [32]u8 = [_]u8{0} ** 32;
+        i = 0;
+        while (i < 32) : (i += 1) {
+            h1[i] = static_block.header.entries_hash[i];
+        }
+
+        _ = Block.initStatic();
+
+        var e2: entry_mod.Entry = undefined;
+        entry_mod.Entry.initInto(&e2);
+        e2.entry_type = .authority_audit;
+        e2.target_hash[0] = 0xAA;
+        e2.data[0] = entry_mod.AUDIT_AUTH_REVOKE;
+        e2.timestamp = 1700000001;
+
+        _ = static_block.addEntry(&e2);
+
+        var different = false;
+        i = 0;
+        while (i < 32) : (i += 1) {
+            if (h1[i] != static_block.header.entries_hash[i]) {
+                different = true;
+                break;
+            }
+        }
+
+        if (different) {
+            serial.writeString("    OK\n");
+            passed += 1;
+        } else {
+            serial.writeString("    FAIL\n");
+            failed += 1;
+        }
     }
 
     serial.writeString("  BLOCK: ");
