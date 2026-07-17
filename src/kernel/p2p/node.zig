@@ -1,6 +1,7 @@
 //! Zamrud OS - P2P Network Node Manager
 //! P.3c: Socket Listener & Broadcaster
 //! P.3e Ready: Listener Dispatch for Twin-Node Eviction
+//! GOV.2a: Handshake public-key binding foundation
 //!
 //! Responsibilities:
 //! - TCP listener for incoming P2P peers
@@ -20,6 +21,7 @@ const timer = @import("../drivers/timer/timer.zig");
 const ahci = @import("../drivers/storage/ahci.zig");
 const hash = @import("../crypto/hash.zig");
 const crypto = @import("../crypto/crypto.zig");
+const constant_time = @import("../crypto/constant_time.zig");
 
 const peer = @import("peer.zig");
 const message = @import("message.zig");
@@ -142,8 +144,48 @@ fn acceptNewPeers() void {
 }
 
 // =============================================================================
-// Security Gateway: Validasi Peer Masuk
+// GOV.2a Security Gateway: Validasi Peer Masuk
 // =============================================================================
+
+fn validateNodeIdBinding(msg: *const message.Message, info: *const protocol.NodeInfo) bool {
+    var expected_id: [32]u8 = [_]u8{0} ** 32;
+
+    hash.sha256Into(&info.public_key, &expected_id);
+
+    const ok = constant_time.constantTimeCompare32(&expected_id, &msg.sender_id);
+
+    constant_time.secureZero32(&expected_id);
+
+    return ok;
+}
+
+fn isZeroPublicKey(pk: *const [32]u8) bool {
+    return constant_time.constantTimeIsZero32(pk);
+}
+
+fn validateHandshakeMessage(msg: *const message.Message, info: *const protocol.NodeInfo) bool {
+    if (isZeroPublicKey(&info.public_key)) {
+        serial.writeString("[P2P-NODE] [DROP] Zero public key in handshake\n");
+        return false;
+    }
+
+    if (!validateNodeIdBinding(msg, info)) {
+        serial.writeString("[P2P-NODE] [DROP] Handshake node_id != sha256(public_key)\n");
+        return false;
+    }
+
+    if (message.isZeroSignature(&msg.signature)) {
+        serial.writeString("[P2P-NODE] [DROP] Unsigned handshake\n");
+        return false;
+    }
+
+    if (!message.verifyWithPublicKey(msg, &info.public_key)) {
+        serial.writeString("[P2P-NODE] [DROP] Invalid handshake signature\n");
+        return false;
+    }
+
+    return true;
+}
 
 fn handlePeerHandshake(peer_sock: *socket.Socket, peer_ip: u32, peer_port: u16) void {
     const bytes_read = socket.recv(peer_sock, &incoming_buffer);
@@ -173,12 +215,6 @@ fn handlePeerHandshake(peer_sock: *socket.Socket, peer_ip: u32, peer_port: u16) 
         return;
     }
 
-    if (!message.verify(&msg)) {
-        serial.writeString("[P2P-NODE] [DROP] Invalid handshake signature\n");
-        socket.close(peer_sock);
-        return;
-    }
-
     const payload_len: usize = @intCast(msg.payload_len);
 
     const info = protocol.decodeNodeInfo(msg.payload[0..payload_len]) orelse {
@@ -189,6 +225,16 @@ fn handlePeerHandshake(peer_sock: *socket.Socket, peer_ip: u32, peer_port: u16) 
 
     if (info.version != @import("p2p.zig").VERSION) {
         serial.writeString("[P2P-NODE] [DROP] Unsupported peer protocol version\n");
+        socket.close(peer_sock);
+        return;
+    }
+
+    // GOV.2a:
+    // Verify public-key binding before accepting peer:
+    // sender_id must equal sha256(NodeInfo.public_key).
+    // message envelope must not be unsigned.
+    // verifyWithPublicKey() is called here as the strict handshake path.
+    if (!validateHandshakeMessage(&msg, &info)) {
         socket.close(peer_sock);
         return;
     }
@@ -279,7 +325,6 @@ fn pollConnectedPeerMessages() void {
 
                 reads += 1;
             } else if (bytes_read < 0) {
-                // Negative value means socket-level error in current socket API style.
                 serial.writeString("[P2P-NODE] Peer socket read error, disconnecting\n");
                 peer.disconnect(p);
                 reads += 1;
@@ -415,7 +460,7 @@ fn printIp(ip: u32) void {
 
 pub fn runTests() bool {
     serial.writeString("\n========================================\n");
-    serial.writeString("  P2P NODE TESTS P.3c/P.3e\n");
+    serial.writeString("  P2P NODE TESTS P.3c/P.3e/GOV.2a\n");
     serial.writeString("========================================\n\n");
 
     var passed: u32 = 0;
@@ -442,6 +487,31 @@ pub fn runTests() bool {
     } else {
         serial.writeString("FAIL\n");
         failed += 1;
+    }
+
+    serial.writeString("  [4] public key binding....... ");
+    {
+        var pk: [32]u8 = [_]u8{0xA5} ** 32;
+        var expected_id: [32]u8 = undefined;
+
+        hash.sha256Into(&pk, &expected_id);
+
+        var msg = message.createPing(expected_id);
+
+        const info = protocol.NodeInfo{
+            .version = @import("p2p.zig").VERSION,
+            .port = ZAMRUD_P2P_PORT,
+            .public_key = pk,
+            .capabilities = protocol.CAP_FULL_NODE,
+        };
+
+        if (validateNodeIdBinding(&msg, &info)) {
+            serial.writeString("PASS\n");
+            passed += 1;
+        } else {
+            serial.writeString("FAIL\n");
+            failed += 1;
+        }
     }
 
     serial.writeString("\n  Node Results: ");

@@ -2,9 +2,12 @@
 //! Message encoding, decoding, signing
 //! P.3d: Multi-Layer Onion Wrapping (OTP & SLOR Integration)
 //! P.3e: Twin-Node Eviction Message Types
+//! GOV.2a: Message identity binding helpers
 
 const serial = @import("../drivers/serial/serial.zig");
 const crypto = @import("../crypto/crypto.zig");
+const hash = @import("../crypto/hash.zig");
+const constant_time = @import("../crypto/constant_time.zig");
 
 // =============================================================================
 // Constants
@@ -15,6 +18,10 @@ pub const MAX_PAYLOAD_SIZE: usize = 4096;
 pub const HEADER_SIZE: usize = 128;
 pub const SIGNATURE_SIZE: usize = 64;
 pub const MAGIC: u32 = 0x5A414D52; // "ZAMR"
+
+// Canonical signing buffer:
+// type(1) + sender(32) + timestamp(8) + payload_len(4) + payload(4096)
+pub const MAX_SIGNING_INPUT_SIZE: usize = 1 + 32 + 8 + 4 + MAX_PAYLOAD_SIZE;
 
 // =============================================================================
 // Types
@@ -115,7 +122,7 @@ pub const Message = struct {
 // Static Buffers
 // =============================================================================
 
-var static_hash_input: [256 + MAX_PAYLOAD_SIZE]u8 = undefined;
+var static_signing_input: [MAX_SIGNING_INPUT_SIZE]u8 = undefined;
 var static_encode_buffer: [HEADER_SIZE + MAX_PAYLOAD_SIZE + SIGNATURE_SIZE]u8 = undefined;
 var static_test_msg: Message = undefined;
 var static_test_buffer: [512]u8 = undefined;
@@ -136,7 +143,7 @@ pub fn init() void {
     messages_encoded = 0;
     messages_decoded = 0;
     initialized = true;
-    serial.writeString("[MSG] Message protocol initialized (P.3d Onion + P.3e Eviction Ready)\n");
+    serial.writeString("[MSG] Message protocol initialized (P.3d Onion + P.3e Eviction + GOV.2a Ready)\n");
 }
 
 pub fn isInitialized() bool {
@@ -164,33 +171,26 @@ pub fn encode(msg: *const Message, buffer: []u8) usize {
         return 0;
     }
 
-    // Magic
     writeU32(buffer[pos..], MAGIC);
     pos += 4;
 
-    // Type
     buffer[pos] = @intFromEnum(msg.msg_type);
     pos += 1;
 
-    // Sender ID
     @memcpy(buffer[pos..][0..32], &msg.sender_id);
     pos += 32;
 
-    // Timestamp
     writeU64(buffer[pos..], msg.timestamp);
     pos += 8;
 
-    // Payload length
     writeU32(buffer[pos..], msg.payload_len);
     pos += 4;
 
-    // Payload
     if (payload_len > 0) {
         @memcpy(buffer[pos..][0..payload_len], msg.payload[0..payload_len]);
         pos += payload_len;
     }
 
-    // Signature
     @memcpy(buffer[pos..][0..SIGNATURE_SIZE], &msg.signature);
     pos += SIGNATURE_SIZE;
 
@@ -207,26 +207,21 @@ pub fn decode(data: []const u8) ?Message {
 
     var pos: usize = 0;
 
-    // Magic
     const magic = readU32(data[pos..]);
     if (magic != MAGIC) return null;
     pos += 4;
 
-    // Type
     const msg_type_byte = data[pos];
     const msg_type: MessageType = @enumFromInt(msg_type_byte);
     pos += 1;
 
-    // Sender ID
     var sender_id: [32]u8 = undefined;
     @memcpy(&sender_id, data[pos..][0..32]);
     pos += 32;
 
-    // Timestamp
     const timestamp = readU64(data[pos..]);
     pos += 8;
 
-    // Payload length
     const payload_len = readU32(data[pos..]);
     pos += 4;
 
@@ -238,7 +233,6 @@ pub fn decode(data: []const u8) ?Message {
         return null;
     }
 
-    // Payload
     var payload: [MAX_PAYLOAD_SIZE]u8 = [_]u8{0} ** MAX_PAYLOAD_SIZE;
 
     if (plen > 0) {
@@ -247,7 +241,6 @@ pub fn decode(data: []const u8) ?Message {
 
     pos += plen;
 
-    // Signature
     var signature: [SIGNATURE_SIZE]u8 = undefined;
     @memcpy(&signature, data[pos..][0..SIGNATURE_SIZE]);
 
@@ -288,69 +281,135 @@ pub fn decryptPayloadOtp(msg: *Message, shared_secret: *const [32]u8) void {
 }
 
 // =============================================================================
-// Signing & Verification
+// GOV.2a Signing & Verification Helpers
 // =============================================================================
 
+/// Canonical bytes used for P2P message signing.
+///
+/// Domain is implicit by message type.
+/// For GOV.2 final payload signatures, eviction.zig will add explicit
+/// domain-separated SLOR governance payloads.
+fn buildSigningInput(msg: *const Message, out: []u8) usize {
+    const plen: usize = @intCast(msg.payload_len);
+
+    if (plen > MAX_PAYLOAD_SIZE) return 0;
+    if (out.len < 1 + 32 + 8 + 4 + plen) return 0;
+
+    var pos: usize = 0;
+
+    out[pos] = @intFromEnum(msg.msg_type);
+    pos += 1;
+
+    @memcpy(out[pos..][0..32], &msg.sender_id);
+    pos += 32;
+
+    writeU64(out[pos..], msg.timestamp);
+    pos += 8;
+
+    writeU32(out[pos..], msg.payload_len);
+    pos += 4;
+
+    if (plen > 0) {
+        @memcpy(out[pos..][0..plen], msg.payload[0..plen]);
+        pos += plen;
+    }
+
+    return pos;
+}
+
+pub fn isZeroSignature(sig: *const [SIGNATURE_SIZE]u8) bool {
+    return constant_time.constantTimeIsZero64(sig);
+}
+
+pub fn deriveNodeIdFromPublicKey(public_key: *const [32]u8, out_node_id: *[32]u8) void {
+    hash.sha256Into(public_key, out_node_id);
+}
+
+pub fn senderMatchesPublicKey(msg: *const Message, public_key: *const [32]u8) bool {
+    var expected: [32]u8 = [_]u8{0} ** 32;
+    deriveNodeIdFromPublicKey(public_key, &expected);
+
+    const ok = constant_time.constantTimeCompare32(&expected, &msg.sender_id);
+
+    constant_time.secureZero32(&expected);
+
+    return ok;
+}
+
+/// Sign message envelope.
+///
+/// Existing P2P code passes the local 32-byte node private key.
+/// This keeps compatibility. GOV.2 final authority-grade signing is done with
+/// SLOR governance payload signature in eviction.zig.
 pub fn sign(msg: *Message, private_key: *const [32]u8) void {
-    var pos: usize = 0;
-
-    static_hash_input[pos] = @intFromEnum(msg.msg_type);
-    pos += 1;
-
-    @memcpy(static_hash_input[pos..][0..32], &msg.sender_id);
-    pos += 32;
-
-    writeU64(static_hash_input[pos..], msg.timestamp);
-    pos += 8;
-
-    const plen: usize = @intCast(msg.payload_len);
-
-    if (plen > 0 and plen <= MAX_PAYLOAD_SIZE) {
-        @memcpy(static_hash_input[pos..][0..plen], msg.payload[0..plen]);
-        pos += plen;
+    const len = buildSigningInput(msg, &static_signing_input);
+    if (len == 0) {
+        msg.signature = [_]u8{0} ** SIGNATURE_SIZE;
+        return;
     }
 
-    const hash = crypto.sha256(static_hash_input[0..pos]);
-
-    const sig = signWithPrivateKey(private_key, &hash);
+    const sig = crypto.signMessage(static_signing_input[0..len], private_key[0..]);
     @memcpy(&msg.signature, &sig);
+
+    constant_time.secureZero(static_signing_input[0..len]);
 }
 
+/// Legacy verify path.
+/// Kept for compatibility with p2p.zig until peer public-key verification is
+/// fully routed through all inbound paths.
+///
+/// For production-grade peer verification use verifyWithPublicKey().
 pub fn verify(msg: *const Message) bool {
-    var pos: usize = 0;
+    if (isZeroSignature(&msg.signature)) return false;
 
-    static_hash_input[pos] = @intFromEnum(msg.msg_type);
-    pos += 1;
+    const len = buildSigningInput(msg, &static_signing_input);
+    if (len == 0) return false;
 
-    @memcpy(static_hash_input[pos..][0..32], &msg.sender_id);
-    pos += 32;
+    // Legacy behavior: sender_id is used as verifier key material.
+    // This is not public-verifiable identity proof.
+    // It remains as compatibility plumbing until p2p.zig is moved fully to
+    // verifyWithPublicKey(peer.public_key).
+    const ok = crypto.verifySignature(
+        static_signing_input[0..len],
+        msg.signature[0..],
+        msg.sender_id[0..],
+    );
 
-    writeU64(static_hash_input[pos..], msg.timestamp);
-    pos += 8;
+    constant_time.secureZero(static_signing_input[0..len]);
 
-    const plen: usize = @intCast(msg.payload_len);
-
-    if (plen > 0 and plen <= MAX_PAYLOAD_SIZE) {
-        @memcpy(static_hash_input[pos..][0..plen], msg.payload[0..plen]);
-        pos += plen;
-    }
-
-    const hash = crypto.sha256(static_hash_input[0..pos]);
-
-    return crypto.verify(&msg.sender_id, &hash, &msg.signature);
+    return ok;
 }
 
-/// Simplified signature placeholder.
-/// Existing system uses this style, so retained for compatibility.
-fn signWithPrivateKey(private_key: *const [32]u8, hash: *const [32]u8) [64]u8 {
-    var signature: [64]u8 = [_]u8{0} ** 64;
+/// GOV.2a public-key-bound verification.
+///
+/// This performs:
+/// 1. non-zero signature check
+/// 2. sender_id == sha256(public_key)
+/// 3. signature verification using the supplied public key
+///
+/// Note:
+/// Current crypto.verifySignature() is still limited by the existing HMAC-style
+/// signature layer. The production-grade anti-forgery final layer will be the
+/// SLOR governance payload signature in eviction.zig.
+pub fn verifyWithPublicKey(msg: *const Message, public_key: *const [32]u8) bool {
+    if (isZeroSignature(&msg.signature)) return false;
 
-    for (0..32) |i| {
-        signature[i] = private_key[i] ^ hash[i];
-        signature[32 + i] = hash[i] ^ private_key[(i + 16) % 32];
+    if (!senderMatchesPublicKey(msg, public_key)) {
+        return false;
     }
 
-    return signature;
+    const len = buildSigningInput(msg, &static_signing_input);
+    if (len == 0) return false;
+
+    const ok = crypto.verifySignature(
+        static_signing_input[0..len],
+        msg.signature[0..],
+        public_key[0..],
+    );
+
+    constant_time.secureZero(static_signing_input[0..len]);
+
+    return ok;
 }
 
 // =============================================================================
@@ -454,7 +513,6 @@ pub fn runTests() bool {
     var passed: u32 = 0;
     var failed: u32 = 0;
 
-    // Test 1: Create simple message
     serial.writeString("    Create message........... ");
     static_test_msg = createPing([_]u8{0x42} ** 32);
 
@@ -466,7 +524,6 @@ pub fn runTests() bool {
         failed += 1;
     }
 
-    // Test 2: Encode message
     serial.writeString("    Encode message........... ");
     const encoded_len = encode(&static_test_msg, &static_test_buffer);
 
@@ -478,7 +535,6 @@ pub fn runTests() bool {
         failed += 1;
     }
 
-    // Test 3: Decode message
     serial.writeString("    Decode message........... ");
 
     if (decode(static_test_buffer[0..encoded_len])) |decoded| {
@@ -494,7 +550,6 @@ pub fn runTests() bool {
         failed += 1;
     }
 
-    // Test 4: Magic check
     serial.writeString("    Magic validation......... ");
     var bad_buffer: [64]u8 = [_]u8{0} ** 64;
 
@@ -506,7 +561,6 @@ pub fn runTests() bool {
         failed += 1;
     }
 
-    // Test 5: Eviction vote message
     serial.writeString("    Eviction vote type....... ");
     var ev_payload: [16]u8 = [_]u8{0xEE} ** 16;
     const ev_msg = createEvictionVote([_]u8{0x11} ** 32, &ev_payload);
@@ -519,7 +573,6 @@ pub fn runTests() bool {
         failed += 1;
     }
 
-    // Test 6: Onion routed message
     serial.writeString("    Onion routed type........ ");
     var onion_payload: [8]u8 = [_]u8{0xAA} ** 8;
     const onion_msg = createOnionRouted([_]u8{0x22} ** 32, &onion_payload);
@@ -530,6 +583,33 @@ pub fn runTests() bool {
     } else {
         serial.writeString("[FAIL]\n");
         failed += 1;
+    }
+
+    serial.writeString("    Signature zero check..... ");
+    if (isZeroSignature(&static_test_msg.signature)) {
+        serial.writeString("[OK]\n");
+        passed += 1;
+    } else {
+        serial.writeString("[FAIL]\n");
+        failed += 1;
+    }
+
+    serial.writeString("    Public key binding....... ");
+    {
+        var pubkey: [32]u8 = [_]u8{0xAB} ** 32;
+        var expected_id: [32]u8 = undefined;
+
+        deriveNodeIdFromPublicKey(&pubkey, &expected_id);
+
+        var msg = createPing(expected_id);
+
+        if (senderMatchesPublicKey(&msg, &pubkey)) {
+            serial.writeString("[OK]\n");
+            passed += 1;
+        } else {
+            serial.writeString("[FAIL]\n");
+            failed += 1;
+        }
     }
 
     serial.writeString("    Message tests: ");

@@ -1,5 +1,6 @@
 //! Zamrud OS - Identity Module
-//! H.7 FIXED: Unified credential handling, trust anchor support
+//! H.7: Unified credential handling, trust anchor support
+//! GOV.2: Production governance signature boundary via auth/keyring/gov_sign
 
 const serial = @import("../drivers/serial/serial.zig");
 
@@ -22,6 +23,8 @@ pub const CredentialType = keyring.CredentialType;
 var initialized: bool = false;
 
 pub fn init() void {
+    if (initialized) return;
+
     serial.writeString("[IDENTITY] Initializing...\n");
 
     serial.writeString("[IDENTITY] Step 1: keyring.init()\n");
@@ -49,15 +52,13 @@ pub fn isInitialized() bool {
 }
 
 // =============================================================================
-// Identity Management — H.7 UNIFIED
+// Identity Management
 // =============================================================================
 
-/// Create identity with credential (auto-detects PIN vs password)
 pub fn createIdentity(name: []const u8, credential: []const u8) ?*Identity {
     return keyring.createIdentity(name, credential);
 }
 
-/// Create identity with enforced password strength
 pub fn createIdentityWithPassword(name: []const u8, password: []const u8) ?*Identity {
     return keyring.createIdentityWithPassword(name, password);
 }
@@ -74,6 +75,10 @@ pub fn getIdentityByAddress(address: *const [50]u8) ?*Identity {
     return keyring.findIdentityByAddress(address);
 }
 
+pub fn getIdentityByIndex(index: usize) ?*Identity {
+    return keyring.getIdentityByIndex(index);
+}
+
 pub fn getCurrentIdentity() ?*Identity {
     return keyring.getCurrentIdentity();
 }
@@ -86,32 +91,40 @@ pub fn getIdentityCount() usize {
     return keyring.getIdentityCount();
 }
 
+pub fn deleteIdentity(name: []const u8) bool {
+    return keyring.deleteIdentity(name);
+}
+
 // =============================================================================
 // H.7: Trust Anchor Support
 // =============================================================================
 
-/// Get system owner identity
 pub fn getSystemOwner() ?*Identity {
     return keyring.getSystemOwner();
 }
 
-/// Verify identity trust hash (blockchain binding)
 pub fn verifyTrust(id: *const Identity) bool {
     return keyring.verifyTrustHash(id);
 }
 
-/// Check if identity is system owner
 pub fn isOwner(id: *const Identity) bool {
     return keyring.isSystemOwner(id);
 }
 
 // =============================================================================
-// Authentication — H.7 UNIFIED
+// Authentication
 // =============================================================================
 
-/// Unlock with credential (PIN or password)
 pub fn unlock(name: []const u8, credential: []const u8) bool {
     return auth.unlock(name, credential);
+}
+
+pub fn unlockWithPin(name: []const u8, pin: []const u8) bool {
+    return auth.unlockWithPin(name, pin);
+}
+
+pub fn unlockWithPassword(name: []const u8, password: []const u8) bool {
+    return auth.unlockWithPassword(name, password);
 }
 
 pub fn lock() void {
@@ -122,14 +135,24 @@ pub fn isUnlocked() bool {
     return auth.isUnlocked();
 }
 
-/// Change credential (old → new)
 pub fn changeCredential(old_credential: []const u8, new_credential: []const u8) bool {
     return auth.changeCredential(old_credential, new_credential);
 }
 
-/// Legacy alias
 pub fn changePin(old_pin: []const u8, new_pin: []const u8) bool {
-    return auth.changePin(old_pin, new_pin);
+    return auth.changePin_legacy(old_pin, new_pin);
+}
+
+// =============================================================================
+// GOV.2 Governance Signing Boundary
+// =============================================================================
+
+pub fn hasGovernanceSigningKey() bool {
+    return auth.hasGovernanceSigningKey();
+}
+
+pub fn isGovernanceSigningAvailable() bool {
+    return auth.isGovernanceSigningAvailable();
 }
 
 // =============================================================================
@@ -166,14 +189,13 @@ pub fn lookupName(name: []const u8) ?*const [50]u8 {
 
 pub fn runAllTests() bool {
     serial.writeString("\n========================================\n");
-    serial.writeString("  IDENTITY MODULE TESTS (H.7 HARDENED)\n");
+    serial.writeString("  IDENTITY MODULE TESTS (H.7/GOV.2)\n");
     serial.writeString("========================================\n\n");
 
     var passed: u32 = 0;
     var failed: u32 = 0;
 
     serial.writeString("[1/4] Keyring...\n\n");
-    serial.writeString("=== Keyring Test ===\n");
     if (keyring.test_keyring()) {
         serial.writeString("      PASSED\n");
         passed += 1;
@@ -183,7 +205,6 @@ pub fn runAllTests() bool {
     }
 
     serial.writeString("[2/4] Auth...\n\n");
-    serial.writeString("=== Auth Test ===\n");
     if (auth.test_auth()) {
         serial.writeString("      PASSED\n");
         passed += 1;
@@ -193,7 +214,6 @@ pub fn runAllTests() bool {
     }
 
     serial.writeString("[3/4] Privacy...\n\n");
-    serial.writeString("=== Privacy Test ===\n");
     if (privacy.test_privacy()) {
         serial.writeString("      PASSED\n");
         passed += 1;
@@ -203,7 +223,6 @@ pub fn runAllTests() bool {
     }
 
     serial.writeString("[4/4] Names...\n\n");
-    serial.writeString("=== Names Test ===\n");
     if (names.test_names()) {
         serial.writeString("      PASSED\n");
         passed += 1;
@@ -223,10 +242,10 @@ pub fn runAllTests() bool {
     if (failed == 0) {
         serial.writeString("\n  All identity tests PASSED!\n\n");
         return true;
-    } else {
-        serial.writeString("\n  Some identity tests FAILED!\n\n");
-        return false;
     }
+
+    serial.writeString("\n  Some identity tests FAILED!\n\n");
+    return false;
 }
 
 fn printU32(val: u32) void {
@@ -234,13 +253,16 @@ fn printU32(val: u32) void {
         serial.writeChar('0');
         return;
     }
+
     var buf: [10]u8 = [_]u8{0} ** 10;
     var i: usize = 0;
     var v = val;
+
     while (v > 0) : (i += 1) {
         buf[i] = @intCast((v % 10) + '0');
         v = v / 10;
     }
+
     while (i > 0) {
         i -= 1;
         serial.writeChar(buf[i]);

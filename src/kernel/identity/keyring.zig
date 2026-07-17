@@ -2,13 +2,21 @@
 //! Stores and manages user identities with keypairs
 //! H.7 FIXED: Proper KDF, password support, blockchain trust anchors
 //! H.7.1: Dual credential support (Password + optional PIN)
-//! H.10 NEW: Integration with SLOR (Anti-Quantum) Lattice Keypair
+//! H.10: SLOR KEM keypair support
+//! GOV.2: Production governance signature key container via crypto/gov_sign.zig
+//!
+//! Production crypto policy:
+//! - slor.zig       = KEM / key exchange only.
+//! - gov_sign.zig   = only official governance signature API.
+//! - slor_sign.zig  = not used here.
+//! - If gov_sign backend is unavailable, governance signing is fail-closed.
 
 const serial = @import("../drivers/serial/serial.zig");
 const crypto = @import("../crypto/crypto.zig");
 const hash = @import("../crypto/hash.zig");
 const constant_time = @import("../crypto/constant_time.zig");
-const slor = @import("../crypto/slor.zig"); // H.10 NEW
+const slor = @import("../crypto/slor.zig");
+const gov_sign = @import("../crypto/gov_sign.zig");
 
 const DEBUG = false;
 
@@ -26,7 +34,7 @@ pub const MAX_IDENTITIES: usize = 8;
 pub const NAME_MAX_LEN: usize = 32;
 pub const ADDRESS_LEN: usize = 50;
 
-// H.7.3 FIX: Production-grade KDF parameters
+// H.7.3: KDF parameters
 pub const KDF_ROUNDS: u32 = 100_000;
 pub const KDF_ROUNDS_PIN: u32 = 50_000;
 pub const KDF_ROUNDS_EXPORT: u32 = 200_000;
@@ -53,10 +61,21 @@ pub const KeyPair = struct {
     salt: [16]u8,
     valid: bool,
 
-    // H.10 NEW: Anti-Quantum Keypair storage
+    // H.10: SLOR KEM keypair.
+    // This is NOT a digital signature key.
     slor_pub_key: slor.SlorPublicKey,
-    slor_sec_key_encrypted: slor.SlorSecretKey, // In a real scenario, this gets encrypted like the regular private key
+    slor_sec_key_encrypted: slor.SlorSecretKey,
     slor_valid: bool,
+
+    // GOV.2: Official governance signature key container.
+    //
+    // Important:
+    // - Uses crypto/gov_sign.zig only.
+    // - No slor_sign.zig dependency.
+    // - If gov_sign backend is unavailable, this remains invalid.
+    gov_sign_pub_key: gov_sign.PublicKey,
+    gov_sign_sec_key_encrypted: gov_sign.SecretKey,
+    gov_sign_valid: bool,
 };
 
 pub const Identity = struct {
@@ -97,6 +116,15 @@ pub const Identity = struct {
     pub fn hasSecondaryPin(self: *const Identity) bool {
         return self.has_pin;
     }
+
+    pub fn hasGovernanceSigningKey(self: *const Identity) bool {
+        return self.keypair.gov_sign_valid;
+    }
+
+    pub fn getGovernancePublicKey(self: *const Identity) ?*const gov_sign.PublicKey {
+        if (!self.keypair.gov_sign_valid) return null;
+        return &self.keypair.gov_sign_pub_key;
+    }
 };
 
 // =============================================================================
@@ -116,9 +144,35 @@ var temp_key_buffer: [32]u8 = [_]u8{0} ** 32;
 var temp_hash_buffer: [32]u8 = [_]u8{0} ** 32;
 var kdf_work_buffer: [64]u8 = [_]u8{0} ** 64;
 
+// GOV.2 secret-key encryption stream buffers.
+var gov_stream_input: [40]u8 = [_]u8{0} ** 40;
+var gov_stream_hash: [32]u8 = [_]u8{0} ** 32;
+
 // =============================================================================
-// Initialization
+// Initialization Helpers
 // =============================================================================
+
+fn clearSlorKemAt(id: *Identity) void {
+    var i: usize = 0;
+
+    while (i < slor.SLOR_N) : (i += 1) {
+        id.keypair.slor_pub_key.t[i] = 0;
+        id.keypair.slor_sec_key_encrypted.s[i] = 0;
+    }
+
+    i = 0;
+    while (i < 32) : (i += 1) {
+        id.keypair.slor_pub_key.seed[i] = 0;
+    }
+
+    id.keypair.slor_valid = false;
+}
+
+fn clearGovSignAt(id: *Identity) void {
+    gov_sign.clearPublicKey(&id.keypair.gov_sign_pub_key);
+    gov_sign.clearSecretKey(&id.keypair.gov_sign_sec_key_encrypted);
+    id.keypair.gov_sign_valid = false;
+}
 
 fn clearIdentityAt(idx: usize) void {
     identities[idx].address_len = 0;
@@ -131,7 +185,6 @@ fn clearIdentityAt(idx: usize) void {
     identities[idx].credential_type = .none;
     identities[idx].is_owner = false;
     identities[idx].keypair.valid = false;
-    identities[idx].keypair.slor_valid = false; // H.10
     identities[idx].has_pin = false;
 
     var j: usize = 0;
@@ -150,6 +203,9 @@ fn clearIdentityAt(idx: usize) void {
     while (j < 32) : (j += 1) identities[idx].pin_encrypted[j] = 0;
     j = 0;
     while (j < 16) : (j += 1) identities[idx].pin_salt[j] = 0;
+
+    clearSlorKemAt(&identities[idx]);
+    clearGovSignAt(&identities[idx]);
 }
 
 pub fn init() void {
@@ -166,12 +222,18 @@ pub fn init() void {
         clearIdentityAt(i);
     }
 
+    constant_time.secureZero32(&temp_key_buffer);
+    constant_time.secureZero32(&temp_hash_buffer);
+    constant_time.secureZero(&kdf_work_buffer);
+    constant_time.secureZero(&gov_stream_input);
+    constant_time.secureZero32(&gov_stream_hash);
+
     initialized = true;
     debug("[KEYRING] Initialized\n");
 }
 
 // =============================================================================
-// Identity Creation — H.7 FIXED & H.10 UPGRADED
+// Identity Creation
 // =============================================================================
 
 pub fn createIdentity(name: []const u8, credential: []const u8) ?*Identity {
@@ -192,7 +254,6 @@ pub fn createIdentity(name: []const u8, credential: []const u8) ?*Identity {
 
     id.credential_type = detectCredentialType(credential);
 
-    // H.7 & H.10: Generate standard keys + SLOR keys
     generateAndEncryptKeyPair(id, credential);
     generateAddress(id);
     generateTrustHash(id);
@@ -262,6 +323,10 @@ pub fn createAnonymousIdentity(credential: []const u8) ?*Identity {
 
     return id;
 }
+
+// =============================================================================
+// Credential Validation
+// =============================================================================
 
 pub fn detectCredentialType(credential: []const u8) CredentialType {
     if (credential.len >= PIN_MIN_LEN and credential.len <= PIN_MAX_LEN) {
@@ -338,6 +403,10 @@ fn validateName(name: []const u8) bool {
     return true;
 }
 
+// =============================================================================
+// Identity Field Generation
+// =============================================================================
+
 fn setIdentityName(id: *Identity, name: []const u8) void {
     var dest: usize = 0;
     id.name[0] = '@';
@@ -356,6 +425,7 @@ fn setIdentityName(id: *Identity, name: []const u8) void {
 
 fn generateAddress(id: *Identity) void {
     const prefix = "zamrud1";
+
     var i: usize = 0;
     while (i < prefix.len) : (i += 1) {
         id.address[i] = prefix[i];
@@ -373,7 +443,16 @@ fn generateAddress(id: *Identity) void {
     id.address_len = @intCast(i);
 }
 
-fn deriveKeyFromCredentialWithRounds(credential: []const u8, salt: *const [16]u8, rounds: u32, out: *[32]u8) void {
+// =============================================================================
+// KDF
+// =============================================================================
+
+fn deriveKeyFromCredentialWithRounds(
+    credential: []const u8,
+    salt: *const [16]u8,
+    rounds: u32,
+    out: *[32]u8,
+) void {
     var i: usize = 0;
     while (i < 64) : (i += 1) kdf_work_buffer[i] = 0;
 
@@ -381,6 +460,7 @@ fn deriveKeyFromCredentialWithRounds(credential: []const u8, salt: *const [16]u8
     while (i < credential.len and i < 48) : (i += 1) {
         kdf_work_buffer[i] = credential[i];
     }
+
     i = 0;
     while (i < 16) : (i += 1) {
         kdf_work_buffer[48 + i] = salt[i];
@@ -392,6 +472,7 @@ fn deriveKeyFromCredentialWithRounds(credential: []const u8, salt: *const [16]u8
     while (round < rounds) : (round += 1) {
         i = 0;
         while (i < 32) : (i += 1) kdf_work_buffer[i] = out[i];
+
         i = 0;
         while (i < 16) : (i += 1) kdf_work_buffer[32 + i] = salt[i];
 
@@ -414,6 +495,167 @@ fn deriveKeyFromPin(pin: []const u8, salt: *const [16]u8, out: *[32]u8) void {
     deriveKeyFromCredentialWithRounds(pin, salt, KDF_ROUNDS_PIN, out);
 }
 
+// =============================================================================
+// GOV.2 Governance Secret Encryption
+// =============================================================================
+
+fn streamMaskFromKey(key: *const [32]u8, block: u32, out: *[32]u8) void {
+    var i: usize = 0;
+
+    while (i < 32) : (i += 1) {
+        gov_stream_input[i] = key[i];
+    }
+
+    gov_stream_input[32] = 'G';
+    gov_stream_input[33] = 'O';
+    gov_stream_input[34] = 'V';
+    gov_stream_input[35] = 'S';
+
+    gov_stream_input[36] = @truncate(block);
+    gov_stream_input[37] = @truncate(block >> 8);
+    gov_stream_input[38] = @truncate(block >> 16);
+    gov_stream_input[39] = @truncate(block >> 24);
+
+    hash.sha256Into(&gov_stream_input, out);
+}
+
+fn cryptGovSecret(
+    input: *const gov_sign.SecretKey,
+    key: *const [32]u8,
+    output: *gov_sign.SecretKey,
+) void {
+    gov_sign.clearSecretKey(output);
+
+    // Preserve every non-secret compatibility field. The raw secret-key bytes
+    // alone are stream-XOR encrypted; sign() still requires exact backend and
+    // parameter-set metadata after the key is restored into an auth session.
+    output.len = input.len;
+    output.valid = input.valid;
+    output.backend = input.backend;
+    output.parameter_set = input.parameter_set;
+
+    // A malformed container must never become a valid session key.
+    if (input.len > input.bytes.len or input.len > output.bytes.len) {
+        gov_sign.clearSecretKey(output);
+        constant_time.secureZero(&gov_stream_input);
+        constant_time.secureZero32(&gov_stream_hash);
+        return;
+    }
+
+    var block: u32 = 0;
+    var pos: usize = 0;
+
+    while (pos < input.len) {
+        streamMaskFromKey(key, block, &gov_stream_hash);
+
+        const remaining = input.len - pos;
+        const block_len = @min(
+            remaining,
+            @as(usize, gov_stream_hash.len),
+        );
+
+        var j: usize = 0;
+        while (j < block_len) : (j += 1) {
+            output.bytes[pos + j] =
+                input.bytes[pos + j] ^ gov_stream_hash[j];
+        }
+
+        pos += block_len;
+        block +%= 1;
+    }
+
+    constant_time.secureZero(&gov_stream_input);
+    constant_time.secureZero32(&gov_stream_hash);
+}
+
+fn generateGovernanceSigningKey(id: *Identity, identity_private_key: *const [32]u8) void {
+    gov_sign.clearPublicKey(&id.keypair.gov_sign_pub_key);
+    gov_sign.clearSecretKey(&id.keypair.gov_sign_sec_key_encrypted);
+    id.keypair.gov_sign_valid = false;
+
+    var pk = gov_sign.PublicKey{};
+    var sk_plain = gov_sign.SecretKey{};
+
+    const ok = gov_sign.generateKeyPair(
+        gov_sign.DEFAULT_PARAMETER_SET,
+        &pk,
+        &sk_plain,
+    );
+
+    if (!ok) {
+        // Production-safe behavior:
+        // If ML-DSA/FIPS204 backend is unavailable, no governance signing key
+        // is generated. GOV.2 signing remains fail-closed.
+        gov_sign.clearPublicKey(&pk);
+        gov_sign.clearSecretKey(&sk_plain);
+        return;
+    }
+
+    id.keypair.gov_sign_pub_key = pk;
+
+    cryptGovSecret(
+        &sk_plain,
+        identity_private_key,
+        &id.keypair.gov_sign_sec_key_encrypted,
+    );
+
+    id.keypair.gov_sign_valid = true;
+
+    gov_sign.clearSecretKey(&sk_plain);
+}
+
+pub fn decryptGovernanceSigningKeyWithPrivateKey(
+    id: *const Identity,
+    identity_private_key: *const [32]u8,
+    out: *gov_sign.SecretKey,
+) bool {
+    gov_sign.clearSecretKey(out);
+
+    if (!id.active) return false;
+    if (!id.keypair.gov_sign_valid) return false;
+
+    const encrypted = &id.keypair.gov_sign_sec_key_encrypted;
+
+    if (!encrypted.valid) return false;
+    if (encrypted.len != gov_sign.SECRET_KEY_BYTES) return false;
+    if (encrypted.backend != gov_sign.DEFAULT_BACKEND) return false;
+    if (encrypted.parameter_set != gov_sign.DEFAULT_PARAMETER_SET) {
+        return false;
+    }
+
+    cryptGovSecret(
+        encrypted,
+        identity_private_key,
+        out,
+    );
+
+    const valid =
+        out.valid and
+        out.len == gov_sign.SECRET_KEY_BYTES and
+        out.backend == gov_sign.DEFAULT_BACKEND and
+        out.parameter_set == gov_sign.DEFAULT_PARAMETER_SET;
+
+    if (!valid) {
+        gov_sign.clearSecretKey(out);
+        return false;
+    }
+
+    return true;
+}
+
+pub fn hasGovernanceSigningKey(id: *const Identity) bool {
+    return id.keypair.gov_sign_valid;
+}
+
+pub fn getGovernancePublicKey(id: *const Identity) ?*const gov_sign.PublicKey {
+    if (!id.keypair.gov_sign_valid) return null;
+    return &id.keypair.gov_sign_pub_key;
+}
+
+// =============================================================================
+// Key Generation
+// =============================================================================
+
 fn generateAndEncryptKeyPair(id: *Identity, credential: []const u8) void {
     debug("[KEYRING] generateKeyPair\n");
 
@@ -427,19 +669,28 @@ fn generateAndEncryptKeyPair(id: *Identity, credential: []const u8) void {
     while (i < 32) : (i += 1) {
         id.keypair.private_key_encrypted[i] = temp_key_buffer[i] ^ temp_hash_buffer[i];
     }
+
     while (i < 48) : (i += 1) {
         id.keypair.private_key_encrypted[i] = 0;
     }
 
     id.keypair.valid = true;
 
-    // H.10 NEW: Generate SLOR Anti-Quantum KeyPair
+    // H.10: SLOR KEM keypair.
     slor.generateKeyPair(&id.keypair.slor_pub_key, &id.keypair.slor_sec_key_encrypted);
     id.keypair.slor_valid = true;
+
+    // GOV.2: Production governance signature key.
+    // This will only generate if gov_sign backend is available.
+    generateGovernanceSigningKey(id, &temp_key_buffer);
 
     constant_time.secureZero32(&temp_key_buffer);
     constant_time.secureZero32(&temp_hash_buffer);
 }
+
+// =============================================================================
+// PIN Management
+// =============================================================================
 
 pub fn setupSecondaryPin(id: *Identity, password: []const u8, pin: []const u8) bool {
     if (!id.active or !id.keypair.valid) return false;
@@ -505,9 +756,14 @@ pub fn decryptPrivateKeyWithPin(id: *Identity, pin: []const u8, out: *[32]u8) bo
     return valid;
 }
 
+// =============================================================================
+// Trust Hash
+// =============================================================================
+
 fn generateTrustHash(id: *Identity) void {
     var i: usize = 0;
     while (i < 32) : (i += 1) kdf_work_buffer[i] = id.keypair.public_key[i];
+
     i = 0;
     while (i < 32 and i < id.address_len) : (i += 1) {
         kdf_work_buffer[32 + i] = id.address[i];
@@ -540,6 +796,7 @@ pub fn verifyTrustHash(id: *const Identity) bool {
 
     var i: usize = 0;
     while (i < 32) : (i += 1) work[i] = id.keypair.public_key[i];
+
     i = 0;
     while (i < 32 and i < id.address_len) : (i += 1) {
         work[32 + i] = id.address[i];
@@ -550,6 +807,7 @@ pub fn verifyTrustHash(id: *const Identity) bool {
 
     i = 0;
     while (i < 32) : (i += 1) work[i] = intermediate[i];
+
     work[32] = @truncate(id.created_at);
     work[33] = @truncate(id.created_at >> 8);
     work[34] = @truncate(id.created_at >> 16);
@@ -560,6 +818,7 @@ pub fn verifyTrustHash(id: *const Identity) bool {
     while (d < domain.len) : (d += 1) work[36 + d] = domain[d];
 
     hash.sha256Into(work[0 .. 36 + domain.len], &expected);
+
     const result = constant_time.constantTimeCompare32(&expected, &id.trust_hash);
 
     constant_time.secureZero(&work);
@@ -568,6 +827,10 @@ pub fn verifyTrustHash(id: *const Identity) bool {
 
     return result;
 }
+
+// =============================================================================
+// Lookup
+// =============================================================================
 
 pub fn findIdentity(name: []const u8) ?*Identity {
     var i: usize = 0;
@@ -582,16 +845,20 @@ pub fn findIdentityByAddress(address: *const [50]u8) ?*Identity {
     var i: usize = 0;
     while (i < identity_count) : (i += 1) {
         if (!identities[i].active) continue;
+
         var match = true;
         var j: usize = 0;
+
         while (j < identities[i].address_len) : (j += 1) {
             if (identities[i].address[j] != address[j]) {
                 match = false;
                 break;
             }
         }
+
         if (match) return &identities[i];
     }
+
     return null;
 }
 
@@ -599,27 +866,32 @@ pub fn findIdentityByPubkey(pubkey: *const [32]u8) ?*Identity {
     var i: usize = 0;
     while (i < identity_count) : (i += 1) {
         if (!identities[i].active) continue;
+
         if (constant_time.constantTimeCompare32(&identities[i].keypair.public_key, pubkey)) {
             return &identities[i];
         }
     }
+
     return null;
 }
 
 fn namesMatch(a: []const u8, b: []const u8) bool {
     var a_start: usize = 0;
     var b_start: usize = 0;
+
     if (a.len > 0 and a[0] == '@') a_start = 1;
     if (b.len > 0 and b[0] == '@') b_start = 1;
 
     const a_name = a[a_start..];
     const b_name = b[b_start..];
+
     if (a_name.len != b_name.len) return false;
 
     var i: usize = 0;
     while (i < a_name.len) : (i += 1) {
         if (a_name[i] != b_name[i]) return false;
     }
+
     return true;
 }
 
@@ -635,6 +907,7 @@ pub fn getCurrentIdentity() ?*Identity {
 
 pub fn setCurrentIdentity(name: []const u8) bool {
     var i: usize = 0;
+
     while (i < identity_count) : (i += 1) {
         if (identities[i].active and identities[i].has_name and namesMatch(identities[i].getName(), name)) {
             current_identity_idx = i;
@@ -642,26 +915,31 @@ pub fn setCurrentIdentity(name: []const u8) bool {
             return true;
         }
     }
+
     return false;
 }
 
 pub fn getIdentityCount() usize {
     var count: usize = 0;
     var i: usize = 0;
+
     while (i < identity_count) : (i += 1) {
         if (identities[i].active) count += 1;
     }
+
     return count;
 }
 
 pub fn deleteIdentity(name: []const u8) bool {
     var i: usize = 0;
+
     while (i < identity_count) : (i += 1) {
         if (identities[i].active and identities[i].has_name and namesMatch(identities[i].getName(), name)) {
             clearIdentityAt(i);
             return true;
         }
     }
+
     return false;
 }
 
@@ -674,8 +952,13 @@ pub fn isSystemOwner(id: *const Identity) bool {
     return id.is_owner;
 }
 
+// =============================================================================
+// Private Key Handling
+// =============================================================================
+
 pub fn decryptPrivateKey(id: *Identity, credential: []const u8, out: *[32]u8) bool {
     if (!id.keypair.valid) return false;
+
     deriveKeyFromCredential(credential, &id.keypair.salt, &temp_hash_buffer);
 
     var i: usize = 0;
@@ -691,6 +974,7 @@ pub fn decryptPrivateKey(id: *Identity, credential: []const u8, out: *[32]u8) bo
 
     constant_time.secureZero32(&temp_hash_buffer);
     constant_time.secureZero32(&verify_pubkey);
+
     return valid;
 }
 
@@ -714,10 +998,17 @@ pub fn reEncryptPrivateKey(id: *Identity, old_credential: []const u8, new_creden
         constant_time.secureZero(&id.pin_salt);
     }
 
+    // GOV signing secret is encrypted under identity private key, not password.
+    // Password change does not require GOV key re-encryption.
+
     constant_time.secureZero32(&privkey);
     constant_time.secureZero32(&temp_hash_buffer);
     return true;
 }
+
+// =============================================================================
+// Store Helpers
+// =============================================================================
 
 pub fn isInitialized() bool {
     return initialized;
@@ -734,26 +1025,31 @@ pub fn setIdentityCount(count: usize) void {
 
 pub fn ensureCurrentIdentity() void {
     if (has_current_identity) return;
+
     var i: usize = 0;
+
     while (i < identity_count) : (i += 1) {
         if (identities[i].active) {
             current_identity_idx = i;
             has_current_identity = true;
+
             if (identities[i].is_owner) {
                 system_owner_idx = i;
                 has_system_owner = true;
             }
+
             return;
         }
     }
 }
 
 // =============================================================================
-// Test — Updated for H.7.1 & H.10
+// Test
 // =============================================================================
 
 pub fn test_keyring() bool {
-    serial.writeString("\n=== Keyring Test (H.7.1 & H.10 SLOR) ===\n");
+    serial.writeString("\n=== Keyring Test (H.7.1, H.10, GOV.2 production boundary) ===\n");
+
     var passed: u32 = 0;
     var failed: u32 = 0;
 
@@ -761,12 +1057,14 @@ pub fn test_keyring() bool {
     passed += 1;
 
     const id = createIdentityWithPassword("alice", "SecurePass1");
-    if (id != null and identity_count == 1) passed += 1 else failed += 1;
 
-    // ... [Original Tests Omitted for Brevity in Code Snippet] ...
+    if (id != null and identity_count == 1) {
+        passed += 1;
+    } else {
+        failed += 1;
+    }
 
-    // Test NEW: SLOR generation
-    serial.writeString("  Test 16: SLOR KeyPair generated\n");
+    serial.writeString("  Test 16: SLOR KEM KeyPair generated\n");
     if (id != null and id.?.keypair.slor_valid) {
         serial.writeString("    OK\n");
         passed += 1;
@@ -775,19 +1073,51 @@ pub fn test_keyring() bool {
         failed += 1;
     }
 
+    serial.writeString("  Test 17: GOV signing backend policy\n");
+    if (gov_sign.isProductionBackendAvailable()) {
+        if (id != null and id.?.keypair.gov_sign_valid) {
+            serial.writeString("    OK\n");
+            passed += 1;
+        } else {
+            serial.writeString("    FAIL\n");
+            failed += 1;
+        }
+    } else {
+        if (id != null and !id.?.keypair.gov_sign_valid) {
+            serial.writeString("    OK (fail-closed)\n");
+            passed += 1;
+        } else {
+            serial.writeString("    FAIL\n");
+            failed += 1;
+        }
+    }
+
     serial.writeString("  KEYRING: ");
+    printU32(passed);
+    serial.writeString("/");
+    printU32(passed + failed);
+    serial.writeString(" passed\n");
+
+    return failed == 0;
+}
+
+fn printU32(val: u32) void {
+    if (val == 0) {
+        serial.writeChar('0');
+        return;
+    }
+
     var buf: [10]u8 = [_]u8{0} ** 10;
     var i: usize = 0;
-    var v = passed;
+    var v = val;
+
     while (v > 0) : (i += 1) {
         buf[i] = @intCast((v % 10) + '0');
         v /= 10;
     }
+
     while (i > 0) {
         i -= 1;
         serial.writeChar(buf[i]);
     }
-
-    serial.writeString(" passed\n");
-    return failed == 0;
 }

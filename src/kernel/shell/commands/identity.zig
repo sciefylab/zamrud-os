@@ -12,6 +12,7 @@ const identity_store = @import("../../persist/identity_store.zig");
 const keyring = @import("../../identity/keyring.zig");
 const auth = @import("../../identity/auth.zig");
 const constant_time = @import("../../crypto/constant_time.zig");
+const slor_dsa_tests = @import("../../crypto/slor_dsa_tests.zig");
 
 // H.7.2: Import export module for delegation
 const export_cmd = @import("export.zig");
@@ -67,110 +68,111 @@ fn showHelp() void {
         terminal.setFgColor(theme.text_info);
         terminal.setBold(true);
     }
-    shell.println("  IDENTITY - User Identity Management");
+    shell.println(" IDENTITY - User Identity Management");
     if (terminal.isInitialized()) {
         terminal.setBold(false);
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("  ════════════════════════════════════════");
+    shell.println(" ════════════════════════════════════════");
     shell.newLine();
 
-    shell.println("  Usage: identity <command> [args]");
-    shell.newLine();
-
-    if (terminal.isInitialized()) {
-        terminal.setFgColor(theme.text_success);
-    }
-    shell.println("  Basic Commands:");
-    if (terminal.isInitialized()) {
-        terminal.setFgColor(theme.text_normal);
-    }
-    shell.println("    help              Show this help");
-    shell.println("    info              Show current identity");
-    shell.println("    list              List all identities");
-    shell.println("    create <n> <pwd>  Create new identity");
-    shell.println("    unlock <n> <pwd>  Unlock identity");
-    shell.println("    lock              Lock current session");
-    shell.println("    privacy           Show privacy settings");
+    shell.println(" Usage: identity <command> [args]");
     shell.newLine();
 
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_success);
     }
-    shell.println("  PIN Management (H.7.1):");
+    shell.println(" Basic Commands:");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("    pin               Show PIN status");
-    shell.println("    pin set           Setup quick-unlock PIN");
-    shell.println("    pin change        Change existing PIN");
-    shell.println("    pin remove        Remove PIN");
-    shell.println("    pin help          PIN detailed help");
+    shell.println(" help Show this help");
+    shell.println(" info Show current identity");
+    shell.println(" list List all identities");
+    shell.println(" create <n> <pwd> Create new identity");
+    shell.println(" unlock <n> <pwd> Unlock identity");
+    shell.println(" lock Lock current session");
+    shell.println(" privacy Show privacy settings");
     shell.newLine();
 
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_success);
     }
-    shell.println("  Password Management:");
+    shell.println(" PIN Management (H.7.1):");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("    password change   Change password");
+    shell.println(" pin Show PIN status");
+    shell.println(" pin set Setup quick-unlock PIN");
+    shell.println(" pin change Change existing PIN");
+    shell.println(" pin remove Remove PIN");
+    shell.println(" pin help PIN detailed help");
     shell.newLine();
 
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_success);
     }
-    shell.println("  Export/Backup (H.7.2):");
+    shell.println(" Password Management:");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("    export full <n>      Encrypted backup (.zib)");
-    shell.println("    export mnemonic <n>  Show 24-word recovery phrase");
-    shell.println("    export public <n>    Export public key only");
-    shell.println("    export verify <file> Verify backup integrity");
-    shell.println("    export help          Export detailed help");
+    shell.println(" password change Change password");
     shell.newLine();
 
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_success);
     }
-    shell.println("  Import/Restore (H.7.2):");
+    shell.println(" Export/Backup (H.7.2):");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("    import bundle <file> Restore from .zib file");
-    shell.println("    import mnemonic      Recover from 24 words");
-    shell.println("    recover              Alias for import mnemonic");
-    shell.println("    import help          Import detailed help");
+    shell.println(" export full <n> Encrypted backup (.zib)");
+    shell.println(" export mnemonic <n> Show 24-word recovery phrase");
+    shell.println(" export public <n> Export public key only");
+    shell.println(" export verify <file> Verify backup integrity");
+    shell.println(" export help Export detailed help");
     shell.newLine();
 
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_success);
     }
-    shell.println("  Persistence:");
+    shell.println(" Import/Restore (H.7.2):");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("    status            Show persistence status");
+    shell.println(" import bundle <file> Restore from .zib file");
+    shell.println(" import mnemonic Recover from 24 words");
+    shell.println(" recover Alias for import mnemonic");
+    shell.println(" import help Import detailed help");
     shell.newLine();
 
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_success);
     }
-    shell.println("  Test Commands:");
+    shell.println(" Persistence:");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("    test              Run all identity tests");
-    shell.println("    test quick        Quick health check");
+    shell.println(" status Show persistence status");
+    shell.newLine();
+
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_success);
+    }
+    shell.println(" Test Commands:");
+    if (terminal.isInitialized()) {
+        terminal.setFgColor(theme.text_normal);
+    }
+    shell.println(" test Run all identity tests");
+    shell.println(" test quick Quick health check");
     shell.println("    test export       Test export/import (H.7.2)");
+    shell.println("    test dsa          Test native ML-DSA-65 primitives");
     shell.newLine();
 
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_dim);
     }
-    shell.println("  Related: whoami, config, ceremony");
+    shell.println(" Related: whoami, config, ceremony");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
@@ -213,21 +215,21 @@ fn showPinStatus() void {
         terminal.setFgColor(theme.text_info);
         terminal.setBold(true);
     }
-    shell.println("  PIN Status");
+    shell.println(" PIN Status");
     if (terminal.isInitialized()) {
         terminal.setBold(false);
         terminal.setFgColor(theme.text_normal);
     }
 
-    shell.println("  ────────────────────────────");
+    shell.println(" ────────────────────────────");
 
     const current = keyring.getCurrentIdentity();
     if (current == null) {
-        shell.printErrorLine("  No current identity");
+        shell.printErrorLine(" No current identity");
         return;
     }
 
-    shell.print("  Identity:   ");
+    shell.print(" Identity: ");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_success);
     }
@@ -236,12 +238,12 @@ fn showPinStatus() void {
         terminal.setFgColor(theme.text_normal);
     }
 
-    shell.print("  Quick PIN:  ");
+    shell.print(" Quick PIN: ");
     if (current.?.has_pin) {
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_success);
         }
-        shell.println("ENABLED ✓");
+        shell.println("ENABLED");
     } else {
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_dim);
@@ -259,7 +261,7 @@ fn showPinStatus() void {
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_dim);
         }
-        shell.println("  Tip: Use 'identity pin set' to enable quick unlock.");
+        shell.println(" Tip: Use 'identity pin set' to enable quick unlock.");
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_normal);
         }
@@ -267,8 +269,8 @@ fn showPinStatus() void {
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_dim);
         }
-        shell.println("  You can login with PIN or password.");
-        shell.println("  Password is required for sensitive operations.");
+        shell.println(" You can login with PIN or password.");
+        shell.println(" Password is required for sensitive operations.");
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_normal);
         }
@@ -286,7 +288,7 @@ fn cmdPinSet() void {
     }
 
     if (auth.hasPinConfigured()) {
-        shell.printWarningLine("PIN already configured. Use 'identity pin change' to update.");
+        shell.printWarningLine("PIN already configured. Use 'identity pin change' toupdate.");
         return;
     }
 
@@ -294,21 +296,21 @@ fn cmdPinSet() void {
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_info);
     }
-    shell.println("  Setup Quick PIN");
-    shell.println("  ────────────────────────────");
+    shell.println(" Setup Quick PIN");
+    shell.println(" ────────────────────────────");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
     shell.newLine();
 
     // Step 1: Verify password
-    shell.print("  Current password: ");
+    shell.print(" Current password: ");
     var password_buf: [64]u8 = [_]u8{0} ** 64;
     const password_len = readPassword(&password_buf);
 
     if (password_len == 0) {
         shell.newLine();
-        shell.printErrorLine("  Cancelled");
+        shell.printErrorLine(" Cancelled");
         return;
     }
 
@@ -317,27 +319,27 @@ fn cmdPinSet() void {
     const current = keyring.getCurrentIdentity();
     if (current == null) {
         wipeBuffer(&password_buf);
-        shell.printErrorLine("  No current identity");
+        shell.printErrorLine(" No current identity");
         return;
     }
 
     var test_key: [32]u8 = undefined;
     if (!keyring.decryptPrivateKey(current.?, password_buf[0..password_len], &test_key)) {
         wipeBuffer(&password_buf);
-        shell.printErrorLine("  Incorrect password");
+        shell.printErrorLine(" Incorrect password");
         return;
     }
     constant_time.secureZero32(&test_key);
 
     // Step 2: Get new PIN
-    shell.print("  New PIN (4-8 digits): ");
+    shell.print(" New PIN (4-8 digits): ");
     var pin_buf: [16]u8 = [_]u8{0} ** 16;
     const pin_len = readPin(&pin_buf);
 
     if (pin_len == 0) {
         wipeBuffer(&password_buf);
         shell.newLine();
-        shell.printErrorLine("  Cancelled");
+        shell.printErrorLine(" Cancelled");
         return;
     }
 
@@ -345,14 +347,14 @@ fn cmdPinSet() void {
         wipeBuffer(&password_buf);
         wipeSmallBuffer(&pin_buf);
         shell.newLine();
-        shell.printErrorLine("  PIN must be at least 4 digits");
+        shell.printErrorLine(" PIN must be at least 4 digits");
         return;
     }
 
     shell.newLine();
 
     // Step 3: Confirm PIN
-    shell.print("  Confirm PIN: ");
+    shell.print(" Confirm PIN: ");
     var pin_confirm: [16]u8 = [_]u8{0} ** 16;
     const confirm_len = readPin(&pin_confirm);
 
@@ -362,7 +364,7 @@ fn cmdPinSet() void {
         wipeBuffer(&password_buf);
         wipeSmallBuffer(&pin_buf);
         wipeSmallBuffer(&pin_confirm);
-        shell.printErrorLine("  PINs do not match");
+        shell.printErrorLine(" PINs do not match");
         return;
     }
 
@@ -371,25 +373,25 @@ fn cmdPinSet() void {
     // Step 4: Setup PIN
     if (keyring.setupSecondaryPin(current.?, password_buf[0..password_len], pin_buf[0..pin_len])) {
         shell.newLine();
-        shell.printSuccessLine("  PIN configured successfully!");
+        shell.printSuccessLine(" PIN configured successfully!");
         shell.newLine();
 
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_dim);
         }
-        shell.println("  You can now use your PIN for quick login.");
-        shell.println("  Password is still required for sensitive operations.");
+        shell.println(" You can now use your PIN for quick login.");
+        shell.println(" Password is still required for sensitive operations.");
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_normal);
         }
 
         if (identity_store.isInitialized()) {
             if (identity_store.saveToDisk()) {
-                shell.printSuccessLine("  Changes saved to disk.");
+                shell.printSuccessLine(" Changes saved to disk.");
             }
         }
     } else {
-        shell.printErrorLine("  Failed to setup PIN");
+        shell.printErrorLine(" Failed to setup PIN");
     }
 
     wipeBuffer(&password_buf);
@@ -414,20 +416,20 @@ fn cmdPinRemove() void {
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_warning);
     }
-    shell.println("  Remove Quick PIN");
-    shell.println("  ────────────────────────────");
+    shell.println(" Remove Quick PIN");
+    shell.println(" ────────────────────────────");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
     shell.newLine();
 
-    shell.print("  Password to confirm: ");
+    shell.print(" Password to confirm: ");
     var password_buf: [64]u8 = [_]u8{0} ** 64;
     const password_len = readPassword(&password_buf);
 
     if (password_len == 0) {
         shell.newLine();
-        shell.printErrorLine("  Cancelled");
+        shell.printErrorLine(" Cancelled");
         return;
     }
 
@@ -435,16 +437,16 @@ fn cmdPinRemove() void {
 
     if (auth.removePin(password_buf[0..password_len])) {
         shell.newLine();
-        shell.printSuccessLine("  PIN removed");
-        shell.println("  Quick unlock is now disabled.");
+        shell.printSuccessLine(" PIN removed");
+        shell.println(" Quick unlock is now disabled.");
 
         if (identity_store.isInitialized()) {
             if (identity_store.saveToDisk()) {
-                shell.printSuccessLine("  Changes saved to disk.");
+                shell.printSuccessLine(" Changes saved to disk.");
             }
         }
     } else {
-        shell.printErrorLine("  Incorrect password or removal failed");
+        shell.printErrorLine(" Incorrect password or removal failed");
     }
 
     wipeBuffer(&password_buf);
@@ -468,20 +470,20 @@ fn cmdPinChange() void {
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_info);
     }
-    shell.println("  Change Quick PIN");
-    shell.println("  ────────────────────────────");
+    shell.println(" Change Quick PIN");
+    shell.println(" ────────────────────────────");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
     shell.newLine();
 
-    shell.print("  Password: ");
+    shell.print(" Password: ");
     var password_buf: [64]u8 = [_]u8{0} ** 64;
     const password_len = readPassword(&password_buf);
 
     if (password_len == 0) {
         shell.newLine();
-        shell.printErrorLine("  Cancelled");
+        shell.printErrorLine(" Cancelled");
         return;
     }
 
@@ -490,19 +492,19 @@ fn cmdPinChange() void {
     const current = keyring.getCurrentIdentity();
     if (current == null) {
         wipeBuffer(&password_buf);
-        shell.printErrorLine("  No current identity");
+        shell.printErrorLine(" No current identity");
         return;
     }
 
     var test_key: [32]u8 = undefined;
     if (!keyring.decryptPrivateKey(current.?, password_buf[0..password_len], &test_key)) {
         wipeBuffer(&password_buf);
-        shell.printErrorLine("  Incorrect password");
+        shell.printErrorLine(" Incorrect password");
         return;
     }
     constant_time.secureZero32(&test_key);
 
-    shell.print("  New PIN (4-8 digits): ");
+    shell.print(" New PIN (4-8 digits): ");
     var pin_buf: [16]u8 = [_]u8{0} ** 16;
     const pin_len = readPin(&pin_buf);
 
@@ -510,13 +512,13 @@ fn cmdPinChange() void {
         wipeBuffer(&password_buf);
         wipeSmallBuffer(&pin_buf);
         shell.newLine();
-        shell.printErrorLine("  PIN must be at least 4 digits");
+        shell.printErrorLine(" PIN must be at least 4 digits");
         return;
     }
 
     shell.newLine();
 
-    shell.print("  Confirm new PIN: ");
+    shell.print(" Confirm new PIN: ");
     var pin_confirm: [16]u8 = [_]u8{0} ** 16;
     const confirm_len = readPin(&pin_confirm);
 
@@ -526,7 +528,7 @@ fn cmdPinChange() void {
         wipeBuffer(&password_buf);
         wipeSmallBuffer(&pin_buf);
         wipeSmallBuffer(&pin_confirm);
-        shell.printErrorLine("  PINs do not match");
+        shell.printErrorLine(" PINs do not match");
         return;
     }
 
@@ -534,15 +536,15 @@ fn cmdPinChange() void {
 
     if (keyring.changeSecondaryPin(current.?, password_buf[0..password_len], pin_buf[0..pin_len])) {
         shell.newLine();
-        shell.printSuccessLine("  PIN changed successfully");
+        shell.printSuccessLine(" PIN changed successfully");
 
         if (identity_store.isInitialized()) {
             if (identity_store.saveToDisk()) {
-                shell.printSuccessLine("  Changes saved to disk.");
+                shell.printSuccessLine(" Changes saved to disk.");
             }
         }
     } else {
-        shell.printErrorLine("  Failed to change PIN");
+        shell.printErrorLine(" Failed to change PIN");
     }
 
     wipeBuffer(&password_buf);
@@ -559,47 +561,47 @@ fn showPinHelp() void {
         terminal.setFgColor(theme.text_info);
         terminal.setBold(true);
     }
-    shell.println("  PIN Management (H.7.1)");
+    shell.println(" PIN Management (H.7.1)");
     if (terminal.isInitialized()) {
         terminal.setBold(false);
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("  ════════════════════════════════════════");
+    shell.println(" ════════════════════════════════════════");
     shell.newLine();
 
-    shell.println("  Quick PIN allows faster login with a 4-8 digit code.");
-    shell.println("  Your password remains the primary credential for");
-    shell.println("  sensitive operations.");
+    shell.println(" Quick PIN allows faster login with a 4-8 digit code.");
+    shell.println(" Your password remains the primary credential for");
+    shell.println(" sensitive operations.");
     shell.newLine();
 
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_success);
     }
-    shell.println("  Commands:");
+    shell.println(" Commands:");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
 
-    shell.println("    identity pin           Show PIN status");
-    shell.println("    identity pin set       Setup a new PIN");
-    shell.println("    identity pin change    Change existing PIN");
-    shell.println("    identity pin remove    Remove PIN (disable quick unlock)");
+    shell.println(" identity pin Show PIN status");
+    shell.println(" identity pin set Setup a new PIN");
+    shell.println(" identity pin change Change existing PIN");
+    shell.println(" identity pin remove Remove PIN (disable quick unlock)");
     shell.newLine();
 
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_warning);
     }
-    shell.println("  Security notes:");
+    shell.println(" Security notes:");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_dim);
     }
-    shell.println("    * PIN is for convenience, not maximum security");
-    shell.println("    * Password always required for:");
-    shell.println("        - Changing password");
-    shell.println("        - Exporting keys/seed phrase");
-    shell.println("        - Setting up or removing PIN");
-    shell.println("    * Changing password invalidates PIN (must re-setup)");
-    shell.println("    * Both PIN and password can be used at login");
+    shell.println(" * PIN is for convenience, not maximum security");
+    shell.println(" * Password always required for:");
+    shell.println(" - Changing password");
+    shell.println(" - Exporting keys/seed phrase");
+    shell.println(" - Setting up or removing PIN");
+    shell.println(" * Changing password invalidates PIN (must re-setup)");
+    shell.println(" * Both PIN and password can be used at login");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
@@ -634,20 +636,20 @@ fn cmdPasswordChange() void {
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_info);
     }
-    shell.println("  Change Password");
-    shell.println("  ────────────────────────────");
+    shell.println(" Change Password");
+    shell.println(" ────────────────────────────");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
     shell.newLine();
 
-    shell.print("  Current password: ");
+    shell.print(" Current password: ");
     var old_password: [64]u8 = [_]u8{0} ** 64;
     const old_len = readPassword(&old_password);
 
     if (old_len == 0) {
         shell.newLine();
-        shell.printErrorLine("  Cancelled");
+        shell.printErrorLine(" Cancelled");
         return;
     }
 
@@ -656,19 +658,19 @@ fn cmdPasswordChange() void {
     const current = keyring.getCurrentIdentity();
     if (current == null) {
         wipeBuffer(&old_password);
-        shell.printErrorLine("  No current identity");
+        shell.printErrorLine(" No current identity");
         return;
     }
 
     var test_key: [32]u8 = undefined;
     if (!keyring.decryptPrivateKey(current.?, old_password[0..old_len], &test_key)) {
         wipeBuffer(&old_password);
-        shell.printErrorLine("  Incorrect current password");
+        shell.printErrorLine(" Incorrect current password");
         return;
     }
     constant_time.secureZero32(&test_key);
 
-    shell.print("  New password (8+ chars): ");
+    shell.print(" New password (8+ chars): ");
     var new_password: [64]u8 = [_]u8{0} ** 64;
     const new_len = readPassword(&new_password);
 
@@ -676,7 +678,7 @@ fn cmdPasswordChange() void {
         wipeBuffer(&old_password);
         wipeBuffer(&new_password);
         shell.newLine();
-        shell.printErrorLine("  Password must be at least 8 characters");
+        shell.printErrorLine(" Password must be at least 8 characters");
         return;
     }
 
@@ -684,13 +686,13 @@ fn cmdPasswordChange() void {
         wipeBuffer(&old_password);
         wipeBuffer(&new_password);
         shell.newLine();
-        shell.printErrorLine("  Password must include uppercase, lowercase, and number");
+        shell.printErrorLine(" Password must include uppercase, lowercase, and number");
         return;
     }
 
     shell.newLine();
 
-    shell.print("  Confirm new password: ");
+    shell.print(" Confirm new password: ");
     var confirm_password: [64]u8 = [_]u8{0} ** 64;
     const confirm_len = readPassword(&confirm_password);
 
@@ -700,7 +702,7 @@ fn cmdPasswordChange() void {
         wipeBuffer(&old_password);
         wipeBuffer(&new_password);
         wipeBuffer(&confirm_password);
-        shell.printErrorLine("  Passwords do not match");
+        shell.printErrorLine(" Passwords do not match");
         return;
     }
 
@@ -708,24 +710,24 @@ fn cmdPasswordChange() void {
 
     if (keyring.reEncryptPrivateKey(current.?, old_password[0..old_len], new_password[0..new_len])) {
         shell.newLine();
-        shell.printSuccessLine("  Password changed successfully!");
+        shell.printSuccessLine(" Password changed successfully!");
 
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_warning);
         }
-        shell.println("  Note: If you had a PIN, it has been invalidated.");
-        shell.println("  Use 'identity pin set' to setup a new PIN.");
+        shell.println(" Note: If you had a PIN, it has been invalidated.");
+        shell.println(" Use 'identity pin set' to setup a new PIN.");
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_normal);
         }
 
         if (identity_store.isInitialized()) {
             if (identity_store.saveToDisk()) {
-                shell.printSuccessLine("  Changes saved to disk.");
+                shell.printSuccessLine(" Changes saved to disk.");
             }
         }
     } else {
-        shell.printErrorLine("  Failed to change password");
+        shell.printErrorLine(" Failed to change password");
     }
 
     wipeBuffer(&old_password);
@@ -856,24 +858,24 @@ fn sliceEql(a: []const u8, b: []const u8) bool {
 
 fn showPersistStatus() void {
     shell.printInfoLine("========================================");
-    shell.printInfoLine("  IDENTITY PERSISTENCE STATUS");
+    shell.printInfoLine(" IDENTITY PERSISTENCE STATUS");
     shell.printInfoLine("========================================");
     shell.newLine();
 
-    shell.print("  Store initialized: ");
+    shell.print(" Store initialized: ");
     if (identity_store.isInitialized()) shell.printSuccessLine("Yes") else shell.printErrorLine("No");
 
-    shell.print("  Loaded from disk:  ");
+    shell.print(" Loaded from disk: ");
     if (identity_store.wasLoadedFromDisk()) shell.printSuccessLine("Yes") else shell.println("No");
 
-    shell.print("  Saved on disk:     ");
-    if (identity_store.hasSavedIdentities()) shell.printSuccessLine("Yes (/disk/IDENTITY.DAT)") else shell.println("No");
+    shell.print(" Saved on disk: ");
+    if (identity_store.hasSavedIdentities()) shell.printSuccessLine("Yes(/disk/IDENTITY.DAT)") else shell.println("No");
 
-    shell.print("  Current count:     ");
+    shell.print(" Current count: ");
     helpers.printUsize(identity.getIdentityCount());
     shell.newLine();
 
-    shell.print("  Last save count:   ");
+    shell.print(" Last save count: ");
     helpers.printUsize(identity_store.getLastSaveCount());
     shell.newLine();
 
@@ -886,7 +888,6 @@ fn showPersistStatus() void {
 
 pub fn runTest(args: []const u8) void {
     const opt = helpers.trim(args);
-
     if (opt.len == 0 or helpers.strEql(opt, "all")) {
         runAllTests();
     } else if (helpers.strEql(opt, "quick")) {
@@ -902,10 +903,11 @@ pub fn runTest(args: []const u8) void {
     } else if (helpers.strEql(opt, "persist")) {
         runModuleTest("persist");
     } else if (helpers.strEql(opt, "export")) {
-        // H.7.2: Test export/import
         export_cmd.cmdExportTest();
+    } else if (helpers.strEql(opt, "dsa") or helpers.strEql(opt, "ml-dsa") or helpers.strEql(opt, "slor-dsa")) {
+        runSlorDsaTests();
     } else {
-        shell.println("identity test options: all, quick, keyring, auth, privacy, names, persist, export");
+        shell.println("identity test options: all, quick, keyring, auth, privacy, names, persist, export, dsa");
     }
 }
 
@@ -915,7 +917,7 @@ fn runQuickTest() void {
 
     var ok = true;
 
-    shell.print("  Initialized:  ");
+    shell.print(" Initialized: ");
     if (identity.isInitialized()) {
         shell.printSuccessLine("OK");
     } else {
@@ -923,7 +925,7 @@ fn runQuickTest() void {
         ok = false;
     }
 
-    shell.print("  Count works:  ");
+    shell.print(" Count works: ");
     if (identity.getIdentityCount() >= 0) {
         shell.printSuccessLine("OK");
     } else {
@@ -931,7 +933,7 @@ fn runQuickTest() void {
         ok = false;
     }
 
-    shell.print("  Store ready:  ");
+    shell.print(" Store ready: ");
     if (identity_store.isInitialized()) {
         shell.printSuccessLine("OK");
     } else {
@@ -939,7 +941,7 @@ fn runQuickTest() void {
         ok = false;
     }
 
-    shell.print("  Auth ready:   ");
+    shell.print(" Auth ready: ");
     if (auth.isInitialized()) {
         shell.printSuccessLine("OK");
     } else {
@@ -951,70 +953,83 @@ fn runQuickTest() void {
     helpers.printQuickResult("Identity", ok);
 }
 
+fn runSlorDsaTests() void {
+    shell.newLine();
+    shell.printInfoLine("Running native SLOR-DSA / ML-DSA-65 primitive tests...");
+    shell.newLine();
+    if (slor_dsa_tests.runAll()) {
+        shell.printSuccessLine("SLOR-DSA primitive tests PASSED");
+        shell.printWarningLine("Backend remains fail-closed until external FIPS 204 ACVP KAT passes.");
+    } else {
+        shell.printErrorLine("SLOR-DSA primitive tests FAILED");
+        shell.printWarningLine("Governance signing remains disabled.");
+    }
+    shell.newLine();
+}
+
 fn runAllTests() void {
     const privacy = @import("../../identity/privacy.zig");
     const names = @import("../../identity/names.zig");
-
-    helpers.printTestHeader("IDENTITY TEST SUITE (H.7.1/H.7.2)");
-
-    var p: u32 = 0;
-    var f: u32 = 0;
-
-    helpers.printTestCategory(1, 6, "Keyring (Dual Credential)");
+    helpers.printTestHeader("IDENTITY TEST SUITE (H.7.1/H.7.2/GOV.2)");
+    var passed: u32 = 0;
+    var failed: u32 = 0;
+    helpers.printTestCategory(1, 7, "Keyring (Dual Credential)");
     if (keyring.test_keyring()) {
         shell.printSuccessLine("      PASSED");
-        p += 1;
+        passed += 1;
     } else {
         shell.printErrorLine("      FAILED");
-        f += 1;
+        failed += 1;
     }
-
-    helpers.printTestCategory(2, 6, "Auth (PIN + Password)");
+    helpers.printTestCategory(2, 7, "Auth (PIN + Password)");
     if (auth.test_auth()) {
         shell.printSuccessLine("      PASSED");
-        p += 1;
+        passed += 1;
     } else {
         shell.printErrorLine("      FAILED");
-        f += 1;
+        failed += 1;
     }
-
-    helpers.printTestCategory(3, 6, "Privacy");
+    helpers.printTestCategory(3, 7, "Privacy");
     if (privacy.test_privacy()) {
         shell.printSuccessLine("      PASSED");
-        p += 1;
+        passed += 1;
     } else {
         shell.printErrorLine("      FAILED");
-        f += 1;
+        failed += 1;
     }
-
-    helpers.printTestCategory(4, 6, "Names");
+    helpers.printTestCategory(4, 7, "Names");
     if (names.test_names()) {
         shell.printSuccessLine("      PASSED");
-        p += 1;
+        passed += 1;
     } else {
         shell.printErrorLine("      FAILED");
-        f += 1;
+        failed += 1;
     }
-
-    helpers.printTestCategory(5, 6, "Persistence");
+    helpers.printTestCategory(5, 7, "Persistence");
     if (identity_store.test_identity_store()) {
         shell.printSuccessLine("      PASSED");
-        p += 1;
+        passed += 1;
     } else {
         shell.printErrorLine("      FAILED");
-        f += 1;
+        failed += 1;
     }
-
-    helpers.printTestCategory(6, 6, "Export/Import (H.7.2)");
+    helpers.printTestCategory(6, 7, "Export/Import (H.7.2)");
     if (export_cmd.runExportTests()) {
         shell.printSuccessLine("      PASSED");
-        p += 1;
+        passed += 1;
     } else {
         shell.printErrorLine("      FAILED");
-        f += 1;
+        failed += 1;
     }
-
-    helpers.printTestResults(p, f);
+    helpers.printTestCategory(7, 7, "SLOR-DSA / ML-DSA-65 Primitives");
+    if (slor_dsa_tests.runAll()) {
+        shell.printSuccessLine("      PASSED");
+        passed += 1;
+    } else {
+        shell.printErrorLine("      FAILED");
+        failed += 1;
+    }
+    helpers.printTestResults(passed, failed);
 }
 
 fn runModuleTest(module: []const u8) void {
@@ -1054,25 +1069,25 @@ fn showInfo() void {
         terminal.setFgColor(theme.text_info);
         terminal.setBold(true);
     }
-    shell.println("  IDENTITY STATUS");
+    shell.println(" IDENTITY STATUS");
     if (terminal.isInitialized()) {
         terminal.setBold(false);
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("  ════════════════════════════════════════");
+    shell.println(" ════════════════════════════════════════");
     shell.newLine();
 
-    shell.print("  Initialized:  ");
+    shell.print(" Initialized: ");
     if (identity.isInitialized()) shell.printSuccessLine("Yes") else shell.printErrorLine("No");
 
-    shell.print("  Identities:   ");
+    shell.print(" Identities: ");
     helpers.printUsize(identity.getIdentityCount());
     shell.newLine();
 
-    shell.print("  Session:      ");
+    shell.print(" Session: ");
     if (identity.isUnlocked()) shell.printSuccessLine("Unlocked") else shell.printWarningLine("Locked");
 
-    shell.print("  Persisted:    ");
+    shell.print(" Persisted: ");
     if (identity_store.wasLoadedFromDisk()) shell.printSuccessLine("Yes (from disk)") else shell.println("No");
 
     if (identity.getCurrentIdentity()) |id| {
@@ -1080,22 +1095,22 @@ fn showInfo() void {
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_success);
         }
-        shell.println("  Current Identity:");
+        shell.println(" Current Identity:");
         if (terminal.isInitialized()) {
             terminal.setFgColor(theme.text_normal);
         }
-        shell.print("    Name:       ");
+        shell.print(" Name: ");
         const name = id.getName();
         if (name.len > 0) shell.println(name) else shell.println("(anonymous)");
-        shell.print("    Address:    ");
+        shell.print(" Address: ");
         shell.println(id.getAddress());
-        shell.print("    Type:       ");
+        shell.print(" Type: ");
         switch (id.credential_type) {
             .password => shell.println("Password"),
             .pin => shell.println("PIN"),
             .none => shell.println("None"),
         }
-        shell.print("    Quick PIN:  ");
+        shell.print(" Quick PIN: ");
         if (id.has_pin) {
             shell.printSuccessLine("Enabled");
         } else {
@@ -1107,12 +1122,12 @@ fn showInfo() void {
                 terminal.setFgColor(theme.text_normal);
             }
         }
-        shell.print("    Is Owner:   ");
+        shell.print(" Is Owner: ");
         if (id.is_owner) shell.printSuccessLine("Yes") else shell.println("No");
     }
 
     shell.newLine();
-    shell.print("  Privacy:      ");
+    shell.print(" Privacy: ");
     switch (identity.getPrivacyMode()) {
         .stealth => shell.printSuccessLine("Stealth"),
         .pseudonymous => shell.println("Pseudonymous"),
@@ -1128,18 +1143,18 @@ fn listIdentities() void {
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_info);
     }
-    shell.println("  Registered Identities:");
+    shell.println(" Registered Identities:");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("  ────────────────────────────");
+    shell.println(" ────────────────────────────");
 
     const count = identity.getIdentityCount();
     if (count == 0) {
-        shell.println("  (none)");
-        shell.println("  Use: identity create <name> <password>");
+        shell.println(" (none)");
+        shell.println(" Use: identity create <name> <password>");
         if (identity_store.hasSavedIdentities()) {
-            shell.println("  Or:  identity import bundle <file>");
+            shell.println(" Or: identity import bundle <file>");
         }
         shell.newLine();
         return;
@@ -1150,7 +1165,7 @@ fn listIdentities() void {
     while (i < 8) : (i += 1) {
         const id = keyring.getIdentityByIndex(i);
         if (id != null and id.?.active) {
-            shell.print("  ");
+            shell.print(" ");
             helpers.printUsize(shown + 1);
             shell.print(". ");
 
@@ -1199,7 +1214,7 @@ fn listIdentities() void {
 fn createIdentity(args: []const u8) void {
     if (args.len == 0) {
         shell.println("Usage: identity create <name> <password>");
-        shell.println("  Password: 8+ chars, must include uppercase, lowercase, number");
+        shell.println(" Password: 8+ chars, must include uppercase, lowercase, number");
         return;
     }
 
@@ -1228,13 +1243,13 @@ fn createIdentity(args: []const u8) void {
 
     if (keyring.createIdentityWithPassword(name, password)) |id| {
         shell.printSuccessLine("Created!");
-        shell.print("  Address: ");
+        shell.print(" Address: ");
         shell.println(id.getAddress());
-        shell.println("  Tip: Use 'identity export mnemonic' to backup your recovery phrase");
+        shell.println(" Tip: Use 'identity export mnemonic' to backup your recoveryphrase");
 
         if (identity_store.isInitialized()) {
             if (identity_store.saveToDisk()) {
-                shell.printSuccessLine("  Auto-saved to disk");
+                shell.printSuccessLine(" Auto-saved to disk");
             }
         }
     } else {
@@ -1260,9 +1275,9 @@ fn unlockIdentity(args: []const u8) void {
         shell.printSuccessLine("Unlocked!");
 
         if (auth.getLastUnlockMethod() == .pin) {
-            shell.println("  (via PIN)");
+            shell.println(" (via PIN)");
         } else {
-            shell.println("  (via password)");
+            shell.println(" (via password)");
         }
     } else {
         shell.printErrorLine("Wrong name, password, or PIN");
@@ -1284,27 +1299,27 @@ fn showPrivacy() void {
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_info);
     }
-    shell.println("  Privacy Settings:");
+    shell.println(" Privacy Settings:");
     if (terminal.isInitialized()) {
         terminal.setFgColor(theme.text_normal);
     }
-    shell.println("  ────────────────────────────");
+    shell.println(" ────────────────────────────");
     shell.newLine();
 
-    shell.print("  Mode:           ");
+    shell.print(" Mode: ");
     switch (settings.mode) {
         .stealth => shell.printSuccessLine("Stealth"),
         .pseudonymous => shell.println("Pseudonymous"),
         .public => shell.printWarningLine("Public"),
     }
 
-    shell.print("  Hide IP:        ");
+    shell.print(" Hide IP: ");
     if (settings.hide_ip) shell.printSuccessLine("Yes") else shell.println("No");
 
-    shell.print("  Rotate NodeID:  ");
+    shell.print(" Rotate NodeID: ");
     if (settings.rotate_node_id) shell.printSuccessLine("Yes") else shell.println("No");
 
-    shell.print("  E2E Encrypt:    ");
+    shell.print(" E2E Encrypt: ");
     if (settings.encrypt_p2p) shell.printSuccessLine("Yes") else shell.println("No");
 
     shell.newLine();
