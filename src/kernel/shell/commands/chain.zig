@@ -6,7 +6,13 @@ const shell = @import("../shell.zig");
 const helpers = @import("helpers.zig");
 const chain = @import("../../chain/chain.zig");
 const crypto = @import("../../crypto/crypto.zig");
+const gov_sign = @import("../../crypto/gov_sign.zig");
+const auth = @import("../../identity/auth.zig");
+const constant_time = @import("../../crypto/constant_time.zig");
 const fat32 = @import("../../fs/fat32.zig");
+
+var chain_identity_public_key: [gov_sign.PUBLIC_KEY_BYTES]u8 =
+    [_]u8{0} ** gov_sign.PUBLIC_KEY_BYTES;
 
 // =============================================================================
 // Main Entry Point
@@ -457,26 +463,35 @@ fn chainAuditCheckpoint() void {
 fn chainInit() void {
     shell.printInfoLine("Initializing blockchain...");
 
-    crypto.KeyPair.generate();
-
     var miner_key: [32]u8 = [_]u8{0} ** 32;
-    const pub_key = crypto.KeyPair.getPublicKey();
+    defer constant_time.secureZero32(&miner_key);
+    defer constant_time.secureZero(&chain_identity_public_key);
 
-    for (pub_key, 0..) |b, i| {
-        miner_key[i] = b;
+    const public_key = auth.getGovernancePublicKey() orelse {
+        shell.printErrorLine("No active governance identity key.");
+        shell.println("Login/unlock an identity before initializing the chain.");
+        return;
+    };
+
+    const serialized_len = gov_sign.serializePublicKey(
+        public_key,
+        &chain_identity_public_key,
+    );
+    if (serialized_len != gov_sign.PUBLIC_KEY_BYTES) {
+        shell.printErrorLine("Failed to serialize governance public key.");
+        return;
     }
+
+    crypto.sha256Into(&chain_identity_public_key, &miner_key);
 
     if (chain.initWithGenesis(&miner_key)) {
         shell.printSuccessLine("Blockchain initialized!");
-
         shell.print("  Authority: ");
-        for (miner_key[0..16]) |b| helpers.printHexByte(b);
+        for (miner_key[0..16]) |byte| helpers.printHexByte(byte);
         shell.println("...");
-
         shell.print("  Height:    ");
         helpers.printU32(chain.getHeight());
         shell.newLine();
-
         if (chain.hasSavedChain()) {
             shell.printSuccessLine("  Saved to disk automatically");
         }
@@ -750,10 +765,16 @@ pub fn chainTest() void {
         break :blk true;
     }, &failed);
 
-    passed += helpers.doTest("Add authority", blk: {
+    passed += helpers.doTest("Add/retain authority", blk: {
         var k: [32]u8 = [_]u8{0} ** 32;
         k[0] = 0x42;
-        break :blk authority_mod.addAuthority(&k, "test");
+
+        // The authority registry is persistent/idempotent across repeated
+        // shell test runs. addAuthority() may correctly return false when
+        // the same authority already exists, so test the required
+        // postcondition instead of requiring a fresh insertion.
+        _ = authority_mod.addAuthority(&k, "test");
+        break :blk authority_mod.isAuthority(&k);
     }, &failed);
 
     passed += helpers.doTest("Verify authority", blk: {

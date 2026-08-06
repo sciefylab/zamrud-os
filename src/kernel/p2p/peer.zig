@@ -23,6 +23,7 @@ const socket = @import("../net/socket.zig");
 const reputation_mod = @import("reputation.zig");
 const sybil = @import("sybil_defense.zig");
 const eclipse = @import("eclipse_defense.zig");
+const gov_sign = @import("../crypto/gov_sign.zig");
 
 // =============================================================================
 // Constants
@@ -50,7 +51,7 @@ pub const Peer = struct {
     port: u16,
     status: PeerStatus,
     socket: ?*socket.Socket,
-    public_key: [32]u8,
+    public_key: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8,
 
     // Stats
     connected_at: u64,
@@ -141,7 +142,7 @@ fn emptyPeer() Peer {
         .port = 0,
         .status = .disconnected,
         .socket = null,
-        .public_key = [_]u8{0} ** 32,
+        .public_key = [_]u8{0} ** gov_sign.PUBLIC_KEY_BLOB_BYTES,
 
         .connected_at = 0,
         .last_seen = 0,
@@ -297,7 +298,7 @@ fn addToSlot(
                 .port = port,
                 .status = .connected,
                 .socket = sock,
-                .public_key = [_]u8{0} ** 32,
+                .public_key = [_]u8{0} ** gov_sign.PUBLIC_KEY_BLOB_BYTES,
 
                 .connected_at = now,
                 .last_seen = now,

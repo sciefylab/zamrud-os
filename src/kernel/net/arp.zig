@@ -407,12 +407,27 @@ pub fn addEntry(ip: u32, mac: network.MacAddress) void {
 
 /// Add verified entry (for trusted peers)
 pub fn addVerifiedEntry(ip: u32, mac: network.MacAddress, peer_id: [32]u8) void {
+    // Cache-only compatibility API. A 32-byte fingerprint alone cannot create
+    // an authenticated ARP V2 binding.
     updateCacheSecure(ip, mac, peer_id);
+}
 
-    // Also add to ARP defense trusted bindings
-    if (security_enabled) {
-        _ = arp_defense.createBinding(mac, ip, peer_id, [_]u8{0} ** 32);
+pub fn handleAuthenticatedV2(envelope: *const arp_defense.AuthenticatedArpV2) bool {
+    if (!security_enabled) return false;
+    const validation = arp_defense.validateAuthenticatedArpV2(envelope);
+    if (!validation.allowed) {
+        serial.writeString("[ARP] Authenticated V2 packet blocked: ");
+        serial.writeString(validation.reason);
+        serial.writeString("\n");
+        blocked_unknown += 1;
+        return false;
     }
+    updateCacheSecure(envelope.sender_ip, envelope.sender_mac, validation.peer_id);
+    return true;
+}
+
+pub fn signAuthenticatedV2(envelope: *arp_defense.AuthenticatedArpV2) bool {
+    return arp_defense.signAuthenticatedArpV2(envelope);
 }
 
 /// Get all cache entries (public API for shell commands)

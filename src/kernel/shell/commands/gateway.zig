@@ -4,6 +4,12 @@
 const shell = @import("../shell.zig");
 const gateway = @import("../../gateway/gateway.zig");
 const helpers = @import("helpers.zig");
+const gov_sign = @import("../../crypto/gov_sign.zig");
+const timer = @import("../../drivers/timer/timer.zig");
+
+var static_test_request: gateway.GatewayRequest = undefined;
+var static_test_response: gateway.GatewayResponse = undefined;
+var gateway_test_run_counter: u64 = 0;
 
 // =============================================================================
 // Main Command Handler
@@ -403,97 +409,82 @@ fn testGateway() void {
     }
 
     shell.newLine();
-    shell.println("=== Gateway Test Suite ===");
+    shell.println("=== Gateway V2 Test Suite ===");
     shell.newLine();
-
-    // Test 1: Create a service
-    shell.println("[TEST 1] Creating test service...");
 
     const test_owner_id: [32]u8 = [_]u8{0xBB} ** 32;
+    const unauthorized_peer: [32]u8 = [_]u8{0xCC} ** 32;
 
-    if (gateway.registerHTTP("test-http", test_owner_id, 8888)) |service_id| {
-        shell.println("  OK: Test service created");
+    gateway_test_run_counter +%= 1;
+    if (gateway_test_run_counter == 0) gateway_test_run_counter = 1;
+    const nonce_base = (timer.getTicks() << 16) ^
+        (gateway_test_run_counter << 2);
 
-        // Test 2: Unauthorized request
-        shell.newLine();
-        shell.println("[TEST 2] Testing unauthorized access...");
-
-        const unauthorized_peer: [32]u8 = [_]u8{0xCC} ** 32;
-
-        const test_request1 = gateway.GatewayRequest{
-            .request_id = 1,
-            .peer_id = unauthorized_peer,
-            .service_id = service_id,
-            .operation = .query,
-            .payload = [_]u8{0} ** 4096,
-            .payload_len = 0,
-            .signature = [_]u8{0} ** 64,
-            .timestamp = 0,
-            .source_ip = 0,
-            .nonce = 1,
-        };
-
-        const response1 = gateway.handleRequest(&test_request1);
-
-        if (response1.status == .peer_not_allowed) {
-            shell.println("  OK: Unauthorized peer correctly denied");
-        } else {
-            shell.print("  FAIL: Expected PEER_NOT_ALLOWED, got: ");
-            printStatus(response1.status);
-            shell.newLine();
-        }
-
-        // Test 3: Allow peer and retry
-        shell.newLine();
-        shell.println("[TEST 3] Allowing peer and retrying...");
-
-        if (gateway.allowPeer(service_id, unauthorized_peer)) {
-            shell.println("  OK: Peer allowed");
-
-            // Use different nonce for second request
-            const test_request2 = gateway.GatewayRequest{
-                .request_id = 2,
-                .peer_id = unauthorized_peer,
-                .service_id = service_id,
-                .operation = .query,
-                .payload = [_]u8{0} ** 4096,
-                .payload_len = 0,
-                .signature = [_]u8{0} ** 64,
-                .timestamp = 0,
-                .source_ip = 0,
-                .nonce = 2,
-            };
-
-            const response2 = gateway.handleRequest(&test_request2);
-
-            if (response2.status == .success) {
-                shell.println("  OK: Authorized request succeeded");
-            } else if (response2.status == .signature_invalid) {
-                shell.println("  OK: Request denied (signature required)");
-            } else {
-                shell.print("  INFO: Status = ");
-                printStatus(response2.status);
-                shell.newLine();
-            }
-        } else {
-            shell.println("  FAIL: Failed to allow peer");
-        }
-
-        // Cleanup
-        shell.newLine();
-        shell.println("[CLEANUP] Removing test service...");
-        if (gateway.removeService(service_id)) {
-            shell.println("  OK: Test service removed");
-        } else {
-            shell.println("  FAIL: Failed to remove test service");
-        }
-    } else {
+    const service_id = gateway.registerHTTP(
+        "test-http-v2",
+        test_owner_id,
+        8888,
+    ) orelse {
         shell.println("  FAIL: Failed to create test service");
+        return;
+    };
+
+    initTestRequest(&static_test_request, 1, unauthorized_peer, service_id, nonce_base +% 1);
+    gateway.handleRequestInto(&static_test_request, &static_test_response);
+    if (static_test_response.status == .peer_not_allowed) {
+        shell.println("  [1] Unauthorized peer denied...... PASS");
+    } else {
+        shell.println("  [1] Unauthorized peer denied...... FAIL");
     }
 
+    _ = gateway.allowPeer(service_id, unauthorized_peer);
+    initTestRequest(&static_test_request, 2, unauthorized_peer, service_id, nonce_base +% 2);
+    gateway.handleRequestInto(&static_test_request, &static_test_response);
+    if (static_test_response.status == .signature_invalid) {
+        shell.println("  [2] Unsigned V2 request rejected... PASS");
+    } else {
+        shell.println("  [2] Unsigned V2 request rejected... FAIL");
+    }
+
+    // Use a fresh nonce so the anti-replay gate does not reject this
+    // request before the protocol-version/signature validation is reached.
+    static_test_request.version = 1;
+    static_test_request.request_id = 3;
+    static_test_request.timestamp = timer.getTicks();
+    static_test_request.nonce = nonce_base +% 3;
+    gateway.handleRequestInto(&static_test_request, &static_test_response);
+    if (static_test_response.status == .signature_invalid) {
+        shell.println("  [3] V1 downgrade rejected.......... PASS");
+    } else {
+        shell.println("  [3] V1 downgrade rejected.......... FAIL");
+    }
+
+    _ = gateway.removeService(service_id);
+    shell.println("=== Gateway V2 Test Complete ===");
     shell.newLine();
-    shell.println("=== Test Complete ===");
-    shell.newLine();
+}
+
+fn initTestRequest(
+    request: *gateway.GatewayRequest,
+    request_id: u64,
+    peer_id: [32]u8,
+    service_id: [32]u8,
+    nonce: u64,
+) void {
+    request.* = .{
+        .version = gateway.GATEWAY_PROTOCOL_VERSION,
+        .request_id = request_id,
+        .peer_id = peer_id,
+        .public_key = [_]u8{0} ** gov_sign.PUBLIC_KEY_BLOB_BYTES,
+        .service_id = service_id,
+        .operation = .query,
+        .payload = [_]u8{0} ** 4096,
+        .payload_len = 0,
+        .signature = [_]u8{0} ** gov_sign.SIGNATURE_BLOB_BYTES,
+        .timestamp = timer.getTicks(),
+        .source_ip = 0,
+        .nonce = nonce,
+    };
 }
 
 fn printStatus(status: gateway.ResponseStatus) void {

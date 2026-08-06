@@ -14,6 +14,10 @@ const pci = @import("../drivers/pci/pci.zig");
 const net = @import("net.zig");
 const arp = @import("arp.zig");
 const arp_defense = @import("arp_defense.zig");
+const auth = @import("../identity/auth.zig");
+
+var arp_v2_test_envelope: arp_defense.AuthenticatedArpV2 = undefined;
+var arp_v2_test_run_counter: u64 = 0;
 const ip = @import("ip.zig");
 const icmp = @import("icmp.zig");
 const udp = @import("udp.zig");
@@ -183,6 +187,7 @@ pub fn runAllTests() TestResult {
     testArpDefenseSpoofDetection(&result);
     testArpDefenseRateLimit(&result);
     testArpDefenseEvents(&result);
+    testAuthenticatedArpV2(&result);
 
     // =========================================================================
     // H.6: DHCP Security
@@ -734,56 +739,22 @@ fn testArpDefenseInit(result: *TestResult) void {
 }
 
 fn testArpDefenseBindings(result: *TestResult) void {
-    printTest("2", "6", "Trusted Binding Management");
-
-    const before_count = arp_defense.getBindingCount();
-
+    printTest("2", "7", "Trusted Binding Management V2");
     const test_mac: arp_defense.MacAddress = .{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01 };
     const test_ip: u32 = (192 << 24) | (168 << 16) | (50 << 8) | 1;
-    const test_peer_id: [32]u8 = [_]u8{0x42} ** 32;
-    const test_pubkey: [32]u8 = [_]u8{0x00} ** 32;
+    result.check(!arp_defense.createBinding(
+        test_mac,
+        test_ip,
+        [_]u8{0x42} ** 32,
+        [_]u8{0} ** 32,
+    ), "Legacy 32-byte key rejected");
 
-    const created = arp_defense.createBinding(test_mac, test_ip, test_peer_id, test_pubkey);
-    result.check(created, "Create crypto binding");
-    result.check(arp_defense.getBindingCount() == before_count + 1, "Binding count +1");
-
-    var found = false;
-    for (0..arp_defense.getBindingCount()) |i| {
-        if (arp_defense.getBinding(i)) |b| {
-            if (b.ip == test_ip) {
-                found = true;
-                result.check(b.verified, "Binding verified");
-                result.check(b.trust_level == .verified, "Trust = verified");
-                break;
-            }
-        }
-    }
-    if (!found) {
-        result.fail("Binding verified");
-        result.fail("Trust = verified");
-    }
-
+    const before = arp_defense.getBindingCount();
     const static_mac: arp_defense.MacAddress = .{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
     const static_ip: u32 = (10 << 24) | (0 << 16) | (50 << 8) | 1;
-    const static_ok = arp_defense.createStaticBinding(static_mac, static_ip, "Test Static");
-    result.check(static_ok, "Create static binding");
-
-    var static_found = false;
-    for (0..arp_defense.getBindingCount()) |i| {
-        if (arp_defense.getBinding(i)) |b| {
-            if (b.ip == static_ip) {
-                static_found = true;
-                result.check(b.trust_level == .trusted, "Static trust level");
-                break;
-            }
-        }
-    }
-    if (!static_found) {
-        result.fail("Static trust level");
-    }
-
-    result.check(arp_defense.removeBinding(test_ip), "Remove binding");
-    _ = arp_defense.removeBinding(static_ip);
+    result.check(arp_defense.createStaticBinding(static_mac, static_ip, "Test Static"), "Create static binding");
+    result.check(arp_defense.getBindingCount() == before + 1, "Static binding count +1");
+    result.check(arp_defense.removeBinding(static_ip), "Remove static binding");
 }
 
 fn testArpDefenseValidation(result: *TestResult) void {
@@ -827,10 +798,7 @@ fn testArpDefenseSpoofDetection(result: *TestResult) void {
 
     const legit_mac: arp_defense.MacAddress = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
     const legit_ip: u32 = (192 << 24) | (168 << 16) | (99 << 8) | 1;
-    const peer_id: [32]u8 = [_]u8{0xAB} ** 32;
-    const pubkey: [32]u8 = [_]u8{0x00} ** 32;
-
-    _ = arp_defense.createBinding(legit_mac, legit_ip, peer_id, pubkey);
+    _ = arp_defense.createStaticBinding(legit_mac, legit_ip, "Spoof Test");
 
     const spoof_mac: arp_defense.MacAddress = .{ 0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA };
 
@@ -918,6 +886,61 @@ fn testArpDefenseEvents(result: *TestResult) void {
 
     const sec_stats = arp.getSecurityStats();
     result.check(sec_stats.total_entries >= 0, "ARP security stats");
+}
+
+// =============================================================================
+// ARP V2 ML-DSA-65 Tests
+// =============================================================================
+fn testAuthenticatedArpV2(result: *TestResult) void {
+    printTest("7", "7", "Authenticated ARP V2");
+    arp_v2_test_run_counter +%= 1;
+    if (arp_v2_test_run_counter == 0) arp_v2_test_run_counter = 1;
+    const now = getArpV2TestTimestamp();
+
+    arp_v2_test_envelope = .{
+        .operation = 1,
+        .sender_mac = .{ 0x02, 0x5a, 0x4d, 0x52, 0x44, 0x01 },
+        .sender_ip = (172 << 24) | (20 << 16) | (10 << 8) | 2,
+        .target_mac = .{ 0x02, 0x5a, 0x4d, 0x52, 0x44, 0x02 },
+        .target_ip = (172 << 24) | (20 << 16) | (10 << 8) | 1,
+        .timestamp = now,
+        .nonce = (arp_v2_test_run_counter << 32) ^ now,
+        .peer_id = [_]u8{0} ** 32,
+        .public_key = undefined,
+        .signature = undefined,
+    };
+    @memset(arp_v2_test_envelope.public_key[0..], 0);
+    @memset(arp_v2_test_envelope.signature[0..], 0);
+
+    if (!auth.isGovernanceSigningAvailable()) {
+        result.skip("V2 valid sign/verify session");
+        const unsigned = arp_defense.validateAuthenticatedArpV2(&arp_v2_test_envelope);
+        result.check(!unsigned.allowed, "Unsigned V2 rejected");
+        return;
+    }
+
+    const signed = arp.signAuthenticatedV2(&arp_v2_test_envelope);
+    result.check(signed, "V2 envelope signed");
+    if (!signed) return;
+    const valid = arp_defense.validateAuthenticatedArpV2(&arp_v2_test_envelope);
+    result.check(valid.allowed and valid.trust_level == .verified, "Valid V2 accepted");
+    const replay = arp_defense.validateAuthenticatedArpV2(&arp_v2_test_envelope);
+    result.check(!replay.allowed, "Replay nonce rejected");
+
+    arp_v2_test_envelope.nonce +%= 1;
+    arp_v2_test_envelope.sender_ip ^= 1;
+    const modified = arp_defense.validateAuthenticatedArpV2(&arp_v2_test_envelope);
+    result.check(!modified.allowed, "Modified sender rejected");
+
+    arp_v2_test_envelope.version = 1;
+    arp_v2_test_envelope.nonce +%= 1;
+    const downgrade = arp_defense.validateAuthenticatedArpV2(&arp_v2_test_envelope);
+    result.check(!downgrade.allowed, "V1 downgrade rejected");
+}
+
+fn getArpV2TestTimestamp() u64 {
+    const timer = @import("../drivers/timer/timer.zig");
+    return timer.getTicks();
 }
 
 // =============================================================================

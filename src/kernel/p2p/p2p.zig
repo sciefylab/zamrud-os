@@ -6,6 +6,9 @@
 
 const serial = @import("../drivers/serial/serial.zig");
 const crypto = @import("../crypto/crypto.zig");
+const gov_sign = @import("../crypto/gov_sign.zig");
+const auth = @import("../identity/auth.zig");
+const constant_time = @import("../crypto/constant_time.zig");
 const net = @import("../net/net.zig");
 const udp = @import("../net/udp.zig");
 const tcp = @import("../net/tcp.zig");
@@ -24,7 +27,7 @@ const node = @import("node.zig");
 // Constants
 // =============================================================================
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 pub const DEFAULT_PORT: u16 = 31337;
 pub const P2P_SECURE_PORT: u16 = 27777;
 pub const MAX_PEERS: usize = 64;
@@ -77,8 +80,10 @@ var node_status: NodeStatus = .offline;
 var config: NodeConfig = .{};
 
 var node_id: [32]u8 = [_]u8{0} ** 32;
-var node_private_key: [32]u8 = [_]u8{0} ** 32;
-var node_public_key: [32]u8 = [_]u8{0} ** 32;
+var node_public_key_bytes: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8 =
+    [_]u8{0} ** gov_sign.PUBLIC_KEY_BLOB_BYTES;
+var static_incoming_message: message.Message = undefined;
+var static_handshake_message: message.Message = undefined;
 
 var messages_sent: u64 = 0;
 var messages_received: u64 = 0;
@@ -127,16 +132,37 @@ pub fn isInitialized() bool {
 }
 
 fn generateNodeIdentity() void {
-    crypto.KeyPair.generate();
+    @memset(node_public_key_bytes[0..], 0);
+    @memset(node_id[0..], 0);
 
-    const pub_key_ptr = crypto.KeyPair.getPublicKey();
-    @memcpy(&node_public_key, pub_key_ptr);
+    const public_key = auth.getGovernancePublicKey() orelse {
+        serial.writeString("[P2P] Governance key unavailable; identity is fail-closed\n");
+        return;
+    };
 
-    const hash_val = crypto.sha256(&node_public_key);
-    @memcpy(&node_id, &hash_val);
+    const serialized_len = gov_sign.serializePublicKey(
+        public_key,
+        &node_public_key_bytes,
+    );
+    if (serialized_len != gov_sign.PUBLIC_KEY_BLOB_BYTES) {
+        serial.writeString("[P2P] Failed to serialize governance public key\n");
+        constant_time.secureZero(&node_public_key_bytes);
+        return;
+    }
 
-    const secret_key_ptr = crypto.KeyPair.getSecretKey();
-    @memcpy(&node_private_key, secret_key_ptr[0..32]);
+    crypto.sha256Into(&node_public_key_bytes, &node_id);
+}
+
+fn hasNodeIdentity() bool {
+    return !constant_time.constantTimeIsZero32(&node_id);
+}
+
+/// Refresh the P2P identity after login/unlock. P2P initialization may run
+/// before the user identity session is available at boot.
+pub fn refreshIdentity() bool {
+    if (hasNodeIdentity()) return true;
+    generateNodeIdentity();
+    return hasNodeIdentity();
 }
 
 // =============================================================================
@@ -145,6 +171,10 @@ fn generateNodeIdentity() void {
 
 pub fn start() bool {
     if (!initialized) return false;
+    if (!refreshIdentity()) {
+        serial.writeString("[P2P] Cannot start without unlocked governance identity\n");
+        return false;
+    }
     if (node_status != .offline) return false;
 
     serial.writeString("[P2P] Starting P2P node...\n");
@@ -293,15 +323,15 @@ fn performHandshake(sock: *socket.Socket, ip: u32, port: u16) bool {
     const info = protocol.NodeInfo{
         .version = VERSION,
         .port = config.port,
-        .public_key = node_public_key,
+        .public_key = node_public_key_bytes,
         .capabilities = protocol.CAP_FULL_NODE,
     };
 
     handshake.payload_len = protocol.encodeNodeInfo(&info, &handshake.payload);
 
-    message.sign(&handshake, &node_private_key);
+    if (!message.signWithSession(&handshake)) return false;
 
-    var buffer: [512]u8 = undefined;
+    var buffer: [message.MAX_WIRE_SIZE]u8 = undefined;
     const len = message.encode(&handshake, &buffer);
 
     if (len == 0) {
@@ -316,7 +346,7 @@ fn performHandshake(sock: *socket.Socket, ip: u32, port: u16) bool {
     messages_sent += 1;
     bytes_sent += len;
 
-    var recv_buf: [512]u8 = undefined;
+    var recv_buf: [message.MAX_WIRE_SIZE]u8 = undefined;
     const recv_len = socket.recv(sock, &recv_buf);
 
     if (recv_len <= 0) {
@@ -326,23 +356,25 @@ fn performHandshake(sock: *socket.Socket, ip: u32, port: u16) bool {
     messages_received += 1;
     bytes_received += @intCast(recv_len);
 
-    const response = message.decode(recv_buf[0..@intCast(recv_len)]) orelse return false;
-
-    if (response.msg_type != .handshake_ack) {
-        return false;
-    }
-
+    if (!message.decodeInto(recv_buf[0..@intCast(recv_len)], &static_handshake_message)) return false;
+    const response = &static_handshake_message;
+    if (response.msg_type != .handshake_ack) return false;
     if (peer.isBanned(response.sender_id)) {
         serial.writeString("[P2P] Refusing handshake with banned peer\n");
         return false;
     }
-
-    if (!message.verify(&response)) {
+    var remote_info: protocol.NodeInfo = undefined;
+    const response_payload_len: usize = @intCast(response.payload_len);
+    if (!protocol.decodeNodeInfoInto(response.payload[0..response_payload_len], &remote_info)) return false;
+    var remote_key = gov_sign.PublicKey{};
+    defer gov_sign.clearPublicKey(&remote_key);
+    if (!gov_sign.deserializePublicKey(&remote_info.public_key, &remote_key)) return false;
+    if (!message.verifyWithPublicKey(response, &remote_key)) {
         serial.writeString("[P2P] Invalid signature from peer\n");
         return false;
     }
-
-    _ = peer.add(response.sender_id, ip, port, sock);
+    const added = peer.add(response.sender_id, ip, port, sock) orelse return false;
+    added.public_key = remote_info.public_key;
 
     serial.writeString("[P2P] Handshake successful with ");
     printHex(response.sender_id[0..8]);
@@ -371,7 +403,10 @@ pub fn broadcast(msg_type: message.MessageType, payload: []const u8) void {
         @memcpy(msg.payload[0..copy_len], payload[0..copy_len]);
     }
 
-    message.sign(&msg, &node_private_key);
+    if (!message.signWithSession(&msg)) {
+        serial.writeString("[P2P] Message signing failed\n");
+        return;
+    }
 
     var buffer: [MAX_MESSAGE_SIZE]u8 = undefined;
     const len = message.encode(&msg, &buffer);
@@ -419,7 +454,10 @@ pub fn broadcastExcept(
         @memcpy(msg.payload[0..copy_len], payload[0..copy_len]);
     }
 
-    message.sign(&msg, &node_private_key);
+    if (!message.signWithSession(&msg)) {
+        serial.writeString("[P2P] Message signing failed\n");
+        return;
+    }
 
     var buffer: [MAX_MESSAGE_SIZE]u8 = undefined;
     const len = message.encode(&msg, &buffer);
@@ -472,7 +510,10 @@ pub fn sendToPeer(peer_id: [32]u8, msg_type: message.MessageType, payload: []con
         @memcpy(msg.payload[0..copy_len], payload[0..copy_len]);
     }
 
-    message.sign(&msg, &node_private_key);
+    if (!message.signWithSession(&msg)) {
+        serial.writeString("[P2P] Message signing failed\n");
+        return false;
+    }
 
     var buffer: [MAX_MESSAGE_SIZE]u8 = undefined;
     const len = message.encode(&msg, &buffer);
@@ -501,17 +542,22 @@ pub fn handleIncomingMessage(p: *peer.Peer, data: []const u8) void {
     messages_received += 1;
     bytes_received += data.len;
 
-    const msg = message.decode(data) orelse {
+    if (!message.decodeInto(data, &static_incoming_message)) {
         serial.writeString("[P2P] Failed to decode message\n");
         return;
-    };
+    }
+    const msg = &static_incoming_message;
 
     if (peer.isBanned(msg.sender_id)) {
         serial.writeString("[P2P] Dropping message from banned peer\n");
         return;
     }
 
-    if (!message.verify(&msg)) {
+    var peer_key = gov_sign.PublicKey{};
+    defer gov_sign.clearPublicKey(&peer_key);
+    if (!gov_sign.deserializePublicKey(&p.public_key, &peer_key) or
+        !message.verifyWithPublicKey(msg, &peer_key))
+    {
         serial.writeString("[P2P] Invalid message signature\n");
         peer.decreaseReputation(p, 3);
         return;
@@ -525,7 +571,7 @@ pub fn handleIncomingMessage(p: *peer.Peer, data: []const u8) void {
 
     p.last_seen = getTimestamp();
 
-    protocol.handleMessage(p, &msg);
+    protocol.handleMessage(p, msg);
 }
 
 // =============================================================================
@@ -555,8 +601,14 @@ pub fn getNodeId() [32]u8 {
     return node_id;
 }
 
-pub fn getPublicKey() [32]u8 {
-    return node_public_key;
+pub fn getPublicKeyBlob() [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8 {
+    return node_public_key_bytes;
+}
+
+/// Shell/status compatibility alias. This returns the complete canonical
+/// serialized ML-DSA-65 public-key blob, not the 32-byte node fingerprint.
+pub fn getPublicKey() [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8 {
+    return node_public_key_bytes;
 }
 
 pub fn getPeerCount() usize {
@@ -648,6 +700,9 @@ pub fn runTests() bool {
         failed += 1;
     }
 
+    // The governance key may become available only after shell login.
+    _ = refreshIdentity();
+
     var has_id = false;
 
     for (node_id) |b| {
@@ -658,8 +713,16 @@ pub fn runTests() bool {
     }
 
     if (has_id) {
+        // Governance identity is available and the P2P node fingerprint was
+        // derived successfully.
+        passed += 1;
+    } else if (!auth.isGovernanceSigningAvailable()) {
+        // P2P can initialize before the dedicated governance-signing session
+        // is unlocked. Remaining without an identity is the required
+        // fail-closed state; no legacy or ephemeral fallback key is allowed.
         passed += 1;
     } else {
+        // A signing session exists but identity derivation still failed.
         failed += 1;
     }
 

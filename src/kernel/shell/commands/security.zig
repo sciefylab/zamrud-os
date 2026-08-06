@@ -1481,6 +1481,34 @@ fn runAllTests() void {
     shell.println("+===========================================================+");
     shell.newLine();
 
+    // Other suites (especially ARP flood and downgrade tests) intentionally
+    // trigger blacklist and lockdown responses. Security tests need a clean,
+    // deterministic baseline, but must restore the caller's security mode.
+    const original_level = security.getSecurityLevel();
+    const original_state = firewall.state;
+    defer {
+        security.setSecurityLevel(original_level);
+        firewall.setState(original_state);
+    }
+
+    security.setSecurityLevel(.standard);
+    firewall.setState(.enforcing);
+    firewall.resetStats();
+
+    const contaminated_test_ips = [_]u32{
+        net_driver.ipToU32(192, 168, 99, 1),
+        net_driver.ipToU32(192, 168, 200, 1),
+        net_driver.ipToU32(172, 20, 10, 2),
+        net_driver.ipToU32(172, 20, 10, 3),
+        net_driver.ipToU32(192, 168, 77, 77),
+        net_driver.ipToU32(192, 168, 88, 88),
+    };
+
+    for (contaminated_test_ips) |test_ip| {
+        _ = firewall.removeFromBlacklist(test_ip);
+        _ = threat_score.removeEntry(test_ip);
+    }
+
     var passed: u32 = 0;
     var failed: u32 = 0;
 
@@ -1825,27 +1853,28 @@ fn testPortScanDetection(failed: *u32) u32 {
     helpers.printTestCategory(6, 12, "Port Scan Detection");
     var passed: u32 = 0;
 
+    // This test intentionally triggers enforcement. Preserve the caller's
+    // firewall mode and remove only the synthetic source state afterward.
+    const original_state = firewall.state;
     const scanner_ip = net_driver.ipToU32(192, 168, 77, 77);
+
+    _ = firewall.removeFromBlacklist(scanner_ip);
+    _ = threat_score.removeEntry(scanner_ip);
 
     var detected = false;
     var port: u16 = 1000;
-
     while (port < 1015) : (port += 1) {
         detected = firewall.detectPortScan(scanner_ip, port);
         if (detected) break;
     }
 
     passed += helpers.doTest("Detection function", true, failed);
-
     if (detected) {
         passed += helpers.doTest("Scan detected", true, failed);
-
         const fw_stats = firewall.getStats();
         passed += helpers.doTest("Stats updated", fw_stats.blocked_port_scan > 0, failed);
-
         if (firewall.config.auto_blacklist) {
             passed += helpers.doTest("Auto-blacklisted", firewall.isBlacklisted(scanner_ip), failed);
-            _ = firewall.removeFromBlacklist(scanner_ip);
         } else {
             helpers.doSkip("Auto-blacklisted");
         }
@@ -1859,6 +1888,12 @@ fn testPortScanDetection(failed: *u32) u32 {
     passed += helpers.doTest("Window tracking", true, failed);
     passed += helpers.doTest("Multi-IP support", true, failed);
     passed += helpers.doTest("Detection works", true, failed);
+
+    // Prevent LOCKDOWN, blacklist, and threat-score state leaking into the
+    // following connection-tracking test.
+    _ = firewall.removeFromBlacklist(scanner_ip);
+    _ = threat_score.removeEntry(scanner_ip);
+    firewall.setState(original_state);
 
     return passed;
 }
@@ -2061,10 +2096,14 @@ fn testBinaryVerification(failed: *u32) u32 {
     passed += helpers.doTest("Block unknown malware", !is_malware_allowed, failed);
 
     var app_hash = binaryverify.computeHash(app_resmi_data);
-    const registered = registry.registerFile("test_app.zam", &app_hash, .user_app, 1);
-    passed += helpers.doTest("Register valid app", registered, failed);
 
+    // Repeated runs may find the same hash already registered. The relevant
+    // postcondition is that the application is accepted by Binary Verify.
+    const inserted = registry.registerFile("test_app.zam", &app_hash, .user_app, 1);
     const is_app_allowed = binaryverify.checkExec(app_resmi_data);
+    const registered_or_present = inserted or is_app_allowed;
+
+    passed += helpers.doTest("Register valid app", registered_or_present, failed);
     passed += helpers.doTest("Allow valid app", is_app_allowed, failed);
 
     const is_app_allowed_again = binaryverify.checkExec(app_resmi_data);

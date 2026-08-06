@@ -13,6 +13,9 @@ const network = @import("../drivers/network/network.zig");
 
 // Crypto untuk signature verification
 const crypto = @import("../crypto/crypto.zig");
+const gov_sign = @import("../crypto/gov_sign.zig");
+const auth = @import("../identity/auth.zig");
+const constant_time = @import("../crypto/constant_time.zig");
 
 // Forward reference ke firewall (untuk blacklist)
 const firewall = @import("firewall.zig");
@@ -60,6 +63,24 @@ pub var config = ArpDefenseConfig{};
 // =============================================================================
 
 pub const MacAddress = [6]u8;
+pub const ARP_V2_VERSION: u8 = 2;
+pub const ARP_V2_DOMAIN = "ZAMRUD:ARP:BINDING:V2";
+pub const ARP_V2_MAX_AGE_MS: u64 = 30000;
+pub const ARP_V2_SIGNING_BYTES: usize = 1 + 2 + 6 + 4 + 6 + 4 + 8 + 8 + 32;
+
+pub const AuthenticatedArpV2 = struct {
+    version: u8 = ARP_V2_VERSION,
+    operation: u16,
+    sender_mac: MacAddress,
+    sender_ip: u32,
+    target_mac: MacAddress,
+    target_ip: u32,
+    timestamp: u64,
+    nonce: u64,
+    peer_id: [32]u8,
+    public_key: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8,
+    signature: [gov_sign.SIGNATURE_BLOB_BYTES]u8,
+};
 
 // =============================================================================
 // Trusted Binding - MAC to PeerID
@@ -77,7 +98,7 @@ pub const TrustedBinding = struct {
     mac: MacAddress,
     ip: u32,
     peer_id: [32]u8,
-    public_key: [32]u8,
+    public_key: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8,
     created_at: u64,
     last_verified: u64,
     trust_level: TrustLevel,
@@ -89,6 +110,19 @@ pub const TrustedBinding = struct {
 const MAX_TRUSTED_BINDINGS = 64;
 var trusted_bindings: [MAX_TRUSTED_BINDINGS]TrustedBinding = undefined;
 var binding_count: usize = 0;
+
+const MAX_ARP_V2_NONCES: usize = 256;
+const ArpV2NonceEntry = struct {
+    peer_id: [32]u8,
+    nonce: u64,
+    timestamp: u64,
+    active: bool,
+};
+var arp_v2_nonces: [MAX_ARP_V2_NONCES]ArpV2NonceEntry = undefined;
+var arp_v2_nonce_cursor: usize = 0;
+var arp_v2_signing_input: [ARP_V2_SIGNING_BYTES]u8 = [_]u8{0} ** ARP_V2_SIGNING_BYTES;
+var arp_v2_public_key: gov_sign.PublicKey = .{};
+var arp_v2_signature: gov_sign.Signature = .{};
 
 // =============================================================================
 // Secure ARP Cache
@@ -237,7 +271,7 @@ fn emptyBinding() TrustedBinding {
         .mac = [_]u8{0} ** 6,
         .ip = 0,
         .peer_id = [_]u8{0} ** 32,
-        .public_key = [_]u8{0} ** 32,
+        .public_key = [_]u8{0} ** gov_sign.PUBLIC_KEY_BLOB_BYTES,
         .created_at = 0,
         .last_verified = 0,
         .trust_level = .unknown,
@@ -395,42 +429,21 @@ pub fn validateArpPacket(
         };
     }
 
-    // 4. Signature verification (if required and provided)
-    if (config.require_signature) {
-        if (signature) |sig| {
-            const binding = getTrustedBindingByMac(sender_mac);
-            if (binding) |b| {
-                if (!verifyArpSignature(operation, sender_mac, sender_ip, target_mac, target_ip, sig, &b.public_key)) {
-                    stats.packets_blocked += 1;
-                    stats.signature_failures += 1;
-
-                    // ⭐ H.8 INTEGRATION: Record signature failure
-                    _ = threat_score.recordEvent(sender_ip, .signature_invalid, .high);
-
-                    return .{
-                        .allowed = false,
-                        .reason = "Invalid ARP signature",
-                        .trust_level = .unknown,
-                        .peer_id = null,
-                    };
-                }
-            }
-        } else if (!isGatewayOrLocal(sender_ip)) {
-            // No signature and not gateway - block if signature required
-            stats.packets_blocked += 1;
-
-            // ⭐ H.8 INTEGRATION: Record missing signature as protocol error
-            _ = threat_score.recordEvent(sender_ip, .protocol_error, .medium);
-
-            return .{
-                .allowed = false,
-                .reason = "ARP signature required",
-                .trust_level = .unknown,
-                .peer_id = null,
-            };
-        }
+    // 4. Standard RFC 826 ARP has no authenticated extension. In strict
+    // mode, only QEMU/local compatibility sources may use this path. All
+    // externally authenticated peers must use validateAuthenticatedArpV2().
+    if (config.require_signature and !isGatewayOrLocal(sender_ip)) {
+        _ = signature;
+        stats.packets_blocked += 1;
+        stats.signature_failures += 1;
+        _ = threat_score.recordEvent(sender_ip, .protocol_error, .medium);
+        return .{
+            .allowed = false,
+            .reason = "Authenticated ARP V2 required",
+            .trust_level = .unknown,
+            .peer_id = null,
+        };
     }
-
     // 5. Update secure cache
     updateSecureCache(sender_ip, sender_mac);
 
@@ -496,11 +509,23 @@ fn detectArpSpoof(ip: u32, mac: MacAddress) SpoofResult {
 // Binding Management
 // =============================================================================
 
-pub fn createBinding(mac: MacAddress, ip: u32, peer_id: [32]u8, public_key: [32]u8) bool {
-    // Check if binding exists
+pub fn createBindingV2(
+    mac: MacAddress,
+    ip: u32,
+    peer_id: [32]u8,
+    public_key: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8,
+) bool {
+    var calculated: [32]u8 = [_]u8{0} ** 32;
+    defer constant_time.secureZero32(&calculated);
+    crypto.sha256Into(&public_key, &calculated);
+    if (!constant_time.constantTimeCompare32(&calculated, &peer_id)) return false;
+
+    gov_sign.clearPublicKey(&arp_v2_public_key);
+    defer gov_sign.clearPublicKey(&arp_v2_public_key);
+    if (!gov_sign.deserializePublicKey(&public_key, &arp_v2_public_key)) return false;
+
     for (trusted_bindings[0..binding_count]) |*binding| {
         if (binding.ip == ip) {
-            // Update existing
             binding.mac = mac;
             binding.peer_id = peer_id;
             binding.public_key = public_key;
@@ -510,13 +535,8 @@ pub fn createBinding(mac: MacAddress, ip: u32, peer_id: [32]u8, public_key: [32]
             return true;
         }
     }
-
-    if (binding_count >= MAX_TRUSTED_BINDINGS) {
-        serial.writeString("[ARP-DEFENSE] Max bindings reached\n");
-        return false;
-    }
-
-    trusted_bindings[binding_count] = TrustedBinding{
+    if (binding_count >= MAX_TRUSTED_BINDINGS) return false;
+    trusted_bindings[binding_count] = .{
         .mac = mac,
         .ip = ip,
         .peer_id = peer_id,
@@ -530,8 +550,24 @@ pub fn createBinding(mac: MacAddress, ip: u32, peer_id: [32]u8, public_key: [32]
     };
     binding_count += 1;
     stats.bindings_created += 1;
-
+    stats.bindings_verified += 1;
     return true;
+}
+
+/// Removed legacy 32-byte signing-key registration boundary.
+/// Kept temporarily as a fail-closed source-compatibility shim for consumers
+/// that are migrated in Batch 4B-2; it never creates a verified binding.
+pub fn createBinding(
+    mac: MacAddress,
+    ip: u32,
+    peer_id: [32]u8,
+    legacy_public_key: [32]u8,
+) bool {
+    _ = mac;
+    _ = ip;
+    _ = peer_id;
+    _ = legacy_public_key;
+    return false;
 }
 
 pub fn createStaticBinding(mac: MacAddress, ip: u32, description: []const u8) bool {
@@ -708,68 +744,155 @@ fn checkArpRateLimit(ip: u32, mac: MacAddress) bool {
 }
 
 // =============================================================================
-// Signature Verification
+// Authenticated ARP V2
 // =============================================================================
+pub fn validateAuthenticatedArpV2(envelope: *const AuthenticatedArpV2) ValidationResult {
+    stats.total_packets += 1;
+    if (envelope.operation == 1) stats.requests_received += 1 else stats.replies_received += 1;
 
-fn verifyArpSignature(
-    operation: u16,
-    sender_mac: MacAddress,
-    sender_ip: u32,
-    target_mac: MacAddress,
-    target_ip: u32,
-    signature: []const u8,
-    public_key: *const [32]u8,
-) bool {
-    if (signature.len != 64) return false;
+    if (envelope.version != ARP_V2_VERSION) return rejectV2(envelope.sender_ip, "ARP V2 version invalid");
+    if (constant_time.constantTimeIsZero32(&envelope.peer_id)) return rejectV2(envelope.sender_ip, "ARP V2 peer ID missing");
 
-    var msg_buf: [64]u8 = undefined;
+    const now = getTimestamp();
+    if (envelope.timestamp > now + 5000) return rejectV2(envelope.sender_ip, "ARP V2 future timestamp");
+    if (now > envelope.timestamp and now - envelope.timestamp > ARP_V2_MAX_AGE_MS) {
+        return rejectV2(envelope.sender_ip, "ARP V2 expired timestamp");
+    }
+    if (isArpV2NonceUsed(&envelope.peer_id, envelope.nonce)) {
+        return rejectV2(envelope.sender_ip, "ARP V2 replay detected");
+    }
+
+    var calculated_peer_id: [32]u8 = [_]u8{0} ** 32;
+    defer constant_time.secureZero32(&calculated_peer_id);
+    crypto.sha256Into(&envelope.public_key, &calculated_peer_id);
+    if (!constant_time.constantTimeCompare32(&calculated_peer_id, &envelope.peer_id)) {
+        return rejectV2(envelope.sender_ip, "ARP V2 fingerprint mismatch");
+    }
+
+    gov_sign.clearPublicKey(&arp_v2_public_key);
+    gov_sign.clearSignature(&arp_v2_signature);
+    defer gov_sign.clearPublicKey(&arp_v2_public_key);
+    defer gov_sign.clearSignature(&arp_v2_signature);
+    if (!gov_sign.deserializePublicKey(&envelope.public_key, &arp_v2_public_key)) {
+        return rejectV2(envelope.sender_ip, "ARP V2 malformed public key");
+    }
+    if (!gov_sign.deserializeSignature(&envelope.signature, &arp_v2_signature)) {
+        return rejectV2(envelope.sender_ip, "ARP V2 malformed signature");
+    }
+
+    const input_len = buildArpV2SigningInput(envelope, &arp_v2_signing_input);
+    if (input_len != ARP_V2_SIGNING_BYTES) return rejectV2(envelope.sender_ip, "ARP V2 transcript failure");
+    defer constant_time.secureZero(&arp_v2_signing_input);
+    if (!auth.verifyGovernancePayloadBool(
+        &arp_v2_public_key,
+        ARP_V2_DOMAIN,
+        arp_v2_signing_input[0..input_len],
+        &arp_v2_signature,
+    )) return rejectV2(envelope.sender_ip, "ARP V2 invalid signature");
+
+    recordArpV2Nonce(envelope.peer_id, envelope.nonce, envelope.timestamp);
+    if (!createBindingV2(envelope.sender_mac, envelope.sender_ip, envelope.peer_id, envelope.public_key)) {
+        return rejectV2(envelope.sender_ip, "ARP V2 binding rejected");
+    }
+    updateSecureCache(envelope.sender_ip, envelope.sender_mac);
+    stats.packets_allowed += 1;
+    return .{
+        .allowed = true,
+        .reason = "Authenticated ARP V2 validated",
+        .trust_level = .verified,
+        .peer_id = envelope.peer_id,
+    };
+}
+
+pub fn signAuthenticatedArpV2(envelope: *AuthenticatedArpV2) bool {
+    envelope.version = ARP_V2_VERSION;
+    @memset(envelope.signature[0..], 0);
+    const public_key = auth.getGovernancePublicKey() orelse return false;
+    const key_len = gov_sign.serializePublicKey(public_key, &envelope.public_key);
+    if (key_len != gov_sign.PUBLIC_KEY_BLOB_BYTES) return false;
+    crypto.sha256Into(&envelope.public_key, &envelope.peer_id);
+
+    const input_len = buildArpV2SigningInput(envelope, &arp_v2_signing_input);
+    if (input_len != ARP_V2_SIGNING_BYTES) return false;
+    defer constant_time.secureZero(&arp_v2_signing_input);
+    gov_sign.clearSignature(&arp_v2_signature);
+    defer gov_sign.clearSignature(&arp_v2_signature);
+    if (!auth.signGovernancePayload(
+        ARP_V2_DOMAIN,
+        arp_v2_signing_input[0..input_len],
+        &arp_v2_signature,
+    )) return false;
+    return gov_sign.serializeSignature(&arp_v2_signature, &envelope.signature) ==
+        gov_sign.SIGNATURE_BLOB_BYTES;
+}
+
+fn buildArpV2SigningInput(envelope: *const AuthenticatedArpV2, out: []u8) usize {
+    if (out.len < ARP_V2_SIGNING_BYTES) return 0;
     var pos: usize = 0;
-
-    // Operation
-    msg_buf[pos] = @intCast((operation >> 8) & 0xFF);
+    out[pos] = envelope.version;
     pos += 1;
-    msg_buf[pos] = @intCast(operation & 0xFF);
-    pos += 1;
-
-    // Sender MAC
-    @memcpy(msg_buf[pos .. pos + 6], &sender_mac);
+    writeU16BE(out[pos..], envelope.operation);
+    pos += 2;
+    @memcpy(out[pos..][0..6], &envelope.sender_mac);
     pos += 6;
-
-    // Sender IP
-    msg_buf[pos] = @intCast((sender_ip >> 24) & 0xFF);
-    pos += 1;
-    msg_buf[pos] = @intCast((sender_ip >> 16) & 0xFF);
-    pos += 1;
-    msg_buf[pos] = @intCast((sender_ip >> 8) & 0xFF);
-    pos += 1;
-    msg_buf[pos] = @intCast(sender_ip & 0xFF);
-    pos += 1;
-
-    // Target MAC
-    @memcpy(msg_buf[pos .. pos + 6], &target_mac);
+    writeU32BE(out[pos..], envelope.sender_ip);
+    pos += 4;
+    @memcpy(out[pos..][0..6], &envelope.target_mac);
     pos += 6;
+    writeU32BE(out[pos..], envelope.target_ip);
+    pos += 4;
+    writeU64BE(out[pos..], envelope.timestamp);
+    pos += 8;
+    writeU64BE(out[pos..], envelope.nonce);
+    pos += 8;
+    @memcpy(out[pos..][0..32], &envelope.peer_id);
+    pos += 32;
+    return pos;
+}
 
-    // Target IP
-    msg_buf[pos] = @intCast((target_ip >> 24) & 0xFF);
-    pos += 1;
-    msg_buf[pos] = @intCast((target_ip >> 16) & 0xFF);
-    pos += 1;
-    msg_buf[pos] = @intCast((target_ip >> 8) & 0xFF);
-    pos += 1;
-    msg_buf[pos] = @intCast(target_ip & 0xFF);
-    pos += 1;
+fn rejectV2(source_ip: u32, reason: []const u8) ValidationResult {
+    stats.packets_blocked += 1;
+    stats.signature_failures += 1;
+    _ = threat_score.recordEvent(source_ip, .signature_invalid, .high);
+    return .{ .allowed = false, .reason = reason, .trust_level = .unknown, .peer_id = null };
+}
 
-    const hash = crypto.sha256(msg_buf[0..pos]);
+fn isArpV2NonceUsed(peer_id: *const [32]u8, nonce: u64) bool {
+    for (arp_v2_nonces) |entry| {
+        if (entry.active and entry.nonce == nonce and
+            constant_time.constantTimeCompare32(&entry.peer_id, peer_id)) return true;
+    }
+    return false;
+}
 
-    var sig_arr: [64]u8 = undefined;
-    @memcpy(&sig_arr, signature[0..64]);
-
-    return crypto.verify(public_key, &hash, &sig_arr);
+fn recordArpV2Nonce(peer_id: [32]u8, nonce: u64, timestamp: u64) void {
+    arp_v2_nonces[arp_v2_nonce_cursor] = .{
+        .peer_id = peer_id,
+        .nonce = nonce,
+        .timestamp = timestamp,
+        .active = true,
+    };
+    arp_v2_nonce_cursor = (arp_v2_nonce_cursor + 1) % MAX_ARP_V2_NONCES;
 }
 
 // =============================================================================
 // Helpers
 // =============================================================================
+
+fn writeU16BE(out: []u8, value: u16) void {
+    out[0] = @truncate(value >> 8);
+    out[1] = @truncate(value);
+}
+fn writeU32BE(out: []u8, value: u32) void {
+    out[0] = @truncate(value >> 24);
+    out[1] = @truncate(value >> 16);
+    out[2] = @truncate(value >> 8);
+    out[3] = @truncate(value);
+}
+fn writeU64BE(out: []u8, value: u64) void {
+    var i: usize = 0;
+    while (i < 8) : (i += 1) out[i] = @truncate(value >> @intCast(56 - i * 8));
+}
 
 fn isGatewayOrLocal(ip: u32) bool {
     // Loopback

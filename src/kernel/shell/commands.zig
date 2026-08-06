@@ -2,9 +2,7 @@
 //! Phases A-F5.0 + T4.2 (Environment Variables)
 //! B2.3: Added mv, cp, truncate commands
 //! B2.9: Added SMP commands
-
 const shell = @import("shell.zig");
-
 const helpers = @import("commands/helpers.zig");
 const system = @import("commands/system.zig");
 const filesystem = @import("commands/filesystem.zig");
@@ -41,18 +39,14 @@ const date_cmd = @import("commands/date.zig");
 const smp_cmd = @import("commands/smp.zig");
 const usb_cmd = @import("commands/usb.zig");
 const audio_cmd = @import("commands/audio.zig");
-
 // =============================================================================
 // Command Execution
 // =============================================================================
-
 pub fn execute(input: []const u8) void {
     const parsed = helpers.parseArgs(input);
     const command = parsed.cmd;
     const args = parsed.rest;
-
     if (command.len == 0) return;
-
     // T4.2: Environment variable commands
     if (helpers.strEql(command, "set")) {
         system.cmdSet(args);
@@ -362,7 +356,6 @@ pub fn execute(input: []const u8) void {
     else if (helpers.strEql(command, "mouse")) {
         mouse_cmd.execute(args);
     }
-
     // H.9: Memory Sanitization
     else if (helpers.strEql(command, "sanitize")) {
         sanitize_cmd.execute(args);
@@ -373,19 +366,16 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "munlock")) {
         sanitize_cmd.cmdMunlock(args);
     }
-
     // H.7: Trust Ceremony
     else if (helpers.strEql(command, "ceremony")) {
         _ = ceremony_cmd.execute(args);
     } else if (helpers.strEql(command, "trustsetup")) {
         _ = ceremony_cmd.execute("run");
     }
-
     // B2.6 ACPI
     else if (helpers.strEql(command, "acpi")) {
         acpi_cmd.execute(args);
     }
-
     // Date/Time
     else if (helpers.strEql(command, "date")) {
         date_cmd.executeDate(args);
@@ -396,7 +386,6 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "uptime")) {
         date_cmd.executeUptime(args);
     }
-
     // B2.9: SMP
     else if (helpers.strEql(command, "smp")) {
         smp_cmd.handleCommand(args);
@@ -405,7 +394,6 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "smptest")) {
         smp_cmd.handleCommand("test");
     }
-
     // USB (B2.11)
     else if (helpers.strEql(command, "usb")) {
         usb_cmd.execute(args);
@@ -414,14 +402,12 @@ pub fn execute(input: []const u8) void {
     } else if (helpers.strEql(command, "lsusb")) {
         usb_cmd.execute("devices");
     }
-
     // Audio (B2.10)
     else if (helpers.strEql(command, "audio")) {
         audio_cmd.execute(args);
     } else if (helpers.strEql(command, "audiotest")) {
         audio_cmd.execute("test");
     }
-
     // Test all
     else if (helpers.strEql(command, "testall")) {
         runAllTests();
@@ -431,145 +417,111 @@ pub fn execute(input: []const u8) void {
         shell.printError("Unknown command: ");
         shell.print(command);
         shell.newLine();
-        shell.println("  Type 'help' for available commands");
+        shell.println(" Type 'help' for available commands");
         shell.setLastExitSuccess(false);
     }
 }
-
 // =============================================================================
 // Test All
 // =============================================================================
-
 fn runAllTests() void {
     helpers.printTestHeader("ZAMRUD OS - COMPLETE TEST SUITE");
-
     shell.printInfoLine("=== SMOKE TESTS ===");
     smoke_cmd.execute("run");
     shell.newLine();
-
     shell.printInfoLine("=== NETWORK TESTS ===");
     network_cmd.runTest("all");
     shell.newLine();
-
     shell.printInfoLine("=== P2P TESTS ===");
     p2p_cmd.runTest("all");
     shell.newLine();
-
     shell.printInfoLine("=== GATEWAY TESTS ===");
     gateway_cmd.execute("test");
     shell.newLine();
-
     shell.printInfoLine("=== SECURITY/FIREWALL TESTS ===");
     security_cmd.runTest("all");
     shell.newLine();
-
     shell.printInfoLine("=== CRYPTO TESTS ===");
     crypto_cmd.execute("test");
     shell.newLine();
-
     shell.printInfoLine("=== SYSCALL TESTS ===");
     syscall_cmd.execute("test");
     shell.newLine();
-
     shell.printInfoLine("=== BOOT TESTS ===");
     boot_cmd.execute("test");
     shell.newLine();
-
     shell.printInfoLine("=== DISK TESTS ===");
     disk_cmd.execute("test");
     shell.newLine();
-
     shell.printInfoLine("=== CONFIG PERSISTENCE TESTS ===");
     config_cmd.execute("test");
     shell.newLine();
-
     shell.printInfoLine("=== CAPABILITY TESTS (E3.1) ===");
     process_cmd.cmdCaps("test");
     shell.newLine();
-
     shell.printInfoLine("=== UNVEIL TESTS (E3.2) ===");
     process_cmd.cmdUnveil("test");
     shell.newLine();
-
     shell.printInfoLine("=== BINARY VERIFY TESTS (E3.3) ===");
     process_cmd.cmdVerifyBin("test");
     shell.newLine();
-
     shell.printInfoLine("=== NETWORK CAPABILITY TESTS (E3.4) ===");
     netcap_cmd.cmdNettest("");
     shell.newLine();
-
     shell.printInfoLine("=== VIOLATION HANDLER TESTS (E3.5) ===");
     vio_cmd.cmdSectest("");
     shell.newLine();
-
     shell.printInfoLine("=== IPC TESTS (F1) ===");
     ipc_cmd.cmdIpcTest("");
     shell.newLine();
-
     shell.printInfoLine("=== SHARED MEMORY TESTS (F2) ===");
     shmem_cmd.cmdShmTest("");
     shell.newLine();
-
     shell.printInfoLine("=== USER/GROUP TESTS (F3) ===");
     user_cmd.execute("test");
     shell.newLine();
-
     shell.printInfoLine("=== ENCRYPTED FS TESTS (F4.0) ===");
     encfs_cmd.cmdEncTest();
     shell.newLine();
-
     shell.printInfoLine("=== ENC INTEGRATION TESTS (F4.1) ===");
     enc_int_cmd.encIntTestCommand("");
     shell.newLine();
-
     shell.printInfoLine("=== SYSTEM ENCRYPTION TESTS (F4.2) ===");
     sys_encrypt_cmd.cmdSysEncTest("");
     shell.newLine();
-
     shell.printInfoLine("=== ZAM BINARY LOADER TESTS (F5.0) ===");
     zam_cmd.cmdZamTest();
     shell.newLine();
-
     shell.printInfoLine("=== ENVIRONMENT VARIABLE TESTS (T4.2) ===");
     system.cmdEnvTest("");
     shell.newLine();
-
     shell.printInfoLine("=== IDENTITY & PRIVACY TESTS (P.1/P.2/P.5) ===");
     identity_cmd.runTest("all");
     shell.newLine();
-
     shell.printInfoLine("=== CONSTANT-TIME CRYPTO TESTS (H.1) ===");
     crypto_cmd.execute("cttest");
     shell.newLine();
-
     shell.printInfoLine("=== ENTROPY/CSPRNG TESTS (H.2) ===");
     crypto_cmd.execute("entropy test");
     shell.newLine();
-
     shell.printInfoLine("=== MEMORY SANITIZATION TESTS (H.9) ===");
     sanitize_cmd.runTests();
     shell.newLine();
-
     shell.printInfoLine("=== TRUST CEREMONY TESTS (H.7) ===");
     _ = ceremony_cmd.execute("test");
     shell.newLine();
-
     // B2.9: SMP Tests
     shell.printInfoLine("=== SMP TESTS (B2.9) ===");
     smp_cmd.handleCommand("test");
     shell.newLine();
-
     shell.printInfoLine("=== USB TESTS (B2.11) ===");
     usb_cmd.execute("test");
     shell.newLine();
-
     shell.printInfoLine("=== AUDIO TESTS (B2.10) ===");
     audio_cmd.execute("test");
     shell.newLine();
-
     shell.printInfoLine("########################################");
-    shell.printInfoLine("##  COMPLETE TEST SUITE FINISHED      ##");
+    shell.printInfoLine("## COMPLETE TEST SUITE FINISHED       ##");
     shell.printInfoLine("########################################");
     shell.newLine();
 }

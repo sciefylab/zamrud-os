@@ -72,9 +72,12 @@ var lockout_until: u32 = 0;
 var unlocked_privkey: [32]u8 = [_]u8{0} ** 32;
 var has_unlocked_key: bool = false;
 
-// GOV.2 session-only secret key.
+// GOV.2 session-only signing key pair. The public-key snapshot remains
+// paired with the decrypted secret key even if keyring current identity changes.
 var unlocked_gov_sign_key: gov_sign.SecretKey = .{};
+var unlocked_gov_sign_public_key: gov_sign.PublicKey = .{};
 var has_unlocked_gov_sign_key: bool = false;
+var has_unlocked_gov_sign_public_key: bool = false;
 
 var lock_timeout: u32 = 300;
 var last_unlock_method: UnlockMethod = .password;
@@ -117,23 +120,30 @@ fn clearPrivateKey() void {
 
 fn clearGovernanceSigningKey() void {
     gov_sign.clearSecretKey(&unlocked_gov_sign_key);
+    gov_sign.clearPublicKey(&unlocked_gov_sign_public_key);
     has_unlocked_gov_sign_key = false;
+    has_unlocked_gov_sign_public_key = false;
 }
-
 fn loadGovernanceSigningKey(id: *keyring.Identity) bool {
     clearGovernanceSigningKey();
-
     if (!has_unlocked_key) return false;
     if (!id.keypair.gov_sign_valid) return false;
+
+    const public_key = keyring.getGovernancePublicKey(id) orelse return false;
+    unlocked_gov_sign_public_key = public_key.*;
+    has_unlocked_gov_sign_public_key = true;
 
     const ok = keyring.decryptGovernanceSigningKeyWithPrivateKey(
         id,
         &unlocked_privkey,
         &unlocked_gov_sign_key,
     );
-
-    has_unlocked_gov_sign_key = ok;
-    return ok;
+    if (!ok) {
+        clearGovernanceSigningKey();
+        return false;
+    }
+    has_unlocked_gov_sign_key = true;
+    return true;
 }
 
 // =============================================================================
@@ -421,7 +431,10 @@ pub fn getPrivateKey() ?*const [32]u8 {
 // =============================================================================
 
 pub fn hasGovernanceSigningKey() bool {
-    return current_unlocked and has_unlocked_gov_sign_key;
+    return current_unlocked and
+        has_unlocked_key and
+        has_unlocked_gov_sign_key and
+        has_unlocked_gov_sign_public_key;
 }
 
 pub fn isGovernanceSigningAvailable() bool {
@@ -429,8 +442,8 @@ pub fn isGovernanceSigningAvailable() bool {
 }
 
 pub fn getGovernancePublicKey() ?*const gov_sign.PublicKey {
-    const current = keyring.getCurrentIdentity() orelse return null;
-    return keyring.getGovernancePublicKey(current);
+    if (!hasGovernanceSigningKey()) return null;
+    return &unlocked_gov_sign_public_key;
 }
 
 pub fn signGovernancePayload(
@@ -440,8 +453,7 @@ pub fn signGovernancePayload(
 ) bool {
     gov_sign.clearSignature(sig);
 
-    if (!current_unlocked) return false;
-    if (!has_unlocked_gov_sign_key) return false;
+    if (!hasGovernanceSigningKey()) return false;
 
     return gov_sign.sign(
         &unlocked_gov_sign_key,

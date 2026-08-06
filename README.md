@@ -4,720 +4,853 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  ZAMRUD OS - GLOBAL PROJECT STATUS                              │
 │  "Security = Identity × Integrity × Isolation × Blockchain"     │
-│  Last Updated: ML-DSA-65 Identity + External ACVP KAT VERIFIED  │
+│  Last Updated: ML-DSA-65 Production Migration VERIFIED ✅       │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  COMPLETED PHASES (Verified by testall / module tests)          │
+│  COMPLETED PHASES                                               │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  PHASE A: Kernel Foundation                    ✅ PASS          │
-│  PHASE B: Core Systems                         ✅ PASS          │
-│  PHASE C: Security & Network                   ✅ PASS          │
-│  PHASE D: Storage & Persistence                ✅ PASS          │
-│  PHASE E: Security Hardening                   ✅ PASS          │
-│  PHASE F1-F5: Advanced Features                ✅ PASS          │
-│  SYSCALL SC1-SC9                               ✅ PASS (108)    │
-│  TERMINAL T1-T5                                ✅ PASS          │
+│  PHASE A: Kernel Foundation                         ✅ PASS      │
+│  PHASE B: Core Systems                              ✅ PASS      │
+│  PHASE C: Security & Network                        ✅ PASS      │
+│  PHASE D: Storage & Persistence                     ✅ PASS      │
+│  PHASE E: Security Hardening                        ✅ PASS      │
+│  PHASE F1-F5: Advanced Features                     ✅ PASS      │
+│  SYSCALL SC1-SC9                                    ✅ PASS      │
+│  TERMINAL T1-T5                                     ✅ PASS      │
 │                                                                 │
 │  ─────────────────────────────────────────────────────────      │
-│  TOTAL VERIFIED: 1115+ tests + latest ML-DSA/Identity tests     │
-│  ALL CURRENT REPORTED TESTS PASSING ✅                          │
+│  TOTAL VERIFIED: 1115+ tests + latest ML-DSA/V2 regressions     │
+│  ALL CURRENT REPORTED MODULE TESTS HAVE ZERO FAILURES ✅        │
 │  ─────────────────────────────────────────────────────────      │
 │                                                                 │
 │  Latest verified modules:                                      │
-│  ✅ security test:   109 passed, 0 failed                       │
-│  ✅ p2p test:        8/8 passed                                 │
-│  ✅ chain test:      36 passed, 0 failed                        │
-│  ✅ authority shell: 10/10 authority command test PASS          │
-│  ✅ GOV.1b audit:    persistent bounded ring VERIFIED           │
-│  ✅ identity test:   7/7 categories passed                      │
-│  ✅ auth test:       15/15 passed                               │
-│  ✅ ML-DSA-65 test:  24 passed, 0 failed                        │
-│  ✅ FIPS 204 KAT:    external ACVP vectors PASS                 │
+│  ✅ Security:       109 passed, 0 failed                        │
+│  ✅ P2P:            8/8 passed                                  │
+│  ✅ Gateway V2:     3/3 passed                                  │
+│  ✅ Network/ARP V2: 207 passed, 0 failed                        │
+│  ✅ Chain:          36 passed, 0 failed                         │
+│  ✅ ZAM/ELF:        25 passed, 0 failed                         │
+│  ✅ Crypto:         8 suites passed                             │
+│  ✅ Identity:       7/7 categories passed                       │
+│  ✅ Authentication: 15/15 passed                                │
+│  ✅ ML-DSA-65:      24 passed, 0 failed                         │
+│  ✅ FIPS 204 KAT:   External ACVP vectors PASS                  │
+│  ✅ GOV.1b Audit:   Persistent bounded ring VERIFIED            │
+│                                                                 │
+│  Stateful regression verified:                                 │
+│  identity → p2p → gateway → network → chain → ZAM → security    │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE B2: Backend Drivers                     ✅ 11/11 (100%)  │
+│  GLOBAL STAGE STATUS                                            │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ✅ B2.1-B2.11: All verified (Mouse, FAT32, SATA, Net, Audio)   │
+│  STAGE B2: Backend Drivers                   ✅ 11/11 COMPLETE   │
+│  STAGE E: Execution & App Security           ✅ 6/6 COMPLETE    │
+│  STAGE F: Storage & Persistence              ✅ 4/4 COMPLETE    │
+│  STAGE S: Security Bare Metal                ✅ 6/6 COMPLETE    │
+│  STAGE R: Root Authority & Multi-User        ✅ 5/5 COMPLETE    │
+│  STAGE P: Privacy & Anonymity                ✅ 5/5 COMPLETE    │
+│  STAGE H: Security Hardening & Identity      ✅ 12/12 COMPLETE  │
+│  STAGE P2P: Decentralized Network Trust      ✅ 8/8 COMPLETE    │
+│  STAGE GATEWAY: Secure Gateway Bridge        ✅ V2 ACTIVE       │
+│  STAGE ARP-V2: Authenticated ARP Defense     ✅ COMPLETE        │
+│  STAGE CHAIN: Blockchain Ledger & PoA        ✅ 6/6 COMPLETE    │
+│  STAGE ZAM: ZAM Header + ELF64 Validation    ✅ VERIFIED        │
+│  STAGE SHELL: Security Commands              ✅ UPDATED         │
+│  STAGE PQSIG: ML-DSA-65 Signature Backend    ✅ COMPLETE        │
+│  STAGE GOV.1: Governance Audit               ✅ COMPLETE        │
+│  STAGE GOV.2: Signed Governance Actions      🔄 IN PROGRESS     │
+│  STAGE CRYPTO-U: Crypto Unification          🔄 IN PROGRESS     │
+│  STAGE GOV.3-GOV.7                           ⬚ PENDING          │
+│  STAGE G: Zamrud Secure Shell                ⬚ 0/6 PENDING      │
+│  STAGE F6: GUI / Window Manager              ⬚ 0/6 PENDING      │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE E: Execution & App Security             ✅ 6/6 (100%) 🚀 │
+│  COMPLETED SECURITY ARCHITECTURE                                │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ✅ E3.1: Capability System                      25 tests       │
-│  ✅ E3.2: Unveil Sandbox (Filesystem)            20 tests       │
-│  ✅ E3.3: Blockchain Binary Verify (BBT)         INTEGRATED     │
-│  ✅ E3.4: Network Capability Enforcement         20 tests       │
-│  ✅ E3.5: Unified Violation Handler              19 tests       │
-│  🔄 E3.6: Anti-Quantum App Signing               INTEGRATED     │
-│  │  ├── DevKey vs AuthKey Hierarchical Trust                    │
-│  │  ├── SLOR Fiat-Shamir legacy path under migration audit      │
-│  │  ├── Physical Keyboard Approval (Session Auto-Run)           │
-│  │  ├── Strict Production Lockdown                              │
-│  │  └── Final target: ML-DSA-65 via gov_sign.zig only           │
-│                                                                 │
-│  Note:                                                          │
-│  E3.6 remains functionally integrated. Legacy signature imports  │
-│  must be audited and migrated so production has one signature    │
-│  boundary only.                                                  │
+│  ✅ Capability-based execution                                 │
+│  ✅ Filesystem unveil sandbox                                  │
+│  ✅ Blockchain binary verification                             │
+│  ✅ Network capability enforcement                             │
+│  ✅ Unified security violation handler                         │
+│  ✅ Encrypted filesystem and system master key                 │
+│  ✅ Blockchain drive and volume binding                        │
+│  ✅ Anti-Evil Maid mount enforcement                           │
+│  ✅ Root/validator/member/guest authority hierarchy            │
+│  ✅ Anonymous and pseudonymous identity modes                  │
+│  ✅ Onion-routing and metadata-minimization foundation         │
+│  ✅ Sybil and Eclipse defense                                  │
+│  ✅ Twin-node eviction and network kill-switch                 │
+│  ✅ Bounded blockchain governance audit                        │
+│  ✅ Persistent CHAIN.DAT V2 governance state                   │
+│  ✅ ML-DSA-65 production signature backend                     │
+│  ✅ External FIPS 204 ACVP KAT                                 │
+│  ✅ Password/PIN governance-key unlock                         │
+│  ✅ Governance-domain separation                              │
+│  ✅ Session public/secret keypair consistency                  │
+│  ✅ Session-key wipe and lock enforcement                      │
+│  ✅ Identity V3 export/import                                 │
+│  ✅ P2P Protocol V2 authentication                            │
+│  ✅ Gateway V2 authentication                                │
+│  ✅ Authenticated ARP Defense V2                              │
+│  ✅ Timestamp, nonce and replay protection                    │
+│  ✅ Mutation and protocol-downgrade rejection                 │
+│  ✅ Stack-safe public-key/signature workspaces                │
+│  ✅ Security-test state isolation                            │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE F: Storage & Persistence                ✅ 4/4 (100%) 🛡️│
+│  STAGE E: EXECUTION & APP SECURITY STATUS                       │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ✅ F4.0: Encrypted FS (AES-256-CBC)             25 tests       │
-│  ✅ F4.1: EncFS Integration                      25 tests       │
-│  ✅ F4.2: System Encryption (Master Key)         25 tests       │
-│  ✅ F4.3: Blockchain Drive & Volume Binding      INTEGRATED     │
-│  │  ├── Physical Drive Serial AHCI Extraction                  │
-│  │  ├── Drive Identity Registered to Ledger                    │
-│  │  └── Eviction Protocol (Anti-Evil Maid)       ACTIVE         │
+│  E3.1 Capability System                         ✅ COMPLETE      │
+│  E3.2 Unveil Filesystem Sandbox                 ✅ COMPLETE      │
+│  E3.3 Blockchain Binary Verify                  ✅ INTEGRATED    │
+│  E3.4 Network Capability Enforcement            ✅ COMPLETE      │
+│  E3.5 Unified Violation Handler                 ✅ COMPLETE      │
+│  E3.6 Anti-Quantum App Signing                  ✅ INTEGRATED    │
+│                                                                 │
+│  App-signing architecture:                                     │
+│  ├── DevKey vs AuthKey hierarchical trust                      │
+│  ├── Physical keyboard/session approval path                   │
+│  ├── Strict production lockdown                                │
+│  ├── Blockchain registry verification                          │
+│  ├── Unknown binary rejection                                  │
+│  ├── Registered binary acceptance                              │
+│  └── Verification-cache fast path                              │
+│                                                                 │
+│  Official production signature path:                           │
+│  gov_sign.zig → slor_dsa.zig → ML-DSA-65                       │
+│                                                                 │
+│  Legacy signature migration:                                   │
+│  ✅ SLOR Fiat-Shamir production path removed                   │
+│  ✅ signature.zig removed from active source                   │
+│  ✅ slor_sign.zig removed from active source                   │
+│  ✅ crypto.KeyPair removed                                     │
+│  ✅ crypto.verify removed                                      │
+│  ✅ no production consumer bypasses gov_sign.zig               │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ═══════════════════════════════════════════════════════════    │
+│  STORAGE & HARDWARE SOVEREIGNTY STATUS                          │
+│  ═══════════════════════════════════════════════════════════    │
+│                                                                 │
+│  F4.0 Encrypted Filesystem                      ✅ COMPLETE      │
+│  F4.1 EncFS Integration                         ✅ COMPLETE      │
+│  F4.2 System Master-Key Encryption              ✅ COMPLETE      │
+│  F4.3 Blockchain Drive/Volume Binding           ✅ INTEGRATED    │
+│                                                                 │
+│  Drive security architecture:                                  │
+│  ├── Physical drive serial extraction                          │
+│  ├── Drive identity registration to ledger                     │
+│  ├── Anti-Evil Maid mount enforcement                          │
+│  └── Explicit hardware-authorization policy                    │
+│                                                                 │
+│  Current operational status:                                   │
+│  ⚠ Current physical disk serial is not bound to the ledger.    │
+│  ✅ Anti-Evil Maid protection rejected the VFS mount.           │
+│  ⬚ Register current disk through an authorized lifecycle flow. │
 │                                                                 │
 │  Planned hardening:                                             │
-│  ⬚ Authenticated encryption/AEAD for sensitive key containers   │
-│  ⬚ Versioned and rollback-safe storage migration                │
+│  ⬚ AEAD protection for sensitive key containers                │
+│  ⬚ Versioned persistence migration                             │
+│  ⬚ Rollback-safe container replacement                         │
+│  ⬚ Recovery policy for legitimate hardware replacement         │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE S: Security Bare Metal                  ✅ 6/6 (100%)    │
+│  SECURITY BARE-METAL STATUS                                     │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ✅ S.1-S.6: All verified (104 tests)                           │
+│  ✅ Firewall rule management                                  │
+│  ✅ Packet filtering                                          │
+│  ✅ Blacklist enforcement                                     │
+│  ✅ Rate limiting                                             │
+│  ✅ Port-scan detection                                       │
+│  ✅ Connection tracking                                      │
+│  ✅ Firewall state machine                                   │
+│  ✅ Threat-scoring integration                               │
+│  ✅ Binary-verification integration                           │
+│  ✅ Security Authority Registry                               │
+│                                                                 │
+│  Security test isolation:                                      │
+│  ├── Deterministic STANDARD/ENFORCING baseline                 │
+│  ├── Synthetic threat-state cleanup                            │
+│  ├── Port-scan lockdown isolated from later tests              │
+│  ├── Binary-registration test made idempotent                  │
+│  └── Caller security level restored after testing              │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE R: Root Authority & Multi-User          ✅ 5/5 (100%)    │
+│  PRIVACY & P2P DEFENSE STATUS                                  │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ✅ R.1-R.5: All verified (25 tests)                            │
+│  ✅ Anonymous Identity Generation                             │
+│  ✅ Pseudonymous Mode                                         │
+│  ✅ Privacy Modes                                             │
+│  ✅ Metadata Minimization                                     │
+│  ✅ Packet Types & Magic Constants                            │
+│  ✅ P2P Handshake & Hardware Attestation                      │
+│  ✅ P2P Socket Listener & Broadcaster                         │
+│  ✅ Multi-Layer Onion Wrapping                                │
+│  ✅ Twin-Node Eviction Execution                             │
+│  ✅ Authority-backed voter gate                              │
+│  ✅ Reputation health gate                                   │
+│  ✅ Evidence-hash binding                                    │
+│  ✅ Peer ban and discovery cleanup                           │
+│  ✅ Eclipse connection cleanup                               │
+│  ✅ Firewall network kill-switch                             │
+│                                                                 │
+│  Core Trust Flow:                                              │
+│  security/authority.zig  = authority source-of-truth           │
+│  chain/authority.zig     = PoA adapter/cache only              │
+│  p2p/reputation.zig      = behavior score + forced ban         │
+│  p2p/eviction.zig        = twin-node eviction enforcement      │
+│  net/firewall.zig        = network kill-switch                 │
+│  chain/ledger.zig        = bounded audit ledger                │
+│                                                                 │
+│  Double Authority Status: RESOLVED ✅                          │
+│  Double Ledger Status:    AVOIDED ✅                           │
+│  Double Signature Status: RESOLVED ✅                          │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE P: Privacy & Anonymity                  ✅ 5/5 (100%) 🧅 │
+│  IDENTITY & SECURITY HARDENING STATUS                           │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ✅ P.1: Anonymous Identity Generation           TESTED         │
-│  ✅ P.2: Pseudonymous Mode                       TESTED         │
-│  ✅ P.3: P2P Onion Routing + Defense Layer       TESTED         │
-│  │  ├── P.3a: Packet Types & Magic Constants     DONE           │
-│  │  ├── P.3b: Handshake & Hardware Attestation   DONE           │
-│  │  ├── P.3c: P2P Socket Listener & Broadcaster  DONE           │
-│  │  ├── P.3d: Multi-Layer Onion Wrapping         DONE           │
-│  │  └── P.3e: Twin-Node Eviction Execution       DONE ✅        │
-│  │      ├── Authority-backed voter gate          PASS           │
-│  │      ├── Reputation health gate               PASS           │
-│  │      ├── Evidence hash                        PASS           │
-│  │      ├── Peer ban + discovery cleanup         PASS           │
-│  │      ├── Eclipse connection cleanup           PASS           │
-│  │      ├── Firewall Network Kill-Switch         PASS           │
-│  │      └── Safe test mode, no false lockdown    PASS           │
-│  ✅ P.4: Privacy Modes (Stealth/Public)          TESTED         │
-│  ✅ P.5: Metadata Minimization                   TESTED         │
+│  H.1-H.6 Crypto/RNG/Boot/DHCP Security          ✅ COMPLETE      │
+│  H.7 Identity Keyring + ML-DSA-65               ✅ VERIFIED      │
+│  H.8 Threat Scoring & Anomaly Detection         ✅ VERIFIED      │
+│  H.9 Memory Sanitization                        ✅ VERIFIED      │
+│  H.10 Anti-Quantum SLOR Lattice KEM             ✅ INTEGRATED    │
+│  H.11 Identity Secret-Key Protection            🔄 INTEGRATED    │
+│  H.12 Security Authority Registry               ✅ VERIFIED      │
+│                                                                 │
+│  Identity/governance security:                                 │
+│  ├── Dual password/PIN credentials                             │
+│  ├── ML-DSA-65 governance-key generation                       │
+│  ├── Password/PIN governance-key unlock                        │
+│  ├── Governance sign/verify                                    │
+│  ├── Domain separation                                         │
+│  ├── Modified-message rejection                                │
+│  ├── Lock/session-key wipe                                     │
+│  ├── Signing denied after lock                                 │
+│  ├── Session public/secret keypair snapshot                     │
+│  ├── Mutable identity/session mismatch fixed                    │
+│  ├── Identity persistence                                      │
+│  ├── Full export/import V3                                     │
+│  └── External FIPS 204 ACVP KAT                                │
+│                                                                 │
+│  H.10 SLOR KEM status:                                         │
+│  ├── Identity KEM keypair generation                           │
+│  ├── Keyring integration                                       │
+│  ├── Encapsulation/decapsulation                               │
+│  ├── Shared-secret equality                                    │
+│  └── Extended negative/KAT assurance pending                   │
+│                                                                 │
+│  H.11 Secret protection status:                                │
+│  ├── Current GOV secret stream protection integrated           │
+│  ├── Secret metadata preservation fixed                        │
+│  ├── Login/session restoration verified                        │
+│  ├── Session public-key snapshot verified                      │
+│  └── AEAD authenticated-container upgrade pending              │
+│                                                                 │
+│  Note:                                                         │
+│  Current GOVS hash-derived stream-XOR is not a strict           │
+│  information-theoretic One-Time Pad. AEAD remains the final     │
+│  authenticated secret-container target.                        │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE H: Security Hardening & Identity        ✅ 12/12 (100%)  │
+│  P2P PROTOCOL V2 STATUS                                        │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ✅ H.1-H.6: Crypto, RNG, Boot, DHCP Sec         117 tests      │
-│  ✅ H.7: Identity Keyring + ML-DSA-65            VERIFIED       │
-│  ✅ H.8: Threat Scoring & Anomaly Detection      82 tests       │
-│  ✅ H.9: Memory Sanitization (Secure Wipe)       25 tests       │
-│  ✅ H.10: Anti-Quantum SLOR (Lattice KEM)        INTEGRATED     │
-│  🔄 H.11: Identity Secret-Key Protection         INTEGRATED     │
-│  ✅ H.12: Security Authority Registry            22 tests       │
+│  ✅ Protocol magic ZAMNET02                                   │
+│  ✅ ML-DSA-65 public-key blob                                │
+│  ✅ ML-DSA-65 signature blob                                 │
+│  ✅ Canonical handshake transcript                           │
+│  ✅ Challenge binding                                        │
+│  ✅ Protocol-version binding                                 │
+│  ✅ Hardware-hash binding                                    │
+│  ✅ Stack-safe message decoding                              │
+│  ✅ Stack-safe handshake construction                        │
+│  ✅ Full public-key blob in NodeInfo                         │
+│  ✅ Raw secret-key extraction removed                        │
+│  ✅ Legacy signer fallback removed                           │
 │                                                                 │
-│  H.7 Identity + ML-DSA-65 verification:                         │
-│  ├── Dual credential password/PIN                PASS           │
-│  ├── ML-DSA-65 governance key generation         PASS           │
-│  ├── Password governance key unlock              PASS           │
-│  ├── PIN governance key unlock                   PASS           │
-│  ├── Governance sign/verify                      PASS           │
-│  ├── Modified message rejection                  PASS           │
-│  ├── Domain separation                           PASS           │
-│  ├── Lock/session key wipe                       PASS           │
-│  ├── Signing denied after lock                   PASS           │
-│  ├── Persistence                                 PASS           │
-│  ├── Full export/import                          PASS           │
-│  └── External FIPS 204 ACVP KAT                  PASS           │
-│                                                                 │
-│  Latest H.7 results:                                             │
-│  ├── Identity categories                         7/7 PASS        │
-│  ├── Authentication                              15/15 PASS      │
-│  └── ML-DSA-65 backend                           24/24 PASS      │
-│                                                                 │
-│  H.10 SLOR KEM status:                                           │
-│  ├── Identity KEM keypair generation              PASS           │
-│  ├── Keyring integration                          PASS           │
-│  └── Protocol/KAT assurance planned for Stage G                  │
-│                                                                 │
-│  H.11 Identity secret protection status:                         │
-│  ├── Current GOV secret stream protection         INTEGRATED     │
-│  ├── Secret metadata preservation                 FIXED          │
-│  ├── Login/session restoration                    PASS           │
-│  └── AEAD authenticated container upgrade         PENDING        │
-│                                                                 │
-│  Note:                                                          │
-│  The current GOVS + hash-derived stream-XOR mechanism is not a   │
-│  strict information-theoretic One-Time Pad. H.11 retains its     │
-│  historical identity-encryption goal, with AEAD as the final     │
-│  authenticated secret-container target.                          │
-│                                                                 │
-│  H.12 Authority Registry:                                        │
-│  ├── Root Authority Registry                     PASS           │
-│  ├── Validator Registry                          PASS           │
-│  ├── Member / Guest Authority                    PASS           │
-│  ├── Vote / Commit Permission Gate               PASS           │
-│  ├── Quarantine / Restore                        PASS           │
-│  └── Revocation Enforcement                      PASS           │
+│  Secure-session extension:                                     │
+│  ML-DSA authentication + SLOR KEM + KDF + AEAD                 │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE P2P: Decentralized Network Trust        ✅ 8/8 (100%)    │
+│  GATEWAY V2 STATUS                                             │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ✅ P2P Core Module                             PASS           │
-│  ✅ Peer Manager H.3/H.4/P.3e                   4/4 PASS        │
-│  ✅ Message Protocol                            6/6 PASS        │
-│  ✅ Authority-Backed Reputation                 15/15 PASS      │
-│  ✅ Sybil Defense H.3 + P.3e                    6/6 PASS        │
-│  ✅ Eclipse Defense H.4 + P.3e                  5/5 PASS        │
-│  ✅ P.3 Handshake / Onion                       PASS           │
-│  ✅ P.3e Twin-Node Eviction                     5/5 PASS        │
+│  ✅ Gateway V2 request/response structure                     │
+│  ✅ ML-DSA public-key/signature blobs                         │
+│  ✅ Peer fingerprint binding                                 │
+│  ✅ Request/response domain separation                       │
+│  ✅ Timestamp and nonce validation                           │
+│  ✅ Replay and downgrade rejection                           │
+│  ✅ Unauthorized and unsigned request rejection              │
+│  ✅ Stack-safe request/response workspaces                    │
+│  ✅ gateway/gw command wrapper                               │
+│  ✅ Repeatable Gateway test                                  │
 │                                                                 │
-│  Core Trust Flow:                                               │
-│  security/authority.zig  = authority source-of-truth            │
-│  chain/authority.zig     = PoA adapter/cache only               │
-│  p2p/reputation.zig      = behavior score + forced ban          │
-│  p2p/eviction.zig        = twin-node eviction enforcement       │
-│  net/firewall.zig        = network kill-switch                  │
-│  chain/ledger.zig        = bounded audit ledger                 │
+│  Boot behavior:                                                │
+│  Gateway remains fail-closed before governance identity unlock.│
 │                                                                 │
-│  Double Authority Status: RESOLVED ✅                           │
-│  Double Ledger Status:    AVOIDED ✅                            │
-│                                                                 │
-│  Secure session extension planned:                              │
-│  ML-DSA authentication + SLOR KEM + KDF + AEAD                  │
+│  Remaining operational target:                                │
+│  ⬚ Refresh Gateway identity after production login            │
+│  ⬚ Add positive signed-response integration command           │
+│  ⬚ Distinguish LOCKED from FAILED in boot smoke               │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE CHAIN: Blockchain Ledger & PoA          ✅ 6/6 (100%)    │
+│  ARP DEFENSE V2 STATUS                                         │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ✅ Block Structure                             PASS           │
-│  ✅ Block Entries                               PASS           │
-│  ✅ PoA Authority Adapter                       PASS           │
-│  ✅ Ledger                                      PASS           │
-│  ✅ Persistence Save                            PASS           │
-│  ✅ Persistence Restore                         PASS           │
+│  ✅ Standard RFC 826 and QEMU compatibility                   │
+│  ✅ ARP spoof and flood detection                            │
+│  ✅ AuthenticatedArpV2 envelope                              │
+│  ✅ ML-DSA public-key/signature blobs                        │
+│  ✅ MAC/IP/operation transcript binding                      │
+│  ✅ Timestamp, nonce and replay protection                   │
+│  ✅ Fingerprint/public-key binding                           │
+│  ✅ Modified-sender rejection                                │
+│  ✅ V1 downgrade rejection                                  │
+│  ✅ Legacy 32-byte key rejection                            │
+│  ✅ Unsigned V2 rejection                                   │
 │                                                                 │
-│  Chain Test Result: 36 passed, 0 failed                         │
+│  Fail-closed behavior:                                         │
+│  Without a GOV session, positive signing is skipped while      │
+│  unsigned and malformed authenticated traffic remains rejected.│
 │                                                                 │
-│  Important Rules:                                               │
-│  chain/authority.zig must remain adapter/cache only.             │
-│  Runtime authority decision belongs to security/authority.zig.   │
-│  chain/ledger.zig stores proof/audit only, not authority truth.  │
-│                                                                 │
-│  GOV.1b Persistence:                                            │
-│  ✅ CHAIN.DAT V2 format                                         │
-│  ✅ V1 compatibility loader                                     │
-│  ✅ bounded audit ring                                          │
-│  ✅ max 8 persistent audit records                              │
-│  ✅ manual checkpoint support                                   │
-│  ✅ audit auto-save OFF by default                              │
-│  ✅ tip-hash folding when block capacity is full                 │
-│  ✅ lightweight file size policy                                │
+│  Test hygiene remaining:                                      │
+│  ⬚ Isolate ARP threat-score state inside ntest                │
+│  ⬚ Restore production security level after ntest              │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE SHELL: Security Commands                ✅ UPDATED       │
+│  BLOCKCHAIN LEDGER & POA STATUS                                │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ✅ security authority                          VERIFIED        │
-│  ✅ security authority status                   VERIFIED        │
-│  ✅ security authority list                     VERIFIED        │
-│  ✅ security authority revoked                  VERIFIED        │
-│  ✅ security authority stats                    VERIFIED        │
-│  ✅ security authority test                     10/10 PASS      │
-│  ✅ chain audit                                 VERIFIED        │
-│  ✅ chain audit latest                          VERIFIED        │
-│  ✅ chain audit checkpoint                      VERIFIED        │
-│  ✅ chain load audit restore                    VERIFIED        │
+│  ✅ Block Structure                                           │
+│  ✅ Block Entries                                             │
+│  ✅ PoA Authority Adapter                                     │
+│  ✅ Ledger                                                    │
+│  ✅ Persistence Save/Restore                                  │
+│  ✅ Bounded Governance Audit Ring                             │
+│  ✅ CHAIN.DAT V2 + V1 compatibility                           │
+│  ✅ Manual audit checkpoint                                  │
+│  ✅ Tip-hash folding                                         │
+│  ✅ Lightweight file-size policy                             │
+│  ✅ Legacy signature semantic removed                        │
+│  ✅ 64-byte layout retained as reserved_legacy               │
 │                                                                 │
-│  Notes:                                                         │
-│  - Commands are visibility/control surfaces only.               │
-│  - No new authority database created.                           │
-│  - No new ledger database created.                              │
-│  - Reads from security/authority.zig and chain/ledger.zig.      │
-│                                                                 │
-│  Identity command extension planned:                            │
-│  ⬚ gov-key status/test                                         │
-│  ⬚ explicit generate/rotate/revoke ceremony                     │
+│  Important rules:                                              │
+│  chain/authority.zig must remain an adapter/cache only.         │
+│  Runtime authority decisions belong to security/authority.zig. │
+│  chain/ledger.zig stores governance proof/audit only.           │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE PQSIG: ML-DSA-65 SIGNATURE BACKEND      ✅ COMPLETE      │
+│  ZAM HEADER & ELF64 STATUS                                     │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  Goal:                                                          │
-│  Provide one official post-quantum production signature API     │
-│  for identity, governance, chain, P2P, and application trust.   │
+│  ✅ ZAM V3 header parsing                                    │
+│  ✅ Magic/version validation                                 │
+│  ✅ Payload SHA-256 validation                               │
+│  ✅ Unsigned signature rejection                             │
+│  ✅ Capability/trust extraction                              │
+│  ✅ ELF64/x86_64/EXEC validation                             │
+│  ✅ Combined ZAM + ELF validation                            │
+│  ✅ Corrupted-payload rejection                              │
 │                                                                 │
-│  ✅ Keccak / SHAKE                              PASS           │
-│  ✅ ML-DSA-65 parameters                       PASS           │
-│  ✅ Modular reduction                          PASS           │
-│  ✅ NTT / inverse NTT                          PASS           │
-│  ✅ Polynomial arithmetic                      PASS           │
-│  ✅ Rounding and hints                         PASS           │
-│  ✅ Sampling                                   PASS           │
-│  ✅ Canonical packing                          PASS           │
-│  ✅ Key generation                             PASS           │
-│  ✅ Deterministic signing                      PASS           │
-│  ✅ Randomized signing                         PASS           │
-│  ✅ Sign / verify                              PASS           │
-│  ✅ Canonical negative suite                   PASS           │
-│  ✅ External FIPS 204 ACVP KAT                 PASS           │
-│  ✅ Facade production health gate              PASS           │
-│  ✅ Identity key generation                    PASS           │
-│  ✅ Password/PIN session integration           PASS           │
-│  ✅ Governance sign/verify                     PASS           │
-│                                                                 │
-│  Official production path:                                     │
-│                                                                 │
-│  identity / governance / chain / P2P / app trust               │
-│                          │                                      │
-│                          ▼                                      │
-│                    crypto/gov_sign.zig                          │
-│                          │                                      │
-│                          ▼                                      │
-│                    crypto/slor_dsa.zig                          │
-│                    ├── key generation                           │
-│                    ├── signature generation                     │
-│                    └── signature verification                   │
-│                                                                 │
-│  Cleanup remaining:                                             │
-│  ⬚ Audit/remove unused legacy signature files                  │
-│  ⬚ Migrate remaining production app-signing consumer           │
-│  ⬚ Ensure no production consumer bypasses gov_sign.zig         │
-│                                                                 │
-│  Important file distinctions:                                  │
-│                                                                 │
-│  slor.zig          = KEM/key exchange, keep                     │
-│  slor_dsa_sign.zig = active ML-DSA internal signer, keep       │
-│  slor_sign.zig     = possible legacy signature, audit          │
-│  signature.zig     = possible legacy facade, audit             │
-│  otp.zig           = encryption module, audit separately       │
+│  Format-hardening remaining:                                  │
+│  ⬚ Audit raw vs serialized blob constants                    │
+│  ⬚ Use PUBLIC_KEY_BLOB_BYTES for serialized key              │
+│  ⬚ Use SIGNATURE_BLOB_BYTES for serialized signature         │
+│  ⬚ Update offsets within fixed 8192-byte header              │
+│  ⬚ Add positive serialized-blob round-trip test              │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE GOV: Authority Governance & Blockchain Trust            │
-│  GOV.1 COMPLETE + GOV.2 BACKEND COMPLETE                        │
+│  SHELL & SECURITY COMMAND STATUS                               │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  Goal:                                                          │
-│  Make authority, governance, eviction, and firewall actions     │
-│  auditable, signed, persistent, and chain-verifiable while      │
-│  keeping Zamrud OS lightweight.                                 │
+│  ✅ Security authority commands                              │
+│  ✅ Authority status/list/revoked/stats                       │
+│  ✅ Chain audit/latest/checkpoint/restore                     │
+│  ✅ Gateway and gw wrapper                                   │
+│  ✅ Security-test isolation                                 │
 │                                                                 │
-│  ✅ GOV.1: Blockchain Governance Audit            DONE          │
-│  │  ├── authority registered audit                              │
-│  │  ├── authority revoked audit                                 │
-│  │  ├── authority quarantined audit                             │
-│  │  ├── authority restored audit                                │
-│  │  ├── P.3e eviction executed audit                            │
-│  │  ├── firewall kill-switch audit                              │
-│  │  ├── GOV.1a runtime hash-committed audit                     │
-│  │  ├── GOV.1b bounded persistent audit ring                    │
-│  │  ├── CHAIN.DAT V2 lightweight persistence                    │
-│  │  ├── V1 compatibility loader                                 │
-│  │  ├── manual audit checkpoint                                 │
-│  │  ├── audit auto-save OFF by default                          │
-│  │  └── tip-hash folding when full                              │
+│  Notes:                                                        │
+│  - Commands remain visibility/control surfaces only.           │
+│  - No new authority database was created.                      │
+│  - No new ledger database was created.                         │
+│  - Authority reads from security/authority.zig.                │
+│  - Audit reads from chain/ledger.zig.                           │
 │                                                                 │
-│  🔄 GOV.2: Signed Governance Actions             IN PROGRESS    │
-│  │  ├── ML-DSA-65 production backend             DONE           │
-│  │  ├── External FIPS 204 ACVP KAT               PASS           │
-│  │  ├── Identity governance key generation       PASS           │
-│  │  ├── Password/PIN governance key unlock       PASS           │
-│  │  ├── Governance sign/verify                   PASS           │
-│  │  ├── Domain separation                        PASS           │
-│  │  ├── Lock/session-key enforcement             PASS           │
-│  │  └── vote/commit/authority action integration NEXT           │
-│                                                                 │
-│  GOV.2 remaining target:                                        │
-│  ⬚ Signed eviction vote and commit                              │
-│  ⬚ Signed authority lifecycle actions                          │
-│  ⬚ Reject forged, unsigned, replayed, or unauthorized actions  │
-│  ⬚ Commit accepted signed actions to governance audit ledger   │
-│                                                                 │
-│  ⬚ GOV.3: Persistent Authority Registry          PENDING        │
-│  │  ├── save/load authority state                               │
-│  │  ├── persist revoked/quarantine state                        │
-│  │  └── optional chain reconciliation                           │
-│                                                                 │
-│  ⬚ GOV.4: Authority Lifecycle Commands           PARTIAL        │
-│  │  ├── add-root / add-validator                                │
-│  │  ├── add-member / add-guest                                  │
-│  │  └── quarantine / restore / revoke                           │
-│                                                                 │
-│  ⬚ GOV.5: Chain-Based Authority Verification     PENDING        │
-│  │  ├── authority and validator record verification             │
-│  │  ├── revocation proof verification                           │
-│  │  └── chain/security mismatch prevention                      │
-│                                                                 │
-│  ⬚ GOV.6: Hardware Attestation Enforcement       PENDING        │
-│  │  ├── hardware-hash validation                                │
-│  │  ├── mismatch detection and violation record                 │
-│  │  └── integration with P.3e evidence                          │
-│                                                                 │
-│  ⬚ GOV.7: Distributed Authority Synchronization  PENDING        │
-│     ├── signed authority delta synchronization                  │
-│     ├── revocation/quarantine propagation                       │
-│     └── chain proof validation                                  │
+│  Identity command extension:                                  │
+│  ⬚ gov-key status/test                                       │
+│  ⬚ gov-key fingerprint                                       │
+│  ⬚ explicit generate/rotate/revoke ceremony                   │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE CRYPTO-U: Crypto Unification            🔄 IN PROGRESS   │
+│  ML-DSA-65 PRODUCTION SIGNATURE STATUS                         │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  Goal:                                                          │
-│  One official production boundary for each cryptographic role.  │
+│  ✅ Keccak/SHAKE                                             │
+│  ✅ ML-DSA-65 parameters                                     │
+│  ✅ Modular reduction and NTT                                │
+│  ✅ Polynomial arithmetic                                   │
+│  ✅ Rounding, hints and sampling                            │
+│  ✅ Canonical packing                                       │
+│  ✅ Key generation                                          │
+│  ✅ Deterministic/randomized signing                         │
+│  ✅ Verification and negative suite                         │
+│  ✅ External FIPS 204 ACVP KAT                              │
+│  ✅ Production health gate                                  │
+│  ✅ Identity integration                                    │
+│  ✅ P2P/Gateway/ARP integration                             │
+│                                                                 │
+│  Official production path:                                   │
+│                                                                 │
+│  identity / governance / P2P / Gateway / ARP / app trust      │
+│                          │                                     │
+│                          ▼                                     │
+│                    crypto/gov_sign.zig                         │
+│                          │                                     │
+│                          ▼                                     │
+│                    crypto/slor_dsa.zig                         │
+│                                                                 │
+│  Legacy cleanup:                                               │
+│  ✅ Active signature.zig removed                              │
+│  ✅ Active slor_sign.zig removed                             │
+│  ✅ crypto.KeyPair and crypto.verify removed                  │
+│  ✅ Raw P2P secret-key access removed                        │
+│  ✅ Legacy chain signature semantic removed                  │
+│  ✅ Clean build and regressions completed                    │
+│  ⬚ Delete final quarantine directory                        │
+│                                                                 │
+│  Important file distinctions:                                 │
+│  slor.zig          = KEM/key exchange, keep                    │
+│  slor_dsa.zig      = ML-DSA backend facade, keep               │
+│  slor_dsa_sign.zig = active internal signer, keep              │
+│  slor_dsa_kat.zig  = ACVP assurance, keep                      │
+│  gov_sign.zig      = official production signature API        │
+│  otp.zig           = compatibility encryption module          │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ═══════════════════════════════════════════════════════════    │
+│  GOVERNANCE STATUS                                             │
+│  ═══════════════════════════════════════════════════════════    │
+│                                                                 │
+│  GOV.1 Blockchain Governance Audit              ✅ COMPLETE     │
+│  GOV.2 Signed Governance Actions                🔄 IN PROGRESS  │
+│  GOV.3 Persistent Authority Registry            ⬚ PENDING      │
+│  GOV.4 Authority Lifecycle Commands             🔄 PARTIAL      │
+│  GOV.5 Chain-Based Authority Verification       ⬚ PENDING      │
+│  GOV.6 Hardware Attestation Enforcement         ⬚ PENDING      │
+│  GOV.7 Distributed Authority Synchronization    ⬚ PENDING      │
+│                                                                 │
+│  GOV.1 architecture:                                          │
+│  ├── Authority lifecycle audit                                │
+│  ├── P.3e eviction audit                                      │
+│  ├── Firewall kill-switch audit                               │
+│  ├── Runtime hash-committed audit                             │
+│  ├── Bounded persistent audit ring                            │
+│  ├── CHAIN.DAT V2 persistence                                 │
+│  ├── V1 compatibility loader                                  │
+│  ├── Manual checkpoint                                        │
+│  └── Tip-hash folding                                         │
+│                                                                 │
+│  GOV.2 completed foundation:                                  │
+│  ├── ML-DSA-65 production backend                             │
+│  ├── External ACVP KAT                                        │
+│  ├── Identity key generation/unlock                           │
+│  ├── Sign/verify and domain separation                        │
+│  ├── Session keypair consistency                              │
+│  └── P2P/Gateway/ARP integration                              │
+│                                                                 │
+│  GOV.2 remaining target:                                      │
+│  ⬚ Signed eviction vote and commit                            │
+│  ⬚ Signed authority lifecycle actions                        │
+│  ⬚ Canonical governance action envelope                      │
+│  ⬚ Authorization and replay rejection                        │
+│  ⬚ Governance audit-ledger commitment                        │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ═══════════════════════════════════════════════════════════    │
+│  CRYPTO UNIFICATION STATUS                                     │
+│  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
 │  Signature:                                                     │
-│  gov_sign.zig → slor_dsa.zig                   ✅ ACTIVE        │
+│  gov_sign.zig → slor_dsa.zig                   ✅ COMPLETE      │
 │                                                                 │
 │  Key exchange:                                                  │
 │  SLOR KEM / slor.zig                           ✅ INTEGRATED    │
 │                                                                 │
-│  Secret-key protection:                                         │
-│  current stream container → AEAD upgrade        🔄 PLANNED      │
+│  Secret-key protection:                                        │
+│  Current stream container → AEAD               🔄 PLANNED       │
 │                                                                 │
-│  Secure channel:                                                 │
+│  Secure channel:                                                │
 │  ML-DSA + SLOR KEM + KDF + AEAD                ⬚ PENDING       │
 │                                                                 │
-│  Cleanup targets:                                                │
-│  ⬚ Audit slor_sign.zig and signature.zig                        │
-│  ⬚ Remove them only if no production consumer remains          │
-│  ⬚ Keep slor.zig, slor_dsa_sign.zig, and otp.zig as required   │
-│  ⬚ Clean build and full regression after removal               │
+│  Remaining Crypto-U targets:                                   │
+│  ⬚ Delete legacy quarantine                                  │
+│  ⬚ AEAD governance secret container                          │
+│  ⬚ SLOR KEM negative/adversarial tests                       │
+│  ⬚ Transcript KDF                                           │
+│  ⬚ Directional session keys                                  │
+│  ⬚ AEAD packet framing                                      │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE G: Zamrud Secure Shell (ZSH)            ⬚ 0/6 (0%)       │
+│  ZAMRUD SECURE SHELL ROADMAP                                   │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ⬚ G.1: ZSH Protocol Definition                 PENDING        │
-│  ⬚ G.2: Peer Discovery & Handshake              PENDING        │
-│  ⬚ G.3: Quantum-Resistant Session               PENDING        │
-│  ⬚ G.4: Server Implementation                   PENDING        │
-│  ⬚ G.5: Client Implementation                   PENDING        │
-│  ⬚ G.6: Syscall Interface                       PENDING        │
+│  G.1 ZSH Protocol Definition                   ⬚ PENDING       │
+│  G.2 Peer Discovery & Handshake                ⬚ PENDING       │
+│  G.3 Quantum-Resistant Session                 ⬚ PENDING       │
+│  G.4 Server Implementation                     ⬚ PENDING       │
+│  G.5 Client Implementation                     ⬚ PENDING       │
+│  G.6 Syscall Interface                         ⬚ PENDING       │
 │                                                                 │
-│  G.3 final composition:                                          │
-│  ├── ML-DSA-65 for identity and handshake authentication        │
-│  ├── SLOR KEM for shared-secret establishment                   │
-│  ├── transcript KDF for purpose-separated session keys          │
-│  ├── AEAD for packet encryption and authentication              │
-│  └── sequence/replay protection                                 │
+│  Final composition:                                            │
+│  ├── ML-DSA-65 handshake authentication                        │
+│  ├── SLOR KEM shared-secret establishment                      │
+│  ├── Transcript KDF                                            │
+│  ├── Directional session keys                                  │
+│  ├── AEAD packet protection                                    │
+│  └── Sequence/replay protection                                │
 │                                                                 │
-│  Note:                                                          │
-│  Previous "SLOR + OTP" wording is retained as historical intent. │
-│  The production session target is SLOR KEM + KDF + AEAD, with    │
-│  ML-DSA-65 authenticating the handshake.                         │
+│  Historical note:                                              │
+│  Previous "SLOR + OTP" wording remains historical intent.      │
+│  Production target is SLOR KEM + KDF + AEAD.                   │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  STAGE F6: GUI / Window Manager                ⬚ 0/6 (0%)       │
+│  GUI / WINDOW MANAGER ROADMAP                                  │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ⬚ F6.1: Framebuffer Compositor                 PENDING        │
-│  ⬚ F6.2: Widget Toolkit                         PENDING        │
-│  ⬚ F6.3: Event System (Mouse/Keyboard)          PENDING        │
-│  ⬚ F6.4: Window Manager                         PENDING        │
-│  ⬚ F6.5: Desktop Environment                    PENDING        │
-│  ⬚ F6.6: GUI Applications                       PENDING        │
+│  F6.1 Framebuffer Compositor                   ⬚ PENDING       │
+│  F6.2 Widget Toolkit                           ⬚ PENDING       │
+│  F6.3 Event System                             ⬚ PENDING       │
+│  F6.4 Window Manager                           ⬚ PENDING       │
+│  F6.5 Desktop Environment                      ⬚ PENDING       │
+│  F6.6 GUI Applications                         ⬚ PENDING       │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  SECURITY RATING                                                │
+│  SECURITY RATING                                               │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  Timing Attacks:        ⭐⭐⭐⭐⭐   <- H.1 FIXED                 │
-│  RNG Quality:           ⭐⭐⭐⭐⭐   <- H.2 FIXED                 │
-│  Signature Integrity:   ⭐⭐⭐⭐⭐   <- ML-DSA ACVP KAT PASS      │
-│  Memory Cleanup:        ⭐⭐⭐⭐⭐   <- H.9 FIXED                 │
-│  Sybil Resistance:      ⭐⭐⭐⭐⭐   <- H.3 FIXED                 │
-│  Eclipse Defense:       ⭐⭐⭐⭐⭐   <- H.4 FIXED                 │
-│  Boot Integrity:        ⭐⭐⭐⭐⭐   <- H.5 FIXED                 │
-│  DHCP Security:         ⭐⭐⭐⭐⭐   <- H.6 FIXED                 │
-│  Identity System:       ⭐⭐⭐⭐⭐   <- H.7 VERIFIED              │
-│  Threat Detection:      ⭐⭐⭐⭐⭐   <- H.8 FIXED                 │
-│  Anti-Quantum KEM:      ⭐⭐⭐⭐⭐   <- H.10 INTEGRATED           │
-│  Secret-Key Protection: ⭐⭐⭐⭐☆   <- AEAD UPGRADE PENDING       │
-│  Session Encryption:    ⭐⭐⭐⭐☆   <- KDF + AEAD PENDING          │
-│  App Signing:           ⭐⭐⭐⭐☆   <- LEGACY MIGRATION PENDING    │
-│  Hardware Sovereignty:  ⭐⭐⭐⭐⭐   <- F4.3 ANTI-EVIL MAID     ✅│
-│  Authority Governance:  ⭐⭐⭐⭐⭐   <- H.12 SOURCE-OF-TRUTH    ✅│
-│  Chain PoA Adapter:     ⭐⭐⭐⭐⭐   <- NO DOUBLE AUTHORITY     ✅│
-│  Network Kill-Switch:   ⭐⭐⭐⭐⭐   <- P.3e FIREWALL ENFORCED  ✅│
-│  Governance Audit:      ⭐⭐⭐⭐⭐   <- GOV.1b BOUNDED AUDIT   ✅│
-│  Signed GOV Backend:    ⭐⭐⭐⭐⭐   <- ML-DSA-65 OPERATIONAL   ✅│
-│  Signed GOV Actions:    ⭐⭐⭐⭐☆   <- ACTION INTEGRATION NEXT     │
-│  Lightweight Chain:     ⭐⭐⭐⭐⭐   <- RING BUFFER + FOLDING  ✅│
+│  Timing Attacks:         ⭐⭐⭐⭐⭐   ← H.1 FIXED                 │
+│  RNG Quality:            ⭐⭐⭐⭐⭐   ← H.2 FIXED                 │
+│  Signature Integrity:    ⭐⭐⭐⭐⭐   ← ACVP KAT PASS             │
+│  Memory Cleanup:         ⭐⭐⭐⭐⭐   ← H.9 FIXED                 │
+│  Sybil Resistance:       ⭐⭐⭐⭐⭐   ← H.3 FIXED                 │
+│  Eclipse Defense:        ⭐⭐⭐⭐⭐   ← H.4 FIXED                 │
+│  Boot Integrity:         ⭐⭐⭐⭐⭐   ← H.5 FIXED                 │
+│  DHCP Security:          ⭐⭐⭐⭐⭐   ← H.6 FIXED                 │
+│  Identity System:        ⭐⭐⭐⭐⭐   ← H.7 VERIFIED              │
+│  Threat Detection:       ⭐⭐⭐⭐⭐   ← H.8 FIXED                 │
+│  Anti-Quantum KEM:       ⭐⭐⭐⭐⭐   ← H.10 INTEGRATED           │
+│  Secret-Key Protection:  ⭐⭐⭐⭐☆   ← AEAD PENDING               │
+│  Session Encryption:     ⭐⭐⭐⭐☆   ← KDF + AEAD PENDING         │
+│  App Signing:            ⭐⭐⭐⭐⭐   ← ML-DSA ACTIVE              │
+│  P2P Authentication:     ⭐⭐⭐⭐⭐   ← PROTOCOL V2 ACTIVE         │
+│  Gateway Authentication: ⭐⭐⭐⭐⭐   ← GATEWAY V2 ACTIVE          │
+│  ARP Authentication:     ⭐⭐⭐⭐⭐   ← ARP DEFENSE V2 ACTIVE      │
+│  Hardware Sovereignty:   ⭐⭐⭐⭐⭐   ← ANTI-EVIL MAID ACTIVE   ✅│
+│  Authority Governance:   ⭐⭐⭐⭐⭐   ← SOURCE-OF-TRUTH         ✅│
+│  Chain PoA Adapter:      ⭐⭐⭐⭐⭐   ← NO DOUBLE AUTHORITY      ✅│
+│  Network Kill-Switch:    ⭐⭐⭐⭐⭐   ← FIREWALL ENFORCED       ✅│
+│  Governance Audit:       ⭐⭐⭐⭐⭐   ← GOV.1b AUDIT            ✅│
+│  Signed GOV Backend:     ⭐⭐⭐⭐⭐   ← ML-DSA OPERATIONAL       ✅│
+│  Signed GOV Actions:     ⭐⭐⭐⭐☆   ← INTEGRATION NEXT           │
+│  Lightweight Chain:      ⭐⭐⭐⭐⭐   ← RING + HASH FOLDING      ✅│
 │                                                                 │
-│  ENGINEERING STATUS: ADVANCED SECURITY ARCHITECTURE              │
-│  ML-DSA-65 IDENTITY BACKEND VERIFIED                              │
+│  ENGINEERING STATUS: ADVANCED SECURITY ARCHITECTURE             │
+│  ML-DSA-65 PRODUCTION SIGNATURE MIGRATION VERIFIED              │
 │                                                                 │
-│  Security claim note:                                           │
-│  "Nation-State Grade" remains a design target until independent  │
-│  cryptographic and full-system security assessment is completed. │
+│  Security claim note:                                          │
+│  "Nation-State Grade" remains a design target until independent │
+│  cryptographic and full-system assessment is completed.        │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  PROGRESS SUMMARY                                               │
+│  PROGRESS SUMMARY                                              │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  Stage B2:    ████████████████████ 11/11 complete (100%) ✅     │
-│  Stage E:     ████████████████████  6/6 functional       ✅     │
-│  Stage F:     ████████████████████  4/4 functional       ✅     │
-│  Stage S:     ████████████████████  6/6 complete (100%) ✅     │
-│  Stage R:     ████████████████████  5/5 complete (100%) ✅     │
-│  Stage P:     ████████████████████  5/5 complete (100%) ✅     │
-│  Stage H:     ████████████████████ 12/12 functional       ✅     │
-│  Stage P2P:   ████████████████████  8/8 complete (100%) ✅     │
-│  Stage Chain: ████████████████████  6/6 complete (100%) ✅     │
-│  Stage Shell: ████████████████████ Authority + Audit DONE ✅    │
-│  Stage PQSIG: ████████████████████ ML-DSA-65 COMPLETE    ✅     │
-│  Stage GOV.1: ████████████████████ complete              ✅     │
-│  Stage GOV.2: ████████████░░░░░░░░ backend complete      🔄     │
-│  Stage GOV.3-7:████░░░░░░░░░░░░░░░ pending                  │
-│  Stage Crypto-U:████████░░░░░░░░░░░ cleanup in progress      │
-│  Stage G:     ░░░░░░░░░░░░░░░░░░░░  0/6 complete (0%)          │
-│  Stage F6:    ░░░░░░░░░░░░░░░░░░░░  0/6 complete (0%)          │
+│  Stage B2:       ████████████████████ 100% ✅                  │
+│  Stage E:        ████████████████████ 100% ✅                  │
+│  Stage F:        ████████████████████ 100% ✅                  │
+│  Stage S:        ████████████████████ 100% ✅                  │
+│  Stage R:        ████████████████████ 100% ✅                  │
+│  Stage P:        ████████████████████ 100% ✅                  │
+│  Stage H:        ████████████████████ 100% ✅                  │
+│  Stage P2P:      ████████████████████ 100% ✅                  │
+│  Gateway V2:     ████████████████████ ACTIVE ✅                │
+│  ARP Defense V2: ████████████████████ COMPLETE ✅              │
+│  Stage Chain:    ████████████████████ 100% ✅                  │
+│  Stage Shell:    ████████████████████ UPDATED ✅               │
+│  Stage PQSIG:    ████████████████████ COMPLETE ✅              │
+│  Stage GOV.1:    ████████████████████ COMPLETE ✅              │
+│  Stage GOV.2:    ███████████████░░░░░ IN PROGRESS 🔄           │
+│  Stage GOV.3-7:  ████░░░░░░░░░░░░░░░░ PENDING                 │
+│  Stage Crypto-U: ████████████████░░░░ IN PROGRESS 🔄           │
+│  Stage G:        ░░░░░░░░░░░░░░░░░░░░ PENDING                 │
+│  Stage F6:       ░░░░░░░░░░░░░░░░░░░░ PENDING                 │
 │                                                                 │
-│  OVERALL: HIGH PROGRESS - SCOPE EXTENDED FOR AEAD/KEM ASSURANCE │
-│                                                                 │
-│  Note:                                                          │
-│  The previous 97% estimate is retained as the legacy roadmap     │
-│  estimate. It should be recalculated only after AEAD protection,  │
-│  KEM protocol assurance, and crypto cleanup are sized.            │
+│  OVERALL: HIGH PROGRESS - SIGNATURE MIGRATION CLOSED           │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  CURRENT VERIFIED COMMANDS                                      │
+│  CURRENT VERIFIED COMMANDS                                     │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ✅ security test                                                │
-│     └── 109 passed, 0 failed                                    │
+│  ✅ security test                                              │
+│  ✅ p2p test                                                   │
+│  ✅ gateway test / gw test                                    │
+│  ✅ ntest / net test                                          │
+│  ✅ chain test                                                 │
+│  ✅ zam test                                                   │
+│  ✅ crypto test                                                │
+│  ✅ identity test                                              │
+│  ✅ identity test dsa                                         │
+│  ✅ security authority                                        │
+│  ✅ chain audit                                                │
 │                                                                 │
-│  ✅ p2p test                                                     │
-│     └── 8/8 passed OK                                           │
-│                                                                 │
-│  ✅ chain test                                                   │
-│     └── 36 passed, 0 failed                                     │
-│                                                                 │
-│  ✅ identity test                                                │
-│     ├── 7/7 categories passed                                   │
-│     ├── Auth 15/15 passed                                       │
-│     ├── persistence passed                                      │
-│     └── export/import passed                                    │
-│                                                                 │
-│  ✅ identity test dsa                                            │
-│     ├── ML-DSA-65 24 passed, 0 failed                           │
-│     ├── canonical negative suite PASS                            │
-│     └── external FIPS 204 ACVP KAT PASS                         │
-│                                                                 │
-│  ✅ security authority                                           │
-│     ├── status display PASS                                     │
-│     ├── list display PASS                                       │
-│     ├── stats display PASS                                      │
-│     ├── revoked display PASS                                    │
-│     └── authority test 10/10 PASS                               │
-│                                                                 │
-│  ✅ chain audit                                                  │
-│     ├── GOV.1b status display PASS                              │
-│     ├── bounded ring status PASS                                │
-│     ├── audit latest display PASS                               │
-│     ├── audit checkpoint PASS                                   │
-│     ├── audit restore after load PASS                           │
-│     └── audit auto-save OFF by default PASS                     │
-│                                                                 │
-│  ✅ P.3e firewall integration                                    │
-│     ├── peer ban PASS                                           │
-│     ├── discovery cleanup PASS                                  │
-│     ├── firewall block PASS                                     │
-│     ├── flow drop path PASS                                     │
-│     └── safe test mode PASS                                     │
+│  Verified characteristics:                                    │
+│  ├── All current module tests have zero failures              │
+│  ├── Stateful test execution verified                         │
+│  ├── Repeated security tests verified                         │
+│  ├── Gateway tests repeatable                                 │
+│  ├── Chain tests idempotent                                   │
+│  ├── ARP positive/fail-closed paths verified                  │
+│  └── Legacy signature absent from active source               │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  PRODUCTION IDENTITY STATUS                                     │
+│  PRODUCTION IDENTITY STATUS                                    │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  Test identities:                              ✅ VERIFIED       │
-│  Production identity @univa:                   ⬚ AUDIT PENDING  │
+│  Test identities:                              ✅ VERIFIED      │
+│  Production identity @univa login:             ✅ PASS          │
+│  System encryption key:                        ✅ LOADED        │
+│  Encrypted configuration:                      ✅ LOADED        │
 │                                                                 │
-│  Required @univa validation:                                    │
-│  ⬚ ML-DSA-65 public/encrypted-secret metadata valid             │
-│  ⬚ Login, sign/verify, lock, and export/import test             │
-│  ⬚ Record governance public-key fingerprint                     │
+│  Latest production boot observation:                           │
+│  ⚠ GOV.2 governance signing key unavailable during login.      │
 │                                                                 │
-│  Ceremony policy:                                               │
+│  Identity storage observation:                                 │
+│  ├── Identity store supports V5 GOV_SIGN                       │
+│  ├── Existing disk identity loaded as V4 Anti-Quantum          │
+│  ├── Credential authentication remains valid                   │
+│  ├── System encryption remains valid                           │
+│  └── GOV_SIGN metadata/container requires audit                │
 │                                                                 │
-│  Re-encrypt same secret key with AEAD:                          │
-│  └── No trust ceremony required                                 │
+│  Required @univa validation:                                  │
+│  ⬚ Inspect gov_sign_valid metadata                            │
+│  ⬚ Inspect public-key metadata                                │
+│  ⬚ Inspect encrypted secret-key metadata                      │
+│  ⬚ Verify public/secret keypair match                         │
+│  ⬚ Record governance public-key fingerprint                   │
+│  ⬚ Migrate V4 identity to V5 if required                      │
+│  ⬚ Verify normal-login governance-session unlock              │
 │                                                                 │
-│  Generate or rotate ML-DSA governance key:                      │
-│  └── Governance key-rotation ceremony required                  │
+│  Ceremony policy:                                              │
+│  - Same key, storage migration only → no ceremony             │
+│  - Same key, AEAD re-encryption only → no ceremony            │
+│  - New governance public key → rotation ceremony required     │
+│  - Changed trust anchor → trust-anchor update required        │
 │                                                                 │
-│  Change boot/chain/authority/P2P trust-anchor public key:       │
-│  └── Trust ceremony and anchor update required                  │
-│                                                                 │
-│  No governance key may be silently generated during login.      │
+│  No governance key may be silently generated during login.     │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  REPOSITORY CLEANUP STATUS                                      │
+│  BOOT / OPERATIONAL STATUS                                     │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  Keep:                                                          │
-│  ✅ gov_sign.zig                                                │
-│  ✅ slor_dsa.zig and all slor_dsa_* internals                   │
-│  ✅ slor_dsa_kat.zig and negative tests                         │
-│  ✅ keccak.zig                                                  │
-│  ✅ slor.zig (KEM/key exchange)                                 │
-│  ✅ otp.zig until encryption consumer audit is complete         │
+│  ✅ Kernel boot completes                                     │
+│  ✅ Boot verification active                                  │
+│  ✅ SMP 8/8 CPUs online                                       │
+│  ✅ USB, HID and audio initialized                            │
+│  ✅ Network interfaces initialized                            │
+│  ✅ Firewall initialized ENFORCING                            │
+│  ✅ ARP Defense initialized                                   │
+│  ✅ Blockchain ledger initialized                             │
+│  ✅ Loader and built-ins initialized                          │
 │                                                                 │
-│  Audit before removal:                                          │
-│  ⬚ slor_sign.zig                                                │
-│  ⬚ signature.zig                                                │
+│  ⚠ Current disk is not authorized in the governance ledger.    │
+│  ✅ Anti-Evil Maid VFS rejection is operating correctly.       │
 │                                                                 │
-│  Supporting artifact cleanup:                                  │
-│  ⬚ Keep docs/kat/nist-acvp source vectors                       │
-│  ⬚ Add SHA256SUMS for ACVP source files                         │
-│  ⬚ Remove duplicate root ACVP ZIP if not needed                 │
-│  ⬚ Audit generated audio_out.wav and system.qcow2 tracking      │
+│  ⚠ P2P and Gateway initialize before identity login.           │
+│  ✅ Both remain fail-closed until governance identity exists.  │
 │                                                                 │
-│  Removal rule:                                                  │
-│  Audit → quarantine → clean build → full tests → final delete.  │
+│  ⚠ Boot smoke reports Gateway FAIL while safely locked.        │
+│                                                                 │
+│  Operational TODO:                                             │
+│  ⬚ Authorize current disk through lifecycle command           │
+│  ⬚ Refresh P2P identity after login                           │
+│  ⬚ Refresh Gateway identity after login                       │
+│  ⬚ Report LOCKED instead of FAILED in smoke test              │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  NEXT STAGE TARGETS                                             │
+│  REPOSITORY CLEANUP STATUS                                     │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  1. GOV.2 Signed Governance Actions                            🧾│
-│     ├── signed vote, commit, and authority actions              │
-│     └── anti-forgery, authorization, and replay rejection       │
+│  Keep:                                                         │
+│  ✅ gov_sign.zig                                               │
+│  ✅ slor.zig                                                   │
+│  ✅ slor_dsa.zig and all slor_dsa_* internals                  │
+│  ✅ slor_dsa_kat.zig and negative tests                        │
+│  ✅ keccak.zig                                                 │
+│  ✅ otp.zig until AEAD migration                               │
+│  ✅ docs/kat/nist-acvp/                                       │
+│  ✅ tools/limine/                                              │
+│  ✅ tools/xorriso/                                             │
 │                                                                 │
-│  2. Crypto Cleanup                                             🧹│
-│     ├── audit/remove legacy signature files                     │
-│     └── enforce gov_sign.zig as only production signature API   │
+│  Active cleanup completed:                                    │
+│  ✅ signature.zig removed from active source                  │
+│  ✅ slor_sign.zig removed from active source                  │
+│  ✅ All production consumers migrated                        │
+│  ✅ Clean build without legacy backends                      │
+│  ✅ Final regression without legacy backends                  │
 │                                                                 │
-│  3. AEAD Secret-Key Protection                                🔐│
-│     ├── authenticated ML-DSA secret container                   │
-│     └── versioned persistence/export migration                  │
+│  Delete now:                                                   │
+│  ⬚ .legacy-crypto-quarantine/                                 │
+│  ⬚ audio_out.wav if generated                                │
+│  ⬚ Temporary backup/dump files                               │
 │                                                                 │
-│  4. SLOR KEM Assurance                                        🔑│
-│     ├── encapsulation/decapsulation and negative tests          │
-│     └── transcript KDF + AEAD integration in Stage G            │
+│  Keep private/outside Git:                                    │
+│  ⬚ disks/system.qcow2                                        │
 │                                                                 │
-│  5. Production Identity Validation                            👤│
-│     ├── audit @univa governance key                             │
-│     └── ceremony only if governance public key changes          │
+│  Audit before removal:                                        │
+│  ⬚ boot/limine.cfg vs boot/limine.conf                       │
+│  ⬚ scripts/tools/reorganize.py                               │
 │                                                                 │
-│  After GOV/Crypto Closure:                                      │
-│  ⬚ GOV.3: Persistent Authority Registry                        │
-│  ⬚ GOV.4: Authority Lifecycle Commands                         │
-│  ⬚ GOV.5: Chain-Based Authority Verification                   │
-│  ⬚ GOV.6: Hardware Attestation Enforcement                     │
-│  ⬚ GOV.7: Distributed Authority Synchronization                │
-│  ⬚ G.1: Zamrud Secure Shell Protocol Definition                │
-│  ⬚ G.2: Peer Discovery & Handshake                             │
-│  ⬚ G.3: ML-DSA + SLOR KEM + KDF + AEAD Session                 │
-│  ⬚ F6.1: Framebuffer Compositor                                │
-│                                                                 │
-│  Current Focus:                                                 │
-│  GOV.2 action integration → crypto cleanup → AEAD key protection│
+│  Repository hardening:                                        │
+│  ⬚ Add SHA256SUMS for ACVP vectors                            │
+│  ⬚ Ignore generated disk/audio output                        │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  CURRENT COMPLETION STATUS                                      │
+│  NEXT STAGE TARGETS                                            │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ML-DSA-65 implementation:                 ✅ COMPLETED          │
-│  External FIPS 204 ACVP KAT:              ✅ PASS               │
-│  Identity integration:                    ✅ COMPLETED          │
-│  Password/PIN governance unlock:          ✅ PASS               │
-│  Governance sign/verify:                  ✅ PASS               │
-│  Domain separation:                       ✅ PASS               │
-│  Session-key wipe/lock enforcement:       ✅ PASS               │
-│  Persistence/export/import:               ✅ PASS               │
+│  1. Final Legacy Cleanup                                      │
+│  2. Production @univa V4 → V5 Audit                           │
+│  3. Post-Login P2P/Gateway Identity Refresh                   │
+│  4. ZAM Header Serialized-Blob Hardening                      │
+│  5. GOV.2 Signed Governance Actions                           │
+│  6. AEAD Secret-Key Protection                               │
+│  7. SLOR KEM Assurance and Transcript KDF                     │
 │                                                                 │
-│  GOV.2 production backend:                ✅ COMPLETED          │
-│  GOV.2 signed action integration:          🔄 IN PROGRESS        │
-│  Legacy signature cleanup:                ⬚ PENDING AUDIT       │
-│  AEAD secret-key container:               ⬚ PENDING             │
-│  SLOR KEM protocol assurance:             ⬚ PLANNED             │
-│  Production @univa key audit:             ⬚ PENDING             │
+│  After GOV/Crypto Closure:                                    │
+│  ⬚ GOV.3-GOV.7                                               │
+│  ⬚ G.1-G.6 Zamrud Secure Shell                               │
+│  ⬚ F6.1-F6.6 GUI / Window Manager                            │
+│                                                                 │
+│  Current Focus:                                               │
+│  cleanup → production identity audit → login refresh →         │
+│  ZAM hardening → signed governance actions                    │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  FINAL TARGET CRYPTO ARCHITECTURE                               │
+│  ═══════════════════════════════════════════════════════════    │
+│  CURRENT COMPLETION STATUS                                     │
+│  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  ML-DSA-65                                                     │
-│  └── Identity, governance, chain, P2P, and app signatures       │
+│  ML-DSA-65 implementation:                 ✅ COMPLETED         │
+│  External FIPS 204 ACVP KAT:              ✅ PASS              │
+│  Identity integration:                    ✅ COMPLETED         │
+│  Governance sign/verify:                  ✅ PASS              │
+│  Session keypair consistency:             ✅ PASS              │
+│  Persistence/export/import V3:            ✅ PASS              │
+│  P2P V2 integration:                      ✅ COMPLETED         │
+│  Gateway V2 integration:                  ✅ COMPLETED         │
+│  ARP Defense V2 integration:              ✅ COMPLETED         │
+│  Chain placeholder cleanup:               ✅ COMPLETED         │
+│  Security-test isolation:                 ✅ COMPLETED         │
+│  Active legacy-signature removal:         ✅ COMPLETED         │
+│  Quarantine final deletion:               ⬚ PENDING            │
 │                                                                 │
-│  SLOR KEM                                                      │
-│  └── Post-quantum shared-secret establishment                   │
+│  Production @univa GOV session:           ⚠ AUDIT REQUIRED     │
+│  Post-login P2P/Gateway refresh:          ⬚ PENDING            │
+│  ZAM serialized-blob layout:              ⬚ PENDING            │
+│  GOV.2 action integration:                🔄 IN PROGRESS        │
+│  AEAD secret-key container:               ⬚ PENDING            │
+│  SLOR KEM protocol assurance:             ⬚ PLANNED            │
 │                                                                 │
-│  Transcript KDF                                                │
-│  └── Purpose-separated directional keys                        │
+├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  AEAD                                                          │
-│  ├── Authenticated ML-DSA secret-key storage                    │
-│  └── Authenticated secure-session traffic                       │
+│  FINAL TARGET CRYPTO ARCHITECTURE                              │
 │                                                                 │
-│  gov_sign.zig                                                  │
-│  └── Only official production signature facade                 │
+│  ML-DSA-65                                                    │
+│  └── Identity, governance, P2P, Gateway, ARP and app signing   │
 │                                                                 │
-│  security/authority.zig                                        │
-│  └── Only runtime authority source-of-truth                     │
+│  SLOR KEM                                                     │
+│  └── Post-quantum shared-secret establishment                  │
 │                                                                 │
-│  chain/ledger.zig                                              │
-│  └── Bounded governance proof and audit ledger                 │
+│  Transcript KDF                                               │
+│  └── Purpose-separated directional session keys               │
 │                                                                 │
-│  No double signature system.                                   │
-│  No double authority system.                                   │
-│  No double ledger system.                                      │
-│  One official facade for each cryptographic purpose.            │
+│  AEAD                                                         │
+│  ├── Authenticated governance secret-key storage               │
+│  └── Authenticated secure-session traffic                      │
+│                                                                 │
+│  gov_sign.zig                                                 │
+│  └── Only official production signature facade                │
+│                                                                 │
+│  security/authority.zig                                       │
+│  └── Only runtime authority source-of-truth                    │
+│                                                                 │
+│  chain/authority.zig                                          │
+│  └── PoA adapter/cache only                                   │
+│                                                                 │
+│  chain/ledger.zig                                             │
+│  └── Bounded governance proof and audit ledger                │
+│                                                                 │
+│  No double signature system.                                  │
+│  No double authority system.                                  │
+│  No double ledger system.                                     │
+│  One official facade for each cryptographic purpose.           │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 

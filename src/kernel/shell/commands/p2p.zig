@@ -26,6 +26,9 @@ const eviction = @import("../../p2p/eviction.zig");
 const slor = @import("../../crypto/slor.zig");
 const crypto = @import("../../crypto/crypto.zig");
 
+var static_p3_handshake: protocol.HandshakePayload = undefined;
+var static_p3_tampered: protocol.HandshakePayload = undefined;
+
 // =============================================================================
 // Main Entry Point
 // =============================================================================
@@ -86,8 +89,8 @@ pub fn execute(args: []const u8) void {
 
 fn showHelp() void {
     shell.printInfoLine("========================================");
-    shell.printInfoLine("  P2P - Zamrud Network Manager");
-    shell.printInfoLine("  H.3 + H.4 + P.3d + P.3e");
+    shell.printInfoLine(" P2P - Zamrud Network Manager");
+    shell.printInfoLine(" H.3 + H.4 + P.3d + P.3e");
     shell.printInfoLine("========================================");
     shell.newLine();
 
@@ -95,57 +98,57 @@ fn showHelp() void {
     shell.newLine();
 
     shell.println("Node:");
-    shell.println("  help                    Show this help");
-    shell.println("  status                  Show P2P node status");
-    shell.println("  start                   Start P2P node");
-    shell.println("  stop                    Stop P2P node");
-    shell.println("  id                      Show node ID");
-    shell.println("  stats                   Show statistics");
+    shell.println(" help                     Show this help");
+    shell.println(" status                   Show P2P node status");
+    shell.println(" start                    Start P2P node");
+    shell.println(" stop                     Stop P2P node");
+    shell.println(" id                       Show node ID");
+    shell.println(" stats                    Show statistics");
     shell.newLine();
 
     shell.println("Peer Management:");
-    shell.println("  peers                   List connected peers");
-    shell.println("  connect <ip:port>       Connect to peer");
-    shell.println("  disconnect <id>         Disconnect peer by ID prefix");
-    shell.println("  discover                Run peer discovery");
-    shell.println("  anchors                 List anchor peers");
-    shell.println("  banned                  List banned/evicted peers");
+    shell.println(" peers                    List connected peers");
+    shell.println(" connect <ip:port>        Connect to peer");
+    shell.println(" disconnect <id>          Disconnect peer by ID prefix");
+    shell.println(" discover                 Run peer discovery");
+    shell.println(" anchors                  List anchor peers");
+    shell.println(" banned                   List banned/evicted peers");
     shell.newLine();
 
     shell.println("P.3e Twin-Node Eviction:");
-    shell.println("  eviction                Show eviction status");
-    shell.println("  eviction pending        Show pending eviction votes");
-    shell.println("  eviction executed       Show executed evictions");
-    shell.println("  evict <id> <reason>     Report local eviction evidence");
-    shell.println("                          reasons: duplicate, signature, onion, sybil,");
-    shell.println("                                   eclipse, hardware, protocol, spam, impersonation");
+    shell.println(" eviction                 Show eviction status");
+    shell.println(" eviction pending         Show pending eviction votes");
+    shell.println(" eviction executed        Show executed evictions");
+    shell.println(" evict <id> <reason>      Report local eviction evidence");
+    shell.println(" reasons: duplicate, signature, onion, sybil,");
+    shell.println(" eclipse, hardware, protocol, spam,  impersonation");
     shell.newLine();
 
     shell.println("Sybil Defense (H.3):");
-    shell.println("  reputation              Show reputation summary");
-    shell.println("  reputation <id>         Show specific peer reputation");
-    shell.println("  sybil                   Show Sybil defense status");
-    shell.println("  sybil alerts            Show Sybil attack alerts");
-    shell.println("  diversity               Show peer diversity score");
+    shell.println(" reputation               Show reputation summary");
+    shell.println(" reputation <id>          Show specific peer reputation");
+    shell.println(" sybil                    Show Sybil defense status");
+    shell.println(" sybil alerts             Show Sybil attack alerts");
+    shell.println(" diversity                Show peer diversity score");
     shell.newLine();
 
     shell.println("Eclipse Defense (H.4):");
-    shell.println("  eclipse                 Show eclipse defense status");
-    shell.println("  eclipse alerts          Show eclipse attack alerts");
-    shell.println("  eclipse risk            Show current risk level");
+    shell.println(" eclipse                  Show eclipse defense status");
+    shell.println(" eclipse alerts           Show eclipse attack alerts");
+    shell.println(" eclipse risk             Show current risk level");
     shell.newLine();
 
     shell.println("Sync:");
-    shell.println("  sync                    Show sync status");
+    shell.println(" sync                      Show sync status");
     shell.newLine();
 
     shell.println("Testing:");
-    shell.println("  test                    Run all P2P tests");
-    shell.println("  test quick              Quick health check");
-    shell.println("  test h3                 H.3 tests");
-    shell.println("  test h4                 H.4 tests");
-    shell.println("  test p3                 P.3/P.3d tests");
-    shell.println("  test p3e                P.3e eviction tests");
+    shell.println(" test                      Run all P2P tests");
+    shell.println(" test quick                Quick health check");
+    shell.println(" test h3                   H.3 tests");
+    shell.println(" test h4                   H.4 tests");
+    shell.println(" test p3                   P.3/P.3d tests");
+    shell.println(" test p3e                  P.3e eviction tests");
     shell.newLine();
 }
 
@@ -155,18 +158,18 @@ fn showHelp() void {
 
 fn showStatus() void {
     shell.printInfoLine("========================================");
-    shell.printInfoLine("  P2P NODE STATUS");
+    shell.printInfoLine(" P2P NODE STATUS");
     shell.printInfoLine("========================================");
     shell.newLine();
 
-    shell.print("  Initialized:    ");
+    shell.print(" Initialized:      ");
     if (p2p.isInitialized()) {
         shell.printSuccessLine("Yes");
     } else {
         shell.printErrorLine("No");
     }
 
-    shell.print("  Status:         ");
+    shell.print(" Status:          ");
     switch (p2p.getStatus()) {
         .offline => shell.printWarningLine("OFFLINE"),
         .connecting => shell.println("CONNECTING"),
@@ -174,28 +177,28 @@ fn showStatus() void {
         .syncing => shell.println("SYNCING"),
     }
 
-    shell.print("  Node ID:        ");
+    shell.print(" Node ID:         ");
     const node_id = p2p.getNodeId();
     printHexShort(node_id[0..8]);
     shell.println("...");
 
-    shell.print("  Peer Count:     ");
+    shell.print(" Peer Count:      ");
     helpers.printUsize(p2p.getPeerCount());
     shell.newLine();
 
-    shell.print("  Banned Peers:   ");
+    shell.print(" Banned Peers:    ");
     helpers.printUsize(peer.getBannedCount());
     shell.newLine();
 
     shell.newLine();
-    shell.println("  Traffic:");
+    shell.println(" Traffic:");
     const stats = p2p.getStats();
 
-    shell.print("    Messages TX:  ");
+    shell.print("    Messages TX: ");
     helpers.printU64(stats.messages_sent);
     shell.newLine();
 
-    shell.print("    Messages RX:  ");
+    shell.print("    Messages RX: ");
     helpers.printU64(stats.messages_received);
     shell.newLine();
 
@@ -212,7 +215,7 @@ fn showStatus() void {
     shell.println(" seconds");
 
     shell.newLine();
-    shell.println("  H.3 Sybil Defense:");
+    shell.println(" H.3 Sybil Defense:");
 
     shell.print("    Reputation:   ");
     if (reputation.isInitialized()) {
@@ -223,7 +226,7 @@ fn showStatus() void {
         shell.printWarningLine("Not initialized");
     }
 
-    shell.print("    Sybil Guard:  ");
+    shell.print("    Sybil Guard: ");
     if (sybil.isInitialized()) {
         shell.printSuccessLine("ACTIVE");
     } else {
@@ -256,7 +259,7 @@ fn showStatus() void {
     }
 
     shell.newLine();
-    shell.println("  H.4 Eclipse Defense:");
+    shell.println(" H.4 Eclipse Defense:");
 
     shell.print("    Status:       ");
     if (eclipse.isInitialized()) {
@@ -277,7 +280,7 @@ fn showStatus() void {
         shell.printErrorLine(" (AT RISK)");
     }
 
-    shell.print("    Outbound:     ");
+    shell.print("     Outbound:    ");
     helpers.printUsize(eclipse_status.outbound_count);
     shell.print("/");
     helpers.printUsize(eclipse.MAX_OUTBOUND);
@@ -287,13 +290,13 @@ fn showStatus() void {
         shell.printWarningLine(" (low)");
     }
 
-    shell.print("    Inbound:      ");
+    shell.print("     Inbound:     ");
     helpers.printUsize(eclipse_status.inbound_count);
     shell.print("/");
     helpers.printUsize(eclipse.MAX_INBOUND);
     shell.newLine();
 
-    shell.print("    Anchors:      ");
+    shell.print("     Anchors:     ");
     helpers.printUsize(eclipse_status.anchor_count);
     shell.print("/");
     helpers.printUsize(eclipse.ANCHOR_PEER_COUNT);
@@ -321,7 +324,7 @@ fn showStatus() void {
     }
 
     shell.newLine();
-    shell.println("  P.3e Eviction:");
+    shell.println(" P.3e Eviction:");
 
     if (eviction.isInitialized()) {
         shell.print("    Status:       ");
@@ -356,12 +359,12 @@ fn showNodeId() void {
     shell.printInfoLine("Node Identity:");
     shell.newLine();
 
-    shell.print("  Node ID:    ");
+    shell.print(" Node ID:     ");
     const node_id = p2p.getNodeId();
     printHexShort(node_id[0..16]);
     shell.println("...");
 
-    shell.print("  Public Key: ");
+    shell.print(" Public Key: ");
     const pub_key = p2p.getPublicKey();
     printHexShort(pub_key[0..16]);
     shell.println("...");
@@ -370,13 +373,13 @@ fn showNodeId() void {
 
 fn showStats() void {
     shell.printInfoLine("========================================");
-    shell.printInfoLine("  P2P STATISTICS");
+    shell.printInfoLine(" P2P STATISTICS");
     shell.printInfoLine("========================================");
     shell.newLine();
 
     const stats = p2p.getStats();
 
-    shell.println("  Messages:");
+    shell.println(" Messages:");
     shell.print("    Sent:         ");
     helpers.printU64(stats.messages_sent);
     shell.newLine();
@@ -386,7 +389,7 @@ fn showStats() void {
     shell.newLine();
 
     shell.newLine();
-    shell.println("  Bandwidth:");
+    shell.println(" Bandwidth:");
 
     shell.print("    TX:           ");
     helpers.printU64(stats.bytes_sent);
@@ -397,7 +400,7 @@ fn showStats() void {
     shell.println(" bytes");
 
     shell.newLine();
-    shell.println("  Peers:");
+    shell.println(" Peers:");
 
     shell.print("    Connected:    ");
     helpers.printUsize(peer.getConnectedCount());
@@ -419,23 +422,23 @@ fn showStats() void {
     helpers.printUsize(peer.getBannedCount());
     shell.newLine();
 
-    shell.print("    Total known:  ");
+    shell.print("    Total known: ");
     helpers.printUsize(peer.getTotalCount());
     shell.newLine();
 
-    shell.print("    Tracked rep:  ");
+    shell.print("    Tracked rep: ");
     helpers.printUsize(reputation.getTrackedCount());
     shell.newLine();
 
     shell.newLine();
-    shell.println("  Discovery:");
+    shell.println(" Discovery:");
 
     shell.print("    Discovered:   ");
     helpers.printUsize(discovery.getDiscoveredCount());
     shell.newLine();
 
     shell.newLine();
-    shell.println("  Sybil Defense:");
+    shell.println(" Sybil Defense:");
 
     shell.print("    Registrations:");
     helpers.printU64(sybil.getTotalRegistrations());
@@ -454,13 +457,13 @@ fn showStats() void {
     shell.println("/100");
 
     shell.newLine();
-    shell.println("  Eclipse Defense:");
+    shell.println(" Eclipse Defense:");
 
     shell.print("    Risk Level:   ");
     helpers.printU8(peer.getEclipseRisk());
     shell.println("/100");
 
-    shell.print("    Safe:         ");
+    shell.print("    Safe:          ");
     if (peer.isEclipseSafe()) {
         shell.printSuccessLine("Yes");
     } else {
@@ -472,7 +475,7 @@ fn showStats() void {
     shell.newLine();
 
     shell.newLine();
-    shell.println("  Eviction P.3e:");
+    shell.println(" Eviction P.3e:");
 
     const ev_stats = eviction.getStats();
 
@@ -534,8 +537,8 @@ fn stopNode() void {
 
 fn showPeers() void {
     shell.printInfoLine("Connected Peers:");
-    shell.println("  ID               Type    Status  Trust       Rep");
-    shell.println("  ---------------- ------- ------- ----------- -----");
+    shell.println(" ID                Type   Status Trust        Rep");
+    shell.println(" ---------------- ------- ------- ----------- -----");
 
     const peers = peer.getAll();
     var count: usize = 0;
@@ -543,28 +546,28 @@ fn showPeers() void {
     for (peers) |p| {
         if (p.status == .disconnected) continue;
 
-        shell.print("  ");
+        shell.print(" ");
         printHexShort(p.id[0..8]);
         shell.print(" ");
 
         switch (p.conn_type) {
-            .inbound => shell.print("IN      "),
-            .outbound => shell.print("OUT     "),
-            .anchor => shell.print("ANCHOR  "),
+            .inbound => shell.print("IN        "),
+            .outbound => shell.print("OUT       "),
+            .anchor => shell.print("ANCHOR    "),
         }
 
         switch (p.status) {
-            .disconnected => shell.print("DISC    "),
-            .connecting => shell.print("CONN    "),
-            .connected => shell.print("OK      "),
-            .banned => shell.print("BAN     "),
+            .disconnected => shell.print("DISC       "),
+            .connecting => shell.print("CONN      "),
+            .connected => shell.print("OK        "),
+            .banned => shell.print("BAN      "),
         }
 
         switch (p.trust_level) {
-            .untrusted => shell.print("untrusted   "),
+            .untrusted => shell.print("untrusted     "),
             .provisional => shell.print("provisional "),
-            .member => shell.print("member      "),
-            .trusted => shell.print("trusted     "),
+            .member => shell.print("member       "),
+            .trusted => shell.print("trusted      "),
         }
 
         helpers.printI32(p.reputation);
@@ -574,7 +577,7 @@ fn showPeers() void {
     }
 
     if (count == 0) {
-        shell.println("  (no peers connected)");
+        shell.println("    (no peers connected)");
     }
 
     shell.newLine();
@@ -604,19 +607,20 @@ fn showAnchors() void {
     const anchors = eclipse.getAnchors();
 
     if (anchors.len == 0) {
-        shell.println("  (no anchor peers)");
+        shell.println(" (no anchor peers)");
         shell.newLine();
-        shell.println("  Anchors are long-term trusted peers that protect");
-        shell.println("  against eclipse attacks.");
+        shell.println(" Anchors are long-term trusted peers that protect");
+        shell.println(" against eclipse attacks.");
         shell.newLine();
         return;
     }
 
-    shell.println("  ID                               Trust");
-    shell.println("  -------------------------------- -------");
+    shell.println("    ID                               Trust");
+    shell.println("    -------------------------------- -------");
 
     for (anchors) |anchor_id| {
-        shell.print("  ");
+        shell.print(" ");
+
         printHexShort(anchor_id[0..16]);
         shell.print(" ");
 
@@ -648,18 +652,18 @@ fn showBannedPeers() void {
     const count = peer.getBannedCount();
 
     if (count == 0) {
-        shell.printSuccessLine("  No banned peers.");
+        shell.printSuccessLine("     No banned peers.");
         shell.newLine();
         return;
     }
 
-    shell.println("  ID");
-    shell.println("  --------------------------------");
+    shell.println("   ID");
+    shell.println("   --------------------------------");
 
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (peer.getBannedId(i)) |id| {
-            shell.print("  ");
+            shell.print(" ");
             printHexShort(id[0..16]);
             shell.println("...");
         }
@@ -686,6 +690,7 @@ fn connectPeer(args: []const u8) void {
     if (parsed.ip == 0) {
         shell.printError("Invalid address: ");
         shell.println(trimmed);
+
         return;
     }
 
@@ -767,11 +772,11 @@ fn showEviction(args: []const u8) void {
     }
 
     shell.printInfoLine("========================================");
-    shell.printInfoLine("  P.3e TWIN-NODE EVICTION STATUS");
+    shell.printInfoLine(" P.3e TWIN-NODE EVICTION STATUS");
     shell.printInfoLine("========================================");
     shell.newLine();
 
-    shell.print("  Initialized:       ");
+    shell.print(" Initialized:         ");
     if (eviction.isInitialized()) {
         shell.printSuccessLine("Yes");
     } else {
@@ -780,16 +785,16 @@ fn showEviction(args: []const u8) void {
 
     const stats = eviction.getStats();
 
-    shell.print("  Pending Records:   ");
+    shell.print(" Pending Records:    ");
     helpers.printUsize(eviction.getPendingCount());
     shell.newLine();
 
-    shell.print("  Executed Records:  ");
+    shell.print(" Executed Records: ");
     helpers.printUsize(eviction.getExecutedCount());
     shell.newLine();
 
     shell.newLine();
-    shell.println("  Vote Stats:");
+    shell.println(" Vote Stats:");
 
     shell.print("    Received:        ");
     helpers.printU64(stats.votes_received);
@@ -808,7 +813,7 @@ fn showEviction(args: []const u8) void {
     shell.newLine();
 
     shell.newLine();
-    shell.println("  Commit Stats:");
+    shell.println(" Commit Stats:");
 
     shell.print("    Received:        ");
     helpers.printU64(stats.commits_received);
@@ -819,7 +824,7 @@ fn showEviction(args: []const u8) void {
     shell.newLine();
 
     shell.newLine();
-    shell.println("  Local:");
+    shell.println(" Local:");
 
     shell.print("    Evidence Reports:");
     helpers.printU64(stats.local_evidence_reports);
@@ -831,9 +836,9 @@ fn showEviction(args: []const u8) void {
 
     shell.newLine();
     shell.println("Use:");
-    shell.println("  p2p eviction pending");
-    shell.println("  p2p eviction executed");
-    shell.println("  p2p evict <peer_id_prefix> <reason>");
+    shell.println(" p2p eviction pending");
+    shell.println(" p2p eviction executed");
+    shell.println(" p2p evict <peer_id_prefix> <reason>");
     shell.newLine();
 }
 
@@ -844,7 +849,7 @@ fn showEvictionPending() void {
     const count = eviction.getPendingCount();
 
     if (count == 0) {
-        shell.printSuccessLine("  No pending eviction records.");
+        shell.printSuccessLine("   No pending eviction records.");
         shell.newLine();
         return;
     }
@@ -852,7 +857,7 @@ fn showEvictionPending() void {
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (eviction.getPendingRecord(i)) |r| {
-            shell.print("  [");
+            shell.print(" [");
             helpers.printUsize(i);
             shell.print("] target=");
             printHexShort(r.target_id[0..8]);
@@ -874,7 +879,7 @@ fn showEvictionExecuted() void {
     const count = eviction.getExecutedCount();
 
     if (count == 0) {
-        shell.println("  (no executed evictions)");
+        shell.println(" (no executed evictions)");
         shell.newLine();
         return;
     }
@@ -882,7 +887,7 @@ fn showEvictionExecuted() void {
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (eviction.getExecutedRecord(i)) |r| {
-            shell.print("  [");
+            shell.print(" [");
             helpers.printUsize(i);
             shell.print("] target=");
             printHexShort(r.target_id[0..8]);
@@ -955,11 +960,12 @@ fn showSyncStatus() void {
 
     const state = sync.getState();
 
-    shell.print("  Status:       ");
+    shell.print(" Status:        ");
     switch (state.status) {
         .idle => shell.println("IDLE"),
         .requesting => shell.println("REQUESTING"),
         .receiving => shell.println("RECEIVING"),
+
         .validating => shell.println("VALIDATING"),
         .confirming => shell.println("CONFIRMING"),
         .complete => shell.printSuccessLine("COMPLETE"),
@@ -967,28 +973,28 @@ fn showSyncStatus() void {
         .conflict => shell.printErrorLine("CONFLICT"),
     }
 
-    shell.print("  Current:      ");
+    shell.print(" Current:       ");
     helpers.printU64(state.current_block);
     shell.newLine();
 
-    shell.print("  Target:       ");
+    shell.print(" Target:        ");
     helpers.printU64(state.target_block);
     shell.newLine();
 
     const progress = sync.getProgress();
 
-    shell.print("  Progress:     ");
+    shell.print(" Progress:      ");
     helpers.printU8(progress.percent);
     shell.println("%");
 
-    shell.print("  Blocks recv:  ");
+    shell.print(" Blocks recv: ");
     helpers.printU64(state.blocks_received);
     shell.newLine();
 
     shell.newLine();
-    shell.println("  Multi-Path Verification:");
+    shell.println(" Multi-Path Verification:");
 
-    shell.print("    Sync Peers:   ");
+    shell.print("     Sync Peers:  ");
     helpers.printUsize(state.sync_peer_count);
     shell.print("/");
     helpers.printUsize(sync.MAX_SYNC_PEERS);
@@ -1001,7 +1007,7 @@ fn showSyncStatus() void {
         shell.printWarningLine("No");
     }
 
-    shell.print("    Confirmations:");
+    shell.print("     Confirmations:");
     helpers.printUsize(sync.getPendingConfirmations());
     shell.print("/");
     helpers.printUsize(sync.MIN_BLOCK_CONFIRMATIONS);
@@ -1023,22 +1029,23 @@ fn showReputation(args: []const u8) void {
     }
 
     shell.printInfoLine("========================================");
-    shell.printInfoLine("  PEER REPUTATION SYSTEM");
+    shell.printInfoLine(" PEER REPUTATION SYSTEM");
     shell.printInfoLine("========================================");
     shell.newLine();
 
-    shell.print("  Tracked peers:    ");
+    shell.print(" Tracked peers:     ");
     helpers.printUsize(reputation.getTrackedCount());
+
     shell.newLine();
 
-    shell.print("  PoW difficulty:   ");
+    shell.print(" PoW difficulty:    ");
     helpers.printU8(reputation.DEFAULT_POW_DIFFICULTY);
     shell.println(" bits");
 
     shell.newLine();
-    shell.println("  Trust Thresholds:");
+    shell.println(" Trust Thresholds:");
 
-    shell.print("    Provisional:  >= ");
+    shell.print("    Provisional: >= ");
     helpers.printI32(reputation.SCORE_PROVISIONAL);
     shell.newLine();
 
@@ -1067,22 +1074,22 @@ fn showPeerReputation(id_prefix: []const u8) void {
     shell.printInfoLine("Peer Reputation Detail:");
     shell.newLine();
 
-    shell.print("  Peer ID:      ");
+    shell.print(" Peer ID:        ");
     printHexShort(p.id[0..16]);
     shell.println("...");
 
-    shell.print("  IP:           ");
+    shell.print(" IP:             ");
     printIp(p.ip);
     shell.newLine();
 
-    shell.print("  Conn Type:    ");
+    shell.print(" Conn Type:     ");
     switch (p.conn_type) {
         .inbound => shell.println("INBOUND"),
         .outbound => shell.println("OUTBOUND"),
         .anchor => shell.printSuccessLine("ANCHOR"),
     }
 
-    shell.print("  Trust Level:  ");
+    shell.print(" Trust Level: ");
     switch (p.trust_level) {
         .untrusted => shell.printWarningLine("UNTRUSTED"),
         .provisional => shell.println("PROVISIONAL"),
@@ -1090,49 +1097,49 @@ fn showPeerReputation(id_prefix: []const u8) void {
         .trusted => shell.printSuccessLine("TRUSTED"),
     }
 
-    shell.print("  Score:        ");
+    shell.print(" Score:         ");
     helpers.printI32(p.reputation);
     shell.newLine();
 
-    shell.print("  PoW Nonce:    ");
+    shell.print(" PoW Nonce:     ");
     helpers.printU64(p.proof_of_work);
     shell.newLine();
 
     if (reputation.getReputation(&p.id)) |rep| {
-        shell.print("  Good Actions: ");
+        shell.print(" Good Actions: ");
         helpers.printU32(rep.good_actions);
         shell.newLine();
 
-        shell.print("  Violations:   ");
+        shell.print(" Violations:    ");
         helpers.printU32(rep.violations);
         shell.newLine();
 
         if (@hasField(reputation.PeerReputation, "severe_violations")) {
-            shell.print("  Severe:       ");
+            shell.print(" Severe:        ");
             helpers.printU32(rep.severe_violations);
             shell.newLine();
         }
 
         if (@hasField(reputation.PeerReputation, "eviction_evidence_count")) {
-            shell.print("  Evict Evd:    ");
+            shell.print(" Evict Evd:     ");
             helpers.printU32(rep.eviction_evidence_count);
             shell.newLine();
         }
 
-        shell.print("  Vouchers:     ");
+        shell.print(" Vouchers:      ");
         helpers.printU8(rep.voucher_count);
         shell.print("/");
         helpers.printU8(reputation.MAX_VOUCHERS);
         shell.newLine();
 
-        shell.print("  PoW Verified: ");
+        shell.print(" PoW Verified: ");
         if (rep.pow_verified) {
             shell.printSuccessLine("Yes");
         } else {
             shell.printWarningLine("No");
         }
 
-        shell.print("  Age:          ");
+        shell.print(" Age:           ");
         const age = reputation.getAge(rep);
         if (age >= 3600) {
             helpers.printU64(age / 3600);
@@ -1146,7 +1153,7 @@ fn showPeerReputation(id_prefix: []const u8) void {
         }
     }
 
-    shell.print("  Anchor Eligible: ");
+    shell.print(" Anchor Eligible: ");
     if (eclipse.isAnchorEligible(&p.id)) {
         shell.printSuccessLine("Yes");
     } else {
@@ -1169,11 +1176,11 @@ fn showSybilStatus(args: []const u8) void {
     }
 
     shell.printInfoLine("========================================");
-    shell.printInfoLine("  SYBIL DEFENSE STATUS");
+    shell.printInfoLine(" SYBIL DEFENSE STATUS");
     shell.printInfoLine("========================================");
     shell.newLine();
 
-    shell.print("  Status:           ");
+    shell.print(" Status:            ");
     if (sybil.isInitialized()) {
         shell.printSuccessLine("ACTIVE");
     } else {
@@ -1181,7 +1188,7 @@ fn showSybilStatus(args: []const u8) void {
     }
 
     shell.newLine();
-    shell.println("  Registration Policy:");
+    shell.println(" Registration Policy:");
 
     shell.print("    PoW required:   ");
     helpers.printU8(reputation.DEFAULT_POW_DIFFICULTY);
@@ -1196,7 +1203,7 @@ fn showSybilStatus(args: []const u8) void {
     shell.println(" per minute");
 
     shell.newLine();
-    shell.println("  Counters:");
+    shell.println(" Counters:");
 
     shell.print("    Allowed:        ");
     helpers.printU64(sybil.getTotalRegistrations());
@@ -1221,7 +1228,7 @@ fn showSybilStatus(args: []const u8) void {
         helpers.printU8(st.diversity_score);
         shell.println("/100");
 
-        shell.print("    High Risk:      ");
+        shell.print("    High Risk:       ");
         if (st.high_risk) {
             shell.printErrorLine("YES");
         } else {
@@ -1239,7 +1246,7 @@ fn showSybilAlerts() void {
     const count = sybil.getAlertCount();
 
     if (count == 0) {
-        shell.printSuccessLine("  No alerts.");
+        shell.printSuccessLine("   No alerts.");
         shell.newLine();
         return;
     }
@@ -1247,14 +1254,14 @@ fn showSybilAlerts() void {
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (sybil.getAlert(i)) |alert| {
-            shell.print("  [");
+            shell.print(" [");
             helpers.printUsize(i + 1);
             shell.print("] ");
 
             switch (alert.alert_type) {
                 .subnet_flood => shell.print("SUBNET_FLOOD "),
                 .rate_flood => shell.print("RATE_FLOOD   "),
-                .coordinated => shell.print("COORDINATED  "),
+                .coordinated => shell.print("COORDINATED "),
             }
 
             shell.print("peers=");
@@ -1275,21 +1282,21 @@ fn showDiversity() void {
     const total = reputation.getTrackedCount();
     const eclipse_status = peer.getEclipseStatus();
 
-    shell.print("  Sybil Score:      ");
+    shell.print(" Sybil Score:        ");
     helpers.printU8(score);
     shell.println("/100");
 
-    shell.print("  Eclipse Subnets:  ");
+    shell.print(" Eclipse Subnets: ");
     helpers.printU8(eclipse_status.subnet_diversity);
     shell.print("/");
     helpers.printUsize(eclipse.MIN_OUTBOUND_SUBNETS);
     shell.println(" outbound");
 
-    shell.print("  Distinct Subnets: ");
+    shell.print(" Distinct Subnets: ");
     helpers.printUsize(distinct);
     shell.newLine();
 
-    shell.print("  Tracked Peers:    ");
+    shell.print(" Tracked Peers:      ");
     helpers.printUsize(total);
     shell.newLine();
 
@@ -1305,6 +1312,7 @@ fn showEclipseStatus(args: []const u8) void {
 
     if (helpers.strEql(trimmed, "alerts")) {
         showEclipseAlerts();
+
         return;
     }
 
@@ -1314,11 +1322,11 @@ fn showEclipseStatus(args: []const u8) void {
     }
 
     shell.printInfoLine("========================================");
-    shell.printInfoLine("  ECLIPSE DEFENSE STATUS");
+    shell.printInfoLine(" ECLIPSE DEFENSE STATUS");
     shell.printInfoLine("========================================");
     shell.newLine();
 
-    shell.print("  Status:           ");
+    shell.print(" Status:            ");
     if (eclipse.isInitialized()) {
         shell.printSuccessLine("ACTIVE");
     } else {
@@ -1327,14 +1335,14 @@ fn showEclipseStatus(args: []const u8) void {
 
     const status = eclipse.getStatus();
 
-    shell.print("  Overall Safe:     ");
+    shell.print(" Overall Safe:      ");
     if (status.is_safe) {
         shell.printSuccessLine("YES");
     } else {
         shell.printErrorLine("NO");
     }
 
-    shell.print("  Risk Level:       ");
+    shell.print(" Risk Level:        ");
     helpers.printU8(status.risk_level);
     shell.print("/100");
 
@@ -1347,21 +1355,21 @@ fn showEclipseStatus(args: []const u8) void {
     }
 
     shell.newLine();
-    shell.println("  Current Connections:");
+    shell.println(" Current Connections:");
 
-    shell.print("    Outbound:       ");
+    shell.print("     Outbound:      ");
     helpers.printUsize(status.outbound_count);
     shell.print("/");
     helpers.printUsize(eclipse.MAX_OUTBOUND);
     shell.newLine();
 
-    shell.print("    Inbound:        ");
+    shell.print("     Inbound:       ");
     helpers.printUsize(status.inbound_count);
     shell.print("/");
     helpers.printUsize(eclipse.MAX_INBOUND);
     shell.newLine();
 
-    shell.print("    Anchors:        ");
+    shell.print("     Anchors:       ");
     helpers.printUsize(status.anchor_count);
     shell.print("/");
     helpers.printUsize(eclipse.ANCHOR_PEER_COUNT);
@@ -1394,7 +1402,7 @@ fn showEclipseAlerts() void {
     const count = eclipse.getAlertCount();
 
     if (count == 0) {
-        shell.printSuccessLine("  No alerts.");
+        shell.printSuccessLine("   No alerts.");
         shell.newLine();
         return;
     }
@@ -1402,17 +1410,17 @@ fn showEclipseAlerts() void {
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (eclipse.getAlert(i)) |alert| {
-            shell.print("  [");
+            shell.print(" [");
             helpers.printUsize(i + 1);
             shell.print("] ");
 
             switch (alert.alert_type) {
-                .low_outbound => shell.print("LOW_OUTBOUND     "),
-                .low_diversity => shell.print("LOW_DIVERSITY    "),
-                .inbound_flood => shell.print("INBOUND_FLOOD    "),
-                .anchor_lost => shell.print("ANCHOR_LOST      "),
-                .block_conflict => shell.print("BLOCK_CONFLICT   "),
-                .single_source_sync => shell.print("SINGLE_SOURCE    "),
+                .low_outbound => shell.print("LOW_OUTBOUND      "),
+                .low_diversity => shell.print("LOW_DIVERSITY     "),
+                .inbound_flood => shell.print("INBOUND_FLOOD     "),
+                .anchor_lost => shell.print("ANCHOR_LOST       "),
+                .block_conflict => shell.print("BLOCK_CONFLICT     "),
+                .single_source_sync => shell.print("SINGLE_SOURCE      "),
             }
 
             shell.print("details=");
@@ -1430,12 +1438,12 @@ fn showEclipseRisk() void {
 
     const status = eclipse.getStatus();
 
-    shell.print("  Overall Risk: ");
+    shell.print(" Overall Risk: ");
     helpers.printU8(status.risk_level);
     shell.println("/100");
     shell.newLine();
 
-    shell.print("  Recommendation: ");
+    shell.print(" Recommendation: ");
     if (status.is_safe) {
         shell.printSuccessLine("Node is protected.");
     } else if (status.risk_level < 70) {
@@ -1512,6 +1520,7 @@ fn runH3Tests() void {
     shell.newLine();
 
     var passed: u32 = 0;
+
     var failed: u32 = 0;
 
     testLine("Reputation tests", reputation.runTests(), &passed, &failed);
@@ -1557,41 +1566,130 @@ fn runP3eTests() void {
 }
 
 fn runP3Internal() bool {
-    if (protocol.buildHandshake()) |handshake| {
-        if (!(handshake.magic[0] == 'Z' and handshake.magic[1] == 'A')) return false;
-        if (handshake.version != protocol.PROTOCOL_VERSION) return false;
-        if (protocol.validateHandshake(&handshake) != .Valid) return false;
+    // ---------------------------------------------------------
+    // Handshake V2
+    // ---------------------------------------------------------
 
-        var tampered = handshake;
-        tampered.hardware_hash[0] ^= 0xFF;
+    if (protocol.buildHandshakeInto(&static_p3_handshake)) {
+        if (static_p3_handshake.version !=
+            protocol.PROTOCOL_VERSION)
+        {
+            return false;
+        }
 
-        if (protocol.validateHandshake(&tampered) != .SignatureMismatch) return false;
+        if (protocol.validateHandshake(
+            &static_p3_handshake,
+        ) != .Valid) {
+            return false;
+        }
+
+        static_p3_tampered = static_p3_handshake;
+
+        static_p3_tampered.hardware_hash[0] ^= 0xFF;
+
+        if (protocol.validateHandshake(
+            &static_p3_tampered,
+        ) != .SignatureMismatch) {
+            return false;
+        }
+
+        static_p3_tampered = static_p3_handshake;
+
+        static_p3_tampered.challenge[0] ^= 0x01;
+
+        if (protocol.validateHandshake(
+            &static_p3_tampered,
+        ) != .SignatureMismatch) {
+            return false;
+        }
+
+        static_p3_tampered = static_p3_handshake;
+
+        static_p3_tampered.version = 1;
+
+        if (protocol.validateHandshake(
+            &static_p3_tampered,
+        ) != .UnsupportedVersion) {
+            return false;
+        }
+
+        static_p3_tampered = static_p3_handshake;
+
+        static_p3_tampered.magic[7] = '1';
+
+        if (protocol.validateHandshake(
+            &static_p3_tampered,
+        ) != .InvalidMagic) {
+            return false;
+        }
     } else {
-        return false;
+        // governance session locked:
+        // fail-closed is valid behaviour
     }
+
+    // ---------------------------------------------------------
+    // SLOR KEM
+    // ---------------------------------------------------------
 
     var pk: slor.SlorPublicKey = undefined;
     var sk: slor.SlorSecretKey = undefined;
 
-    slor.generateKeyPair(&pk, &sk);
+    slor.generateKeyPair(
+        &pk,
+        &sk,
+    );
 
     var ct_data: slor.SlorCiphertext = undefined;
-    var shared_tx: [32]u8 = undefined;
-    var shared_rx: [32]u8 = undefined;
 
-    slor.encapsulate(&pk, &ct_data, &shared_tx);
-    slor.decapsulate(&sk, &ct_data, &shared_rx);
+    var shared_tx: [32]u8 =
+        [_]u8{0} ** 32;
 
-    if (!crypto.constantTimeCompare32(&shared_tx, &shared_rx)) return false;
+    var shared_rx: [32]u8 =
+        [_]u8{0} ** 32;
 
-    const plain = "TOP_SECRET_ZAMRUD_ROUTING_DATA";
-    var msg = message.createOnionRouted(p2p.getNodeId(), plain);
+    slor.encapsulate(
+        &pk,
+        &ct_data,
+        &shared_tx,
+    );
 
-    if (msg.msg_type != .onion_routed) return false;
+    slor.decapsulate(
+        &sk,
+        &ct_data,
+        &shared_rx,
+    );
 
-    message.encryptPayloadOtp(&msg, &shared_tx);
+    if (!crypto.constantTimeCompare32(
+        &shared_tx,
+        &shared_rx,
+    )) {
+        return false;
+    }
+
+    // ---------------------------------------------------------
+    // Onion Route
+    // ---------------------------------------------------------
+
+    const plain =
+        "TOP_SECRET_ZAMRUD_ROUTING_DATA";
+
+    var msg =
+        message.createOnionRouted(
+            p2p.getNodeId(),
+            plain,
+        );
+
+    if (msg.msg_type != .onion_routed) {
+        return false;
+    }
+
+    message.encryptPayloadOtp(
+        &msg,
+        &shared_tx,
+    );
 
     var encrypted = false;
+
     for (plain, 0..) |c, i| {
         if (msg.payload[i] != c) {
             encrypted = true;
@@ -1599,19 +1697,26 @@ fn runP3Internal() bool {
         }
     }
 
-    if (!encrypted) return false;
+    if (!encrypted) {
+        return false;
+    }
 
-    message.decryptPayloadOtp(&msg, &shared_rx);
+    message.decryptPayloadOtp(
+        &msg,
+        &shared_rx,
+    );
 
     for (plain, 0..) |c, i| {
-        if (msg.payload[i] != c) return false;
+        if (msg.payload[i] != c) {
+            return false;
+        }
     }
 
     return true;
 }
 
 fn testLine(name: []const u8, ok: bool, passed: *u32, failed: *u32) void {
-    shell.print("  ");
+    shell.print(" ");
     shell.print(name);
     shell.print("... ");
 

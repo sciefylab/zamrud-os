@@ -13,6 +13,9 @@
 const serial = @import("../drivers/serial/serial.zig");
 const timer = @import("../drivers/timer/timer.zig");
 const crypto = @import("../crypto/crypto.zig");
+const gov_sign = @import("../crypto/gov_sign.zig");
+const auth = @import("../identity/auth.zig");
+const constant_time = @import("../crypto/constant_time.zig");
 const socket = @import("../net/socket.zig");
 const firewall = @import("../net/firewall.zig");
 const threat_log = @import("../security/threat_log.zig");
@@ -27,6 +30,11 @@ pub const MAX_ALLOWED_PEERS: usize = 16;
 pub const MAX_REQUEST_AGE_MS: u64 = 30000; // 30 seconds - anti-replay
 pub const CONNECTION_TIMEOUT_MS: u64 = 300000; // 5 minutes
 pub const CLEANUP_INTERVAL_MS: u64 = 60000; // 1 minute
+pub const GATEWAY_PROTOCOL_VERSION: u8 = 2;
+pub const REQUEST_DOMAIN = "ZAMRUD:GATEWAY:REQUEST:V2";
+pub const RESPONSE_DOMAIN = "ZAMRUD:GATEWAY:RESPONSE:V2";
+pub const MAX_REQUEST_SIGNING_INPUT: usize = 1 + 8 + 32 + 32 + 1 + 8 + 8 + 4 + 4096;
+pub const MAX_RESPONSE_SIGNING_INPUT: usize = 1 + 8 + 32 + 1 + 8 + 4 + 4096;
 
 // =============================================================================
 // Types
@@ -118,16 +126,18 @@ pub const Operation = enum(u8) {
 };
 
 pub const GatewayRequest = struct {
+    version: u8,
     request_id: u64,
     peer_id: [32]u8,
+    public_key: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8,
     service_id: [32]u8,
     operation: Operation,
     payload: [4096]u8,
     payload_len: usize,
-    signature: [64]u8,
+    signature: [gov_sign.SIGNATURE_BLOB_BYTES]u8,
     timestamp: u64,
     source_ip: u32,
-    nonce: u64, // Anti-replay nonce
+    nonce: u64,
 };
 
 pub const ResponseStatus = enum(u8) {
@@ -146,14 +156,17 @@ pub const ResponseStatus = enum(u8) {
 };
 
 pub const GatewayResponse = struct {
+    version: u8,
     request_id: u64,
+    gateway_id: [32]u8,
+    public_key: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8,
     status: ResponseStatus,
     payload: [4096]u8,
     payload_len: usize,
     error_code: u16,
     error_msg: [128]u8,
     error_len: usize,
-    signature: [64]u8,
+    signature: [gov_sign.SIGNATURE_BLOB_BYTES]u8,
     timestamp: u64,
 };
 
@@ -191,8 +204,15 @@ var connection_count: usize = 0;
 var next_connection_id: u64 = 1;
 
 var gateway_id: [32]u8 = [_]u8{0} ** 32;
-var gateway_public_key: [32]u8 = [_]u8{0} ** 32;
-var gateway_private_key: [32]u8 = [_]u8{0} ** 32;
+var gateway_public_key: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8 =
+    [_]u8{0} ** gov_sign.PUBLIC_KEY_BLOB_BYTES;
+var static_request_input: [MAX_REQUEST_SIGNING_INPUT]u8 =
+    [_]u8{0} ** MAX_REQUEST_SIGNING_INPUT;
+var static_response_input: [MAX_RESPONSE_SIGNING_INPUT]u8 =
+    [_]u8{0} ** MAX_RESPONSE_SIGNING_INPUT;
+var static_verify_public_key: gov_sign.PublicKey = .{};
+var static_verify_signature: gov_sign.Signature = .{};
+var static_response_signature: gov_sign.Signature = .{};
 
 // Anti-replay nonce cache
 var nonce_cache: [MAX_NONCES]NonceEntry = undefined;
@@ -278,25 +298,26 @@ pub fn isInitialized() bool {
 }
 
 fn generateGatewayIdentity() void {
-    // Generate keypair using crypto module
-    if (crypto.random.isAvailable()) {
-        crypto.random.fill(&gateway_private_key);
+    @memset(gateway_id[0..], 0);
+    @memset(gateway_public_key[0..], 0);
 
-        // Derive public key from private (simplified - just hash for now)
-        gateway_public_key = crypto.sha256(&gateway_private_key);
+    const public_key = auth.getGovernancePublicKey() orelse {
+        serial.writeString("[GATEWAY] Governance identity unavailable; signing fail-closed\n");
+        return;
+    };
 
-        // Gateway ID is hash of public key
-        gateway_id = crypto.sha256(&gateway_public_key);
-    } else {
-        // Fallback: use timer-based pseudo-random
-        const seed = timer.getTicks();
-        var i: usize = 0;
-        while (i < 32) : (i += 1) {
-            gateway_private_key[i] = @intCast((seed >> @intCast(i % 8)) & 0xFF);
-            gateway_public_key[i] = @intCast((seed >> @intCast((i + 4) % 8)) & 0xFF);
-        }
-        gateway_id = crypto.sha256(&gateway_public_key);
+    const serialized_len = gov_sign.serializePublicKey(public_key, &gateway_public_key);
+    if (serialized_len != gov_sign.PUBLIC_KEY_BLOB_BYTES) {
+        @memset(gateway_public_key[0..], 0);
+        return;
     }
+    crypto.sha256Into(&gateway_public_key, &gateway_id);
+}
+
+pub fn refreshIdentity() bool {
+    if (!constant_time.constantTimeIsZero32(&gateway_id)) return true;
+    generateGatewayIdentity();
+    return !constant_time.constantTimeIsZero32(&gateway_id);
 }
 
 fn registerDefaultServices() void {
@@ -508,18 +529,21 @@ pub fn getServices() []const ServiceMapping {
 // Request Handling - Main Entry Point
 // =============================================================================
 
-pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
+pub fn handleRequestInto(request: *const GatewayRequest, response: *GatewayResponse) void {
     total_requests += 1;
 
-    var response = GatewayResponse{
+    response.* = GatewayResponse{
+        .version = GATEWAY_PROTOCOL_VERSION,
         .request_id = request.request_id,
+        .gateway_id = gateway_id,
+        .public_key = gateway_public_key,
         .status = .success,
         .payload = [_]u8{0} ** 4096,
         .payload_len = 0,
         .error_code = 0,
         .error_msg = [_]u8{0} ** 128,
         .error_len = 0,
-        .signature = [_]u8{0} ** 64,
+        .signature = [_]u8{0} ** gov_sign.SIGNATURE_BLOB_BYTES,
         .timestamp = getTimestamp(),
     };
 
@@ -532,18 +556,18 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
     if (gateway_state == .lockdown or security_lockdown) {
         response.status = .firewall_blocked;
         response.error_code = 503;
-        setError(&response, "Gateway lockdown");
+        setError(response, "Gateway lockdown");
         total_denied += 1;
         logSecurityEvent(.brute_force, request.source_ip, "Lockdown active");
-        return response;
+        return;
     }
 
     if (gateway_state != .running) {
         response.status = .service_unavailable;
         response.error_code = 503;
-        setError(&response, "Gateway not running");
+        setError(response, "Gateway not running");
         total_errors += 1;
-        return response;
+        return;
     }
 
     // ===========================================
@@ -554,11 +578,11 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
         if (firewall.isBlacklisted(request.source_ip)) {
             response.status = .firewall_blocked;
             response.error_code = 403;
-            setError(&response, "IP blacklisted");
+            setError(response, "IP blacklisted");
             total_denied += 1;
             total_firewall_blocked += 1;
             logSecurityEvent(.rate_limit_abuse, request.source_ip, "Blacklisted IP");
-            return response;
+            return;
         }
 
         // Full firewall check (pass peer_id for P2P mode)
@@ -574,10 +598,10 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
         if (filter_result.action != .allow) {
             response.status = .firewall_blocked;
             response.error_code = 403;
-            setError(&response, filter_result.reason);
+            setError(response, filter_result.reason);
             total_denied += 1;
             total_firewall_blocked += 1;
-            return response;
+            return;
         }
     }
 
@@ -590,21 +614,21 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
     if (request.timestamp > now + 5000) { // 5 second tolerance for clock skew
         response.status = .timestamp_invalid;
         response.error_code = 400;
-        setError(&response, "Future timestamp");
+        setError(response, "Future timestamp");
         total_denied += 1;
         logSecurityEvent(.signature_invalid, request.source_ip, "Future timestamp");
-        return response;
+        return;
     }
 
     // Check for expired timestamp
     if (now > request.timestamp and now - request.timestamp > MAX_REQUEST_AGE_MS) {
         response.status = .timestamp_invalid;
         response.error_code = 400;
-        setError(&response, "Expired timestamp");
+        setError(response, "Expired timestamp");
         total_denied += 1;
         total_replay_blocked += 1;
         logSecurityEvent(.brute_force, request.source_ip, "Replay attempt (old)");
-        return response;
+        return;
     }
 
     // ===========================================
@@ -613,11 +637,11 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
     if (isNonceUsed(request.peer_id, request.nonce)) {
         response.status = .replay_detected;
         response.error_code = 400;
-        setError(&response, "Replay detected");
+        setError(response, "Replay detected");
         total_denied += 1;
         total_replay_blocked += 1;
         logSecurityEvent(.brute_force, request.source_ip, "Replay attempt (nonce)");
-        return response;
+        return;
     }
 
     // Record nonce
@@ -629,17 +653,17 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
     const service = getServiceById(request.service_id) orelse {
         response.status = .service_unavailable;
         response.error_code = 404;
-        setError(&response, "Service not found");
+        setError(response, "Service not found");
         total_errors += 1;
-        return response;
+        return;
     };
 
     if (!service.active) {
         response.status = .service_unavailable;
         response.error_code = 503;
-        setError(&response, "Service inactive");
+        setError(response, "Service inactive");
         total_errors += 1;
-        return response;
+        return;
     }
 
     // ===========================================
@@ -648,10 +672,10 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
     if (!checkServiceRateLimit(service)) {
         response.status = .rate_limited;
         response.error_code = 429;
-        setError(&response, "Rate limit exceeded");
+        setError(response, "Rate limit exceeded");
         total_denied += 1;
         logSecurityEvent(.rate_limit_abuse, request.source_ip, "Rate limit");
-        return response;
+        return;
     }
 
     // ===========================================
@@ -660,11 +684,11 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
     if (!isPeerAllowed(service, request.peer_id)) {
         response.status = .peer_not_allowed;
         response.error_code = 403;
-        setError(&response, "Peer not authorized");
+        setError(response, "Peer not authorized");
         service.requests_denied += 1;
         total_denied += 1;
         logSecurityEvent(.unknown_peer, request.source_ip, "Unauthorized peer");
-        return response;
+        return;
     }
 
     // ===========================================
@@ -674,11 +698,11 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
         if (!verifyRequestSignature(request)) {
             response.status = .signature_invalid;
             response.error_code = 401;
-            setError(&response, "Invalid signature");
+            setError(response, "Invalid signature");
             service.requests_denied += 1;
             total_denied += 1;
             logSecurityEvent(.signature_invalid, request.source_ip, "Bad signature");
-            return response;
+            return;
         }
     }
 
@@ -688,10 +712,10 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
     if (!checkCapabilities(service, request.operation)) {
         response.status = .capability_denied;
         response.error_code = 403;
-        setError(&response, "Operation not permitted");
+        setError(response, "Operation not permitted");
         service.requests_denied += 1;
         total_denied += 1;
-        return response;
+        return;
     }
 
     // ===========================================
@@ -702,7 +726,7 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
     service.bytes_in += request.payload_len;
     total_bytes_in += request.payload_len;
 
-    const result = processOperation(service, request, &response);
+    const result = processOperation(service, request, response);
 
     if (result) {
         service.requests_success += 1;
@@ -717,12 +741,12 @@ pub fn handleRequest(request: *const GatewayRequest) GatewayResponse {
     }
 
     // Sign response
-    signResponse(&response);
+    signResponse(response);
 
     total_bytes_out += response.payload_len;
     service.bytes_out += response.payload_len;
 
-    return response;
+    return;
 }
 
 // =============================================================================
@@ -748,40 +772,69 @@ fn isPeerAllowed(service: *const ServiceMapping, peer_id: [32]u8) bool {
 }
 
 fn verifyRequestSignature(request: *const GatewayRequest) bool {
-    // Build message to verify: peer_id || service_id || operation || timestamp || nonce || payload
-    var hash_input: [4300]u8 = [_]u8{0} ** 4300;
-    var pos: usize = 0;
+    if (request.version != GATEWAY_PROTOCOL_VERSION) return false;
+    if (request.payload_len > request.payload.len) return false;
+    if (constant_time.constantTimeIsZero32(&request.peer_id)) return false;
 
-    // Peer ID
-    @memcpy(hash_input[pos..][0..32], &request.peer_id);
-    pos += 32;
+    gov_sign.clearPublicKey(&static_verify_public_key);
+    gov_sign.clearSignature(&static_verify_signature);
+    defer gov_sign.clearPublicKey(&static_verify_public_key);
+    defer gov_sign.clearSignature(&static_verify_signature);
 
-    // Service ID
-    @memcpy(hash_input[pos..][0..32], &request.service_id);
-    pos += 32;
-
-    // Operation
-    hash_input[pos] = @intFromEnum(request.operation);
-    pos += 1;
-
-    // Timestamp
-    writeU64(hash_input[pos..], request.timestamp);
-    pos += 8;
-
-    // Nonce
-    writeU64(hash_input[pos..], request.nonce);
-    pos += 8;
-
-    // Payload
-    if (request.payload_len > 0) {
-        const payload_len = @min(request.payload_len, 4096);
-        @memcpy(hash_input[pos..][0..payload_len], request.payload[0..payload_len]);
-        pos += payload_len;
+    if (!gov_sign.deserializePublicKey(&request.public_key, &static_verify_public_key)) {
+        return false;
     }
 
-    // Hash and verify
-    const hash = crypto.sha256(hash_input[0..pos]);
-    return crypto.verify(&request.peer_id, &hash, &request.signature);
+    var expected_peer_id: [32]u8 = [_]u8{0} ** 32;
+    defer constant_time.secureZero32(&expected_peer_id);
+    crypto.sha256Into(&request.public_key, &expected_peer_id);
+    if (!constant_time.constantTimeCompare32(&expected_peer_id, &request.peer_id)) {
+        return false;
+    }
+
+    if (!gov_sign.deserializeSignature(&request.signature, &static_verify_signature)) {
+        return false;
+    }
+
+    const input_len = buildRequestSigningInput(request, &static_request_input);
+    if (input_len == 0) return false;
+    defer constant_time.secureZero(static_request_input[0..input_len]);
+
+    return auth.verifyGovernancePayloadBool(
+        &static_verify_public_key,
+        REQUEST_DOMAIN,
+        static_request_input[0..input_len],
+        &static_verify_signature,
+    );
+}
+
+fn buildRequestSigningInput(request: *const GatewayRequest, out: []u8) usize {
+    if (request.payload_len > request.payload.len) return 0;
+    const needed = 1 + 8 + 32 + 32 + 1 + 8 + 8 + 4 + request.payload_len;
+    if (out.len < needed) return 0;
+
+    var pos: usize = 0;
+    out[pos] = request.version;
+    pos += 1;
+    writeU64(out[pos..], request.request_id);
+    pos += 8;
+    @memcpy(out[pos..][0..32], &request.peer_id);
+    pos += 32;
+    @memcpy(out[pos..][0..32], &request.service_id);
+    pos += 32;
+    out[pos] = @intFromEnum(request.operation);
+    pos += 1;
+    writeU64(out[pos..], request.timestamp);
+    pos += 8;
+    writeU64(out[pos..], request.nonce);
+    pos += 8;
+    writeU32(out[pos..], @intCast(request.payload_len));
+    pos += 4;
+    if (request.payload_len > 0) {
+        @memcpy(out[pos..][0..request.payload_len], request.payload[0..request.payload_len]);
+        pos += request.payload_len;
+    }
+    return pos;
 }
 
 fn checkCapabilities(service: *const ServiceMapping, op: Operation) bool {
@@ -1098,33 +1151,57 @@ fn handleUnsubscribe(service: *ServiceMapping, request: *const GatewayRequest, r
 }
 
 fn signResponse(response: *GatewayResponse) void {
-    var hash_input: [4300]u8 = [_]u8{0} ** 4300;
+    @memset(response.signature[0..], 0);
+    if (!refreshIdentity()) return;
+
+    response.version = GATEWAY_PROTOCOL_VERSION;
+    response.gateway_id = gateway_id;
+    response.public_key = gateway_public_key;
+
+    const input_len = buildResponseSigningInput(response, &static_response_input);
+    if (input_len == 0) return;
+    defer constant_time.secureZero(static_response_input[0..input_len]);
+
+    gov_sign.clearSignature(&static_response_signature);
+    defer gov_sign.clearSignature(&static_response_signature);
+    if (!auth.signGovernancePayload(
+        RESPONSE_DOMAIN,
+        static_response_input[0..input_len],
+        &static_response_signature,
+    )) return;
+
+    const signature_len = gov_sign.serializeSignature(
+        &static_response_signature,
+        &response.signature,
+    );
+    if (signature_len != gov_sign.SIGNATURE_BLOB_BYTES) {
+        @memset(response.signature[0..], 0);
+    }
+}
+
+fn buildResponseSigningInput(response: *const GatewayResponse, out: []u8) usize {
+    if (response.payload_len > response.payload.len) return 0;
+    const needed = 1 + 8 + 32 + 1 + 8 + 4 + response.payload_len;
+    if (out.len < needed) return 0;
+
     var pos: usize = 0;
-
-    // Request ID
-    writeU64(hash_input[pos..], response.request_id);
-    pos += 8;
-
-    // Status
-    hash_input[pos] = @intFromEnum(response.status);
+    out[pos] = response.version;
     pos += 1;
-
-    // Timestamp
-    writeU64(hash_input[pos..], response.timestamp);
+    writeU64(out[pos..], response.request_id);
     pos += 8;
-
-    // Payload
+    @memcpy(out[pos..][0..32], &response.gateway_id);
+    pos += 32;
+    out[pos] = @intFromEnum(response.status);
+    pos += 1;
+    writeU64(out[pos..], response.timestamp);
+    pos += 8;
+    writeU32(out[pos..], @intCast(response.payload_len));
+    pos += 4;
     if (response.payload_len > 0) {
-        @memcpy(hash_input[pos..][0..response.payload_len], response.payload[0..response.payload_len]);
+        @memcpy(out[pos..][0..response.payload_len], response.payload[0..response.payload_len]);
         pos += response.payload_len;
     }
-
-    // Sign with gateway private key
-    const hash = crypto.sha256(hash_input[0..pos]);
-
-    // Simple signature: hash + gateway_id prefix
-    @memcpy(response.signature[0..32], &hash);
-    @memcpy(response.signature[32..64], gateway_id[0..32]);
+    return pos;
 }
 
 // =============================================================================
@@ -1382,6 +1459,14 @@ fn eqlBytes(a: []const u8, b: []const u8) bool {
         if (x != y) return false;
     }
     return true;
+}
+
+fn writeU32(buf: []u8, val: u32) void {
+    if (buf.len < 4) return;
+    buf[0] = @truncate(val >> 24);
+    buf[1] = @truncate(val >> 16);
+    buf[2] = @truncate(val >> 8);
+    buf[3] = @truncate(val);
 }
 
 fn writeU64(buf: []u8, val: u64) void {

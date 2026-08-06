@@ -20,7 +20,7 @@ const socket = @import("../net/socket.zig");
 const timer = @import("../drivers/timer/timer.zig");
 const ahci = @import("../drivers/storage/ahci.zig");
 const hash = @import("../crypto/hash.zig");
-const crypto = @import("../crypto/crypto.zig");
+const gov_sign = @import("../crypto/gov_sign.zig");
 const constant_time = @import("../crypto/constant_time.zig");
 
 const peer = @import("peer.zig");
@@ -45,8 +45,11 @@ var is_listening: bool = false;
 var tcp_listener_sock: ?*socket.Socket = null;
 
 // Static buffers to reduce stack pressure
-var incoming_buffer: [message.MAX_PAYLOAD_SIZE + 256]u8 = undefined;
-var ack_buffer: [512]u8 = undefined;
+var incoming_buffer: [message.MAX_WIRE_SIZE]u8 = undefined;
+var ack_buffer: [message.MAX_WIRE_SIZE]u8 = undefined;
+var incoming_message: message.Message = undefined;
+var incoming_node_info: protocol.NodeInfo = undefined;
+var ack_message: message.Message = undefined;
 
 // =============================================================================
 // P2P Listener
@@ -159,34 +162,23 @@ fn validateNodeIdBinding(msg: *const message.Message, info: *const protocol.Node
     return ok;
 }
 
-fn isZeroPublicKey(pk: *const [32]u8) bool {
-    return constant_time.constantTimeIsZero32(pk);
-}
-
 fn validateHandshakeMessage(msg: *const message.Message, info: *const protocol.NodeInfo) bool {
-    if (isZeroPublicKey(&info.public_key)) {
-        serial.writeString("[P2P-NODE] [DROP] Zero public key in handshake\n");
+    var parsed_key = gov_sign.PublicKey{};
+    defer gov_sign.clearPublicKey(&parsed_key);
+    if (!gov_sign.deserializePublicKey(&info.public_key, &parsed_key)) {
+        serial.writeString("[P2P-NODE] [DROP] Malformed public key in handshake\n");
         return false;
     }
-
     if (!validateNodeIdBinding(msg, info)) {
         serial.writeString("[P2P-NODE] [DROP] Handshake node_id != sha256(public_key)\n");
         return false;
     }
-
-    if (message.isZeroSignature(&msg.signature)) {
-        serial.writeString("[P2P-NODE] [DROP] Unsigned handshake\n");
-        return false;
-    }
-
-    if (!message.verifyWithPublicKey(msg, &info.public_key)) {
+    if (!message.verifyWithPublicKey(msg, &parsed_key)) {
         serial.writeString("[P2P-NODE] [DROP] Invalid handshake signature\n");
         return false;
     }
-
     return true;
 }
-
 fn handlePeerHandshake(peer_sock: *socket.Socket, peer_ip: u32, peer_port: u16) void {
     const bytes_read = socket.recv(peer_sock, &incoming_buffer);
 
@@ -197,11 +189,12 @@ fn handlePeerHandshake(peer_sock: *socket.Socket, peer_ip: u32, peer_port: u16) 
 
     const n: usize = @intCast(bytes_read);
 
-    const msg = message.decode(incoming_buffer[0..n]) orelse {
+    if (!message.decodeInto(incoming_buffer[0..n], &incoming_message)) {
         serial.writeString("[P2P-NODE] [DROP] Failed to decode incoming handshake payload\n");
         socket.close(peer_sock);
         return;
-    };
+    }
+    const msg = &incoming_message;
 
     if (msg.msg_type != .handshake) {
         serial.writeString("[P2P-NODE] [DROP] First packet is not handshake\n");
@@ -217,11 +210,12 @@ fn handlePeerHandshake(peer_sock: *socket.Socket, peer_ip: u32, peer_port: u16) 
 
     const payload_len: usize = @intCast(msg.payload_len);
 
-    const info = protocol.decodeNodeInfo(msg.payload[0..payload_len]) orelse {
+    if (!protocol.decodeNodeInfoInto(msg.payload[0..payload_len], &incoming_node_info)) {
         serial.writeString("[P2P-NODE] [DROP] Invalid NodeInfo in handshake\n");
         socket.close(peer_sock);
         return;
-    };
+    }
+    const info = &incoming_node_info;
 
     if (info.version != @import("p2p.zig").VERSION) {
         serial.writeString("[P2P-NODE] [DROP] Unsupported peer protocol version\n");
@@ -234,7 +228,7 @@ fn handlePeerHandshake(peer_sock: *socket.Socket, peer_ip: u32, peer_port: u16) 
     // sender_id must equal sha256(NodeInfo.public_key).
     // message envelope must not be unsigned.
     // verifyWithPublicKey() is called here as the strict handshake path.
-    if (!validateHandshakeMessage(&msg, &info)) {
+    if (!validateHandshakeMessage(msg, info)) {
         socket.close(peer_sock);
         return;
     }
@@ -265,40 +259,20 @@ fn handlePeerHandshake(peer_sock: *socket.Socket, peer_ip: u32, peer_port: u16) 
 
 fn sendHandshakeAck(peer_sock: *socket.Socket) bool {
     const p2p = @import("p2p.zig");
-
-    var ack = message.Message{
-        .msg_type = .handshake_ack,
-        .sender_id = p2p.getNodeId(),
-        .timestamp = getTimestamp(),
-        .payload = [_]u8{0} ** message.MAX_PAYLOAD_SIZE,
-        .payload_len = 0,
-        .signature = [_]u8{0} ** message.SIGNATURE_SIZE,
-    };
-
+    ack_message = message.createEmpty(p2p.getNodeId(), .handshake_ack);
     const info = protocol.NodeInfo{
         .version = p2p.VERSION,
         .port = ZAMRUD_P2P_PORT,
-        .public_key = p2p.getPublicKey(),
+        .public_key = p2p.getPublicKeyBlob(),
         .capabilities = protocol.CAP_FULL_NODE,
     };
-
-    ack.payload_len = protocol.encodeNodeInfo(&info, &ack.payload);
-
-    var local_secret32: [32]u8 = [_]u8{0} ** 32;
-    const secret_key_ptr = crypto.KeyPair.getSecretKey();
-    @memcpy(&local_secret32, secret_key_ptr[0..32]);
-
-    message.sign(&ack, &local_secret32);
-
-    const len = message.encode(&ack, &ack_buffer);
-
-    if (len == 0) {
-        return false;
-    }
-
+    ack_message.payload_len = protocol.encodeNodeInfo(&info, &ack_message.payload);
+    if (ack_message.payload_len == 0) return false;
+    if (!message.signWithSession(&ack_message)) return false;
+    const len = message.encode(&ack_message, &ack_buffer);
+    if (len == 0) return false;
     return socket.send(peer_sock, ack_buffer[0..len]) >= 0;
 }
-
 // =============================================================================
 // Poll Connected Peer Messages
 // =============================================================================
@@ -491,7 +465,7 @@ pub fn runTests() bool {
 
     serial.writeString("  [4] public key binding....... ");
     {
-        var pk: [32]u8 = [_]u8{0xA5} ** 32;
+        var pk: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8 = [_]u8{0xA5} ** gov_sign.PUBLIC_KEY_BLOB_BYTES;
         var expected_id: [32]u8 = undefined;
 
         hash.sha256Into(&pk, &expected_id);

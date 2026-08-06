@@ -1,69 +1,57 @@
-//! Zamrud OS - P2P Protocol Handler
-//! Message routing, state machine, and P.3 Hardware Attestation Handshake
-//! P.3e: Twin-Node Eviction Dispatch Integration
+//! Zamrud OS - P2P Protocol Handler V2
+//! ML-DSA-65 authenticated hardware-attestation handshake.
 
 const serial = @import("../drivers/serial/serial.zig");
-
 const peer = @import("peer.zig");
 const message = @import("message.zig");
 const discovery = @import("discovery.zig");
 const sync = @import("sync.zig");
 const eviction = @import("eviction.zig");
-
-// Imports for P.3 Hardware Attestation
-const crypto = @import("../crypto/crypto.zig");
 const identity = @import("../identity/identity.zig");
+const auth = @import("../identity/auth.zig");
+const gov_sign = @import("../crypto/gov_sign.zig");
+const constant_time = @import("../crypto/constant_time.zig");
 const timer = @import("../drivers/timer/timer.zig");
 const ahci = @import("../drivers/storage/ahci.zig");
 const hash = @import("../crypto/hash.zig");
-const signature_mod = @import("../crypto/signature.zig");
-
-// =============================================================================
-// Constants
-// =============================================================================
 
 pub const CAP_FULL_NODE: u32 = 0x01;
 pub const CAP_LIGHT_NODE: u32 = 0x02;
 pub const CAP_VALIDATOR: u32 = 0x04;
 pub const CAP_RELAY: u32 = 0x08;
-
-pub const PROTOCOL_VERSION: u32 = 1;
-pub const MAGIC_BYTES = [_]u8{ 'Z', 'A', 'M', 'N', 'E', 'T', '0', '1' }; // ZAMNET01
+pub const PROTOCOL_VERSION: u32 = 2;
+pub const MAGIC_BYTES = [_]u8{ 'Z', 'A', 'M', 'N', 'E', 'T', '0', '2' };
+pub const HANDSHAKE_DOMAIN = "ZAMRUD:P2P:HANDSHAKE:V2";
+pub const CHALLENGE_SIZE: usize = 32;
+pub const HANDSHAKE_TRANSCRIPT_SIZE: usize =
+    8 + 4 + 1 + 8 + CHALLENGE_SIZE + 32 + 32;
 
 pub const PacketType = enum(u8) {
     Handshake = 0x01,
     HandshakeAck = 0x02,
-
-    // P.3e: Packet-level eviction marker
     Eviction = 0x03,
-
     Ping = 0x04,
     Pong = 0x05,
-
-    // P.3d
     OnionRouted = 0x06,
 };
-
-// =============================================================================
-// Types
-// =============================================================================
 
 pub const NodeInfo = struct {
     version: u8,
     port: u16,
-    public_key: [32]u8,
+    public_key: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8,
     capabilities: u32,
 };
 
-/// P.3: Struktur paket identitas saat pertama kali terhubung ke jaringan Bawang
+/// Wire V2. Public-key and signature fields contain canonical gov_sign bytes.
 pub const HandshakePayload = extern struct {
     magic: [8]u8,
     version: u32,
     packet_type: u8,
     timestamp: u64,
-    public_key: [32]u8,
+    challenge: [CHALLENGE_SIZE]u8,
+    public_key: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8,
     hardware_hash: [32]u8,
-    hw_signature: [64]u8,
+    hw_signature: [gov_sign.SIGNATURE_BLOB_BYTES]u8,
 };
 
 pub const ValidationResult = enum {
@@ -71,389 +59,286 @@ pub const ValidationResult = enum {
     InvalidMagic,
     UnsupportedVersion,
     SignatureMismatch,
+    MissingChallenge,
+    InvalidPublicKey,
 };
 
-// =============================================================================
-// State
-// =============================================================================
-
 var initialized: bool = false;
-
-// =============================================================================
-// Initialization
-// =============================================================================
+var static_handshake: HandshakePayload = undefined;
+var static_transcript: [HANDSHAKE_TRANSCRIPT_SIZE]u8 =
+    [_]u8{0} ** HANDSHAKE_TRANSCRIPT_SIZE;
 
 pub fn init() void {
-    if (@hasDecl(eviction, "init")) {
-        eviction.init();
-    }
-
+    if (@hasDecl(eviction, "init")) eviction.init();
     initialized = true;
-    serial.writeString("[PROTO] Protocol handler initialized (P.3 + P.3e Ready)\n");
+    serial.writeString("[PROTO] Protocol V2 initialized (ML-DSA-65 handshake)\n");
 }
 
 pub fn isInitialized() bool {
     return initialized;
 }
 
-// =============================================================================
-// P.3: Onion Routing Handshake Builders & Validators
-// =============================================================================
+/// Stack-safe handshake builder.
+pub fn buildHandshakeInto(out: *HandshakePayload) bool {
+    @memset(@as([*]u8, @ptrCast(out))[0..@sizeOf(HandshakePayload)], 0);
 
-/// Merakit paket salaman/KTP jaringan untuk dikirim ke peers
-pub fn buildHandshake() ?HandshakePayload {
-    var payload: HandshakePayload = undefined;
+    @memcpy(&out.magic, &MAGIC_BYTES);
+    out.version = PROTOCOL_VERSION;
+    out.packet_type = @intFromEnum(PacketType.Handshake);
+    out.timestamp = timer.getSeconds();
 
-    // 1. Set Header & Identitas
-    var i: usize = 0;
-    while (i < 8) : (i += 1) {
-        payload.magic[i] = MAGIC_BYTES[i];
-    }
+    // Bind a fresh challenge to this handshake.
+    const crypto = @import("../crypto/crypto.zig");
+    crypto.random.getBytes(&out.challenge);
+    if (constant_time.constantTimeIsZero32(&out.challenge)) return false;
 
-    payload.version = PROTOCOL_VERSION;
-    payload.packet_type = @intFromEnum(PacketType.Handshake);
-    payload.timestamp = timer.getSeconds();
-
-    // 2. Gunakan kunci publik node P2P
-    const node_pub = signature_mod.KeyPair.getPublicKey();
-
-    i = 0;
-    while (i < 32) : (i += 1) {
-        payload.public_key[i] = node_pub[i];
-    }
-
-    // 3. Ekstrak DNA hardware dari drive
-    var hw_hash: [32]u8 = [_]u8{0} ** 32;
+    const public_key = auth.getGovernancePublicKey() orelse return false;
+    const public_key_len =
+        gov_sign.serializePublicKey(public_key, &out.public_key);
+    if (public_key_len != gov_sign.PUBLIC_KEY_BLOB_BYTES) return false;
 
     if (ahci.isInitialized() and ahci.getDriveCount() > 0) {
-        if (ahci.getDriveSerial(0)) |serial_str| {
-            hash.sha256Into(serial_str, &hw_hash);
+        if (ahci.getDriveSerial(0)) |serial_value| {
+            hash.sha256Into(serial_value, &out.hardware_hash);
         }
     }
 
-    i = 0;
-    while (i < 32) : (i += 1) {
-        payload.hardware_hash[i] = hw_hash[i];
-    }
+    const transcript_len = buildHandshakeTranscript(out, &static_transcript);
+    if (transcript_len == 0) return false;
+    defer constant_time.secureZero(static_transcript[0..transcript_len]);
 
-    // 4. Tanda tangani DNA hardware
-    const active_sec_key = signature_mod.KeyPair.getSecretKey();
-    const sig = crypto.signMessage(&payload.hardware_hash, active_sec_key);
+    var signature = gov_sign.Signature{};
+    defer gov_sign.clearSignature(&signature);
+    if (!auth.signGovernancePayload(
+        HANDSHAKE_DOMAIN,
+        static_transcript[0..transcript_len],
+        &signature,
+    )) return false;
 
-    i = 0;
-    while (i < 64) : (i += 1) {
-        payload.hw_signature[i] = sig[i];
-    }
-
-    return payload;
+    const signature_len =
+        gov_sign.serializeSignature(&signature, &out.hw_signature);
+    return signature_len == gov_sign.SIGNATURE_BLOB_BYTES;
 }
 
-/// Memvalidasi paket salaman dari node lain
+/// Compatibility wrapper. Prefer buildHandshakeInto() in production callers.
+pub fn buildHandshake() ?HandshakePayload {
+    if (!buildHandshakeInto(&static_handshake)) return null;
+    return static_handshake;
+}
+
 pub fn validateHandshake(payload: *const HandshakePayload) ValidationResult {
-    // 1. Verifikasi magic bytes
-    var i: usize = 0;
-    while (i < 8) : (i += 1) {
-        if (payload.magic[i] != MAGIC_BYTES[i]) {
-            return .InvalidMagic;
-        }
+    if (!bytesEqual(&payload.magic, &MAGIC_BYTES)) return .InvalidMagic;
+    if (payload.version != PROTOCOL_VERSION) return .UnsupportedVersion;
+    if (constant_time.constantTimeIsZero32(&payload.challenge)) return .MissingChallenge;
+
+    var public_key = gov_sign.PublicKey{};
+    defer gov_sign.clearPublicKey(&public_key);
+    if (!gov_sign.deserializePublicKey(&payload.public_key, &public_key)) {
+        return .InvalidPublicKey;
     }
 
-    // 2. Verifikasi versi protokol
-    if (payload.version != PROTOCOL_VERSION) {
-        return .UnsupportedVersion;
-    }
-
-    // 3. Verifikasi tanda tangan hardware hash
-    const is_valid_sig = crypto.verifySignature(
-        &payload.hardware_hash,
-        &payload.hw_signature,
-        &payload.public_key,
-    );
-
-    if (!is_valid_sig) {
+    var signature = gov_sign.Signature{};
+    defer gov_sign.clearSignature(&signature);
+    if (!gov_sign.deserializeSignature(&payload.hw_signature, &signature)) {
         return .SignatureMismatch;
     }
+
+    const transcript_len = buildHandshakeTranscript(payload, &static_transcript);
+    if (transcript_len == 0) return .SignatureMismatch;
+    defer constant_time.secureZero(static_transcript[0..transcript_len]);
+
+    if (!auth.verifyGovernancePayloadBool(
+        &public_key,
+        HANDSHAKE_DOMAIN,
+        static_transcript[0..transcript_len],
+        &signature,
+    )) return .SignatureMismatch;
 
     return .Valid;
 }
 
-// =============================================================================
-// Message Handling
-// =============================================================================
+fn buildHandshakeTranscript(payload: *const HandshakePayload, out: []u8) usize {
+    if (out.len < HANDSHAKE_TRANSCRIPT_SIZE) return 0;
+    var pos: usize = 0;
+    @memcpy(out[pos..][0..8], &payload.magic);
+    pos += 8;
+    writeU32(out[pos..], payload.version);
+    pos += 4;
+    out[pos] = payload.packet_type;
+    pos += 1;
+    writeU64(out[pos..], payload.timestamp);
+    pos += 8;
+    @memcpy(out[pos..][0..CHALLENGE_SIZE], &payload.challenge);
+    pos += CHALLENGE_SIZE;
+
+    var public_fingerprint: [32]u8 = [_]u8{0} ** 32;
+    hash.sha256Into(&payload.public_key, &public_fingerprint);
+    @memcpy(out[pos..][0..32], &public_fingerprint);
+    pos += 32;
+    constant_time.secureZero32(&public_fingerprint);
+
+    @memcpy(out[pos..][0..32], &payload.hardware_hash);
+    pos += 32;
+    return pos;
+}
 
 pub fn handleMessage(p: *peer.Peer, msg: *const message.Message) void {
+    const payload_len: usize = @intCast(msg.payload_len);
+    if (payload_len > message.MAX_PAYLOAD_SIZE) return;
+    const data = msg.payload[0..payload_len];
+
     switch (msg.msg_type) {
-        // Keepalive
         .ping => handlePing(p),
         .pong => handlePong(p),
-
-        // Peer discovery
         .get_peers => handleGetPeers(p),
-        .peers => handlePeers(p, msg.payload[0..msg.payload_len]),
-
-        // Blockchain
-        .get_blocks => handleGetBlocks(p, msg.payload[0..msg.payload_len]),
-        .blocks => handleBlocks(p, msg.payload[0..msg.payload_len]),
-        .new_block => handleNewBlock(p, msg.payload[0..msg.payload_len]),
-
-        // Transactions
-        .new_transaction => handleNewTransaction(p, msg.payload[0..msg.payload_len]),
-
-        // Identity
-        .identity_announce => handleIdentityAnnounce(p, msg.payload[0..msg.payload_len]),
-        .identity_query => handleIdentityQuery(p, msg.payload[0..msg.payload_len]),
-
-        // Consensus
-        .vote => handleVote(p, msg.payload[0..msg.payload_len]),
-        .proposal => handleProposal(p, msg.payload[0..msg.payload_len]),
-
-        // P.3d
-        .onion_routed => handleOnionRouted(p, msg.payload[0..msg.payload_len]),
-
-        // P.3e: Twin-Node Eviction
-        .eviction_vote => handleEvictionVote(p, msg.payload[0..msg.payload_len]),
-        .eviction_commit => handleEvictionCommit(p, msg.payload[0..msg.payload_len]),
-        .eviction_notice => handleEvictionNotice(p, msg.payload[0..msg.payload_len]),
-
+        .peers => handlePeers(p, data),
+        .get_blocks => handleGetBlocks(p, data),
+        .blocks => handleBlocks(p, data),
+        .new_block => handleNewBlock(p, data),
+        .new_transaction => handleNewTransaction(p, data),
+        .identity_announce => handleIdentityAnnounce(p, data),
+        .identity_query => handleIdentityQuery(p, data),
+        .vote => handleVote(p, data),
+        .proposal => handleProposal(p, data),
+        .onion_routed => handleOnionRouted(p, data),
+        .eviction_vote => handleEvictionVote(p, data),
+        .eviction_commit => handleEvictionCommit(p, data),
+        .eviction_notice => handleEvictionNotice(p, data),
         else => {},
     }
 }
-
-// =============================================================================
-// Keepalive Handlers
-// =============================================================================
 
 fn handlePing(p: *peer.Peer) void {
     peer.updateLastSeen(p);
     const p2p = @import("p2p.zig");
     _ = p2p.sendToPeer(p.id, .pong, &[_]u8{});
 }
-
 fn handlePong(p: *peer.Peer) void {
     peer.updateLastSeen(p);
     peer.increaseReputation(p, 1);
 }
-
-// =============================================================================
-// Peer Discovery Handlers
-// =============================================================================
-
 fn handleGetPeers(p: *peer.Peer) void {
     peer.updateLastSeen(p);
-
     var buffer: [4096]u8 = undefined;
     const len = discovery.encodePeerList(&buffer);
-
     const p2p = @import("p2p.zig");
     _ = p2p.sendToPeer(p.id, .peers, buffer[0..len]);
 }
-
 fn handlePeers(p: *peer.Peer, data: []const u8) void {
     peer.updateLastSeen(p);
     peer.increaseReputation(p, 2);
-
     discovery.handlePeerList(data);
 }
-
-// =============================================================================
-// Blockchain Handlers
-// =============================================================================
-
 fn handleGetBlocks(p: *peer.Peer, data: []const u8) void {
     peer.updateLastSeen(p);
-
     if (data.len < 16) return;
-
-    const from_block = readU64(data[0..8]);
-    const count = readU64(data[8..16]);
-
-    _ = from_block;
-    _ = count;
-
+    _ = readU64(data[0..8]);
+    _ = readU64(data[8..16]);
     serial.writeString("[PROTO] Blocks requested from peer\n");
 }
-
 fn handleBlocks(p: *peer.Peer, data: []const u8) void {
     peer.updateLastSeen(p);
     peer.increaseReputation(p, 5);
-
     sync.handleBlocks(data);
 }
-
 fn handleNewBlock(p: *peer.Peer, data: []const u8) void {
     peer.updateLastSeen(p);
-
     sync.handleNewBlock(p.id, data);
-
     const p2p = @import("p2p.zig");
     p2p.broadcast(.new_block, data);
 }
-
-// =============================================================================
-// Transaction Handlers
-// =============================================================================
-
 fn handleNewTransaction(p: *peer.Peer, data: []const u8) void {
     peer.updateLastSeen(p);
-
-    if (!validateTransaction(data)) {
+    if (data.len == 0) {
         peer.decreaseReputation(p, 5);
         return;
     }
-
     peer.increaseReputation(p, 1);
-
     const p2p = @import("p2p.zig");
     p2p.broadcast(.new_transaction, data);
 }
-
-fn validateTransaction(data: []const u8) bool {
-    return data.len > 0;
-}
-
-// =============================================================================
-// Identity Handlers
-// =============================================================================
-
 fn handleIdentityAnnounce(p: *peer.Peer, data: []const u8) void {
     peer.updateLastSeen(p);
-
-    if (data.len < 64) return;
-
-    serial.writeString("[PROTO] Identity announced from peer\n");
+    if (data.len >= 64) serial.writeString("[PROTO] Identity announced\n");
 }
-
 fn handleIdentityQuery(p: *peer.Peer, data: []const u8) void {
-    peer.updateLastSeen(p);
-
     _ = data;
-
-    serial.writeString("[PROTO] Identity queried by peer\n");
+    peer.updateLastSeen(p);
+    serial.writeString("[PROTO] Identity queried\n");
 }
-
-// =============================================================================
-// Consensus Handlers
-// =============================================================================
-
 fn handleVote(p: *peer.Peer, data: []const u8) void {
-    peer.updateLastSeen(p);
-
     _ = data;
-
-    serial.writeString("[PROTO] Vote received from peer\n");
+    peer.updateLastSeen(p);
+    serial.writeString("[PROTO] Vote received\n");
 }
-
 fn handleProposal(p: *peer.Peer, data: []const u8) void {
-    peer.updateLastSeen(p);
-
     _ = data;
-
-    serial.writeString("[PROTO] Proposal received from peer\n");
+    peer.updateLastSeen(p);
+    serial.writeString("[PROTO] Proposal received\n");
 }
-
-// =============================================================================
-// P.3d Onion Handler
-// =============================================================================
-
 fn handleOnionRouted(p: *peer.Peer, data: []const u8) void {
     peer.updateLastSeen(p);
-
     if (data.len == 0) {
         peer.decreaseReputation(p, 1);
         return;
     }
-
-    // Saat ini onion unwrap/relay detail masih berada di layer P.3d.
-    // Handler ini memastikan packet type tidak diabaikan.
-    serial.writeString("[PROTO] Onion-routed payload received\n");
-
     peer.increaseReputation(p, 1);
 }
-
-// =============================================================================
-// P.3e Eviction Handlers
-// =============================================================================
-
 fn handleEvictionVote(p: *peer.Peer, data: []const u8) void {
     peer.updateLastSeen(p);
-
     if (data.len == 0) {
         peer.decreaseReputation(p, 2);
         return;
     }
-
-    serial.writeString("[PROTO] Eviction vote received\n");
-
     eviction.handleVoteMessage(p, data);
 }
-
 fn handleEvictionCommit(p: *peer.Peer, data: []const u8) void {
     peer.updateLastSeen(p);
-
     if (data.len == 0) {
         peer.decreaseReputation(p, 2);
         return;
     }
-
-    serial.writeString("[PROTO] Eviction commit received\n");
-
     eviction.handleCommitMessage(p, data);
 }
-
 fn handleEvictionNotice(p: *peer.Peer, data: []const u8) void {
     peer.updateLastSeen(p);
-
-    // Untuk saat ini notice diperlakukan sebagai commit-compatible informational packet.
-    // Jika nanti format notice dibuat berbeda, bisa dipisahkan di eviction.zig.
     if (data.len == 0) {
         peer.decreaseReputation(p, 1);
         return;
     }
-
-    serial.writeString("[PROTO] Eviction notice received\n");
-
-    // Safety: notice tidak langsung dieksekusi sebagai kill-switch.
-    // Commit tetap jalur resmi untuk eksekusi eviction.
     peer.increaseReputation(p, 1);
 }
 
-// =============================================================================
-// Encoding Helpers
-// =============================================================================
-
 pub fn encodeNodeInfo(info: *const NodeInfo, buffer: []u8) u32 {
-    if (buffer.len < 39) return 0;
-
+    if (buffer.len < NODE_INFO_WIRE_SIZE) return 0;
     buffer[0] = info.version;
-    buffer[1] = @intCast((info.port >> 8) & 0xFF);
-    buffer[2] = @intCast(info.port & 0xFF);
-
-    @memcpy(buffer[3..][0..32], &info.public_key);
-
-    writeU32(buffer[35..], info.capabilities);
-
-    return 39;
+    buffer[1] = @intCast(info.port >> 8);
+    buffer[2] = @intCast(info.port);
+    @memcpy(buffer[3..][0..gov_sign.PUBLIC_KEY_BLOB_BYTES], &info.public_key);
+    writeU32(buffer[3 + gov_sign.PUBLIC_KEY_BLOB_BYTES ..], info.capabilities);
+    return @intCast(NODE_INFO_WIRE_SIZE);
 }
 
-pub fn decodeNodeInfo(data: []const u8) ?NodeInfo {
-    if (data.len < 39) return null;
+pub const NODE_INFO_WIRE_SIZE: usize = 1 + 2 + gov_sign.PUBLIC_KEY_BLOB_BYTES + 4;
 
-    var public_key: [32]u8 = undefined;
-    @memcpy(&public_key, data[3..][0..32]);
-
-    return .{
-        .version = data[0],
-        .port = (@as(u16, data[1]) << 8) | @as(u16, data[2]),
-        .public_key = public_key,
-        .capabilities = readU32(data[35..]),
-    };
+pub fn decodeNodeInfoInto(data: []const u8, out: *NodeInfo) bool {
+    if (data.len < NODE_INFO_WIRE_SIZE) return false;
+    out.version = data[0];
+    out.port = (@as(u16, data[1]) << 8) | data[2];
+    @memcpy(&out.public_key, data[3..][0..gov_sign.PUBLIC_KEY_BLOB_BYTES]);
+    out.capabilities = readU32(data[3 + gov_sign.PUBLIC_KEY_BLOB_BYTES ..]);
+    return true;
 }
 
-// =============================================================================
-// Utilities
-// =============================================================================
-
+fn bytesEqual(left: []const u8, right: []const u8) bool {
+    if (left.len != right.len) return false;
+    var difference: u8 = 0;
+    for (left, right) |a, b| difference |= a ^ b;
+    return difference == 0;
+}
 fn readU32(data: []const u8) u32 {
+    if (data.len < 4) return 0;
+
     return (@as(u32, data[0]) << 24) |
         (@as(u32, data[1]) << 16) |
         (@as(u32, data[2]) << 8) |
@@ -461,19 +346,30 @@ fn readU32(data: []const u8) u32 {
 }
 
 fn readU64(data: []const u8) u64 {
-    return (@as(u64, data[0]) << 56) |
-        (@as(u64, data[1]) << 48) |
-        (@as(u64, data[2]) << 40) |
-        (@as(u64, data[3]) << 32) |
-        (@as(u64, data[4]) << 24) |
-        (@as(u64, data[5]) << 16) |
-        (@as(u64, data[6]) << 8) |
-        @as(u64, data[7]);
+    if (data.len < 8) return 0;
+
+    var value: u64 = 0;
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        value = (value << 8) | @as(u64, data[i]);
+    }
+    return value;
 }
 
-fn writeU32(buf: []u8, val: u32) void {
-    buf[0] = @intCast((val >> 24) & 0xFF);
-    buf[1] = @intCast((val >> 16) & 0xFF);
-    buf[2] = @intCast((val >> 8) & 0xFF);
-    buf[3] = @intCast(val & 0xFF);
+fn writeU32(buffer: []u8, value: u32) void {
+    if (buffer.len < 4) return;
+    buffer[0] = @truncate(value >> 24);
+    buffer[1] = @truncate(value >> 16);
+    buffer[2] = @truncate(value >> 8);
+    buffer[3] = @truncate(value);
+}
+
+fn writeU64(buffer: []u8, value: u64) void {
+    if (buffer.len < 8) return;
+
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        const shift: u6 = @intCast((7 - i) * 8);
+        buffer[i] = @truncate(value >> shift);
+    }
 }

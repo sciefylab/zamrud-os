@@ -1,6 +1,6 @@
 //! Zamrud OS - Block Structure
 //! Lightweight block for integrity ledger (NO MINING)
-//! Updated: GOV.1a audit-safe entries hashing
+//! Updated: GOV.1a audit-safe hashing + legacy header layout reservation
 
 const serial = @import("../drivers/serial/serial.zig");
 const hash = @import("../crypto/hash.zig");
@@ -11,6 +11,7 @@ const entry_mod = @import("entry.zig");
 // =============================================================================
 
 pub const BLOCK_VERSION: u32 = 1;
+pub const LEGACY_RESERVED_SIZE: usize = 64;
 pub const MAX_ENTRIES: usize = 8;
 
 // =============================================================================
@@ -24,7 +25,11 @@ pub const BlockHeader = struct {
     entries_hash: [32]u8,
     timestamp: u32,
     authority: [32]u8,
-    signature: [64]u8,
+
+    // Reserved to preserve the existing BlockHeader/CHAIN.DAT V2 binary layout.
+    // This field is not a signature and must never be interpreted or verified.
+    // It can be removed only together with an explicit persistence format bump.
+    reserved_legacy: [LEGACY_RESERVED_SIZE]u8,
 };
 
 // =============================================================================
@@ -68,8 +73,8 @@ pub const Block = struct {
         }
 
         i = 0;
-        while (i < 64) : (i += 1) {
-            static_block.header.signature[i] = 0;
+        while (i < LEGACY_RESERVED_SIZE) : (i += 1) {
+            static_block.header.reserved_legacy[i] = 0;
         }
 
         static_block_initialized = true;
@@ -222,9 +227,25 @@ pub fn test_blockchain() bool {
 
     if (blk_ptr.entry_count == 0 and blk_ptr.header.version == BLOCK_VERSION) {
         serial.writeString("    OK\n");
+
         passed += 1;
     } else {
         serial.writeString("    FAIL\n");
+        failed += 1;
+    }
+
+    // Layout compatibility: the former 64-byte signature placeholder is now
+    // explicitly reserved and must remain zero-initialized.
+    var reserved_zero = true;
+    var reserved_index: usize = 0;
+    while (reserved_index < LEGACY_RESERVED_SIZE) : (reserved_index += 1) {
+        if (blk_ptr.header.reserved_legacy[reserved_index] != 0) {
+            reserved_zero = false;
+            break;
+        }
+    }
+    if (!reserved_zero) {
+        serial.writeString("    FAIL (legacy reserved area)\n");
         failed += 1;
     }
 
