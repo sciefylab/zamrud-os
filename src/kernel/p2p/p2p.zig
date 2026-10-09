@@ -159,10 +159,27 @@ fn hasNodeIdentity() bool {
 
 /// Refresh the P2P identity after login/unlock. P2P initialization may run
 /// before the user identity session is available at boot.
+pub fn isIdentityReady() bool {
+    return initialized and
+        hasNodeIdentity() and
+        auth.isGovernanceSigningAvailable();
+}
+
 pub fn refreshIdentity() bool {
-    if (hasNodeIdentity()) return true;
+    if (!initialized) return false;
+
+    if (!auth.isGovernanceSigningAvailable()) {
+        clearIdentity();
+        return false;
+    }
+
     generateNodeIdentity();
-    return hasNodeIdentity();
+    return isIdentityReady();
+}
+
+pub fn clearIdentity() void {
+    @memset(node_public_key_bytes[0..], 0);
+    @memset(node_id[0..], 0);
 }
 
 // =============================================================================
@@ -418,7 +435,7 @@ pub fn broadcast(msg_type: message.MessageType, payload: []const u8) void {
 
     const peers = peer.getAll();
 
-    for (peers) |p| {
+    for (peers) |*p| {
         if (p.status == .connected) {
             if (peer.isBanned(p.id)) continue;
 
@@ -469,7 +486,7 @@ pub fn broadcastExcept(
 
     const peers = peer.getAll();
 
-    for (peers) |p| {
+    for (peers) |*p| {
         if (p.status != .connected) continue;
         if (peer.isBanned(p.id)) continue;
 

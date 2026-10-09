@@ -56,6 +56,8 @@ pub fn execute(args: []const u8) void {
         showSyncStatus();
     } else if (helpers.strEql(parsed.cmd, "id")) {
         showNodeId();
+    } else if (helpers.strEql(parsed.cmd, "identity")) {
+        manageIdentity(parsed.rest);
     } else if (helpers.strEql(parsed.cmd, "stats")) {
         showStats();
     } else if (helpers.strEql(parsed.cmd, "reputation")) {
@@ -102,7 +104,9 @@ fn showHelp() void {
     shell.println(" status                   Show P2P node status");
     shell.println(" start                    Start P2P node");
     shell.println(" stop                     Stop P2P node");
-    shell.println(" id                       Show node ID");
+    shell.println(" id                       Show node identity");
+    shell.println(" identity status          Show identity readiness");
+    shell.println(" identity refresh         Refresh after unlock");
     shell.println(" stats                    Show statistics");
     shell.newLine();
 
@@ -162,11 +166,20 @@ fn showStatus() void {
     shell.printInfoLine("========================================");
     shell.newLine();
 
+    const identity_ready = p2p.isIdentityReady();
+
     shell.print(" Initialized:      ");
     if (p2p.isInitialized()) {
         shell.printSuccessLine("Yes");
     } else {
         shell.printErrorLine("No");
+    }
+
+    shell.print(" Identity:        ");
+    if (identity_ready) {
+        shell.printSuccessLine("READY");
+    } else {
+        shell.printWarningLine("LOCKED");
     }
 
     shell.print(" Status:          ");
@@ -178,16 +191,28 @@ fn showStatus() void {
     }
 
     shell.print(" Node ID:         ");
-    const node_id = p2p.getNodeId();
-    printHexShort(node_id[0..8]);
-    shell.println("...");
+    if (identity_ready) {
+        const node_id = p2p.getNodeId();
+        printHexShort(node_id[0..8]);
+        shell.println("...");
+    } else {
+        shell.println("(governance identity locked)");
+    }
 
     shell.print(" Peer Count:      ");
-    helpers.printUsize(p2p.getPeerCount());
+    if (peer.isInitialized()) {
+        helpers.printUsize(p2p.getPeerCount());
+    } else {
+        shell.print("unavailable");
+    }
     shell.newLine();
 
     shell.print(" Banned Peers:    ");
-    helpers.printUsize(peer.getBannedCount());
+    if (peer.isInitialized()) {
+        helpers.printUsize(peer.getBannedCount());
+    } else {
+        shell.print("unavailable");
+    }
     shell.newLine();
 
     shell.newLine();
@@ -359,15 +384,73 @@ fn showNodeId() void {
     shell.printInfoLine("Node Identity:");
     shell.newLine();
 
-    shell.print(" Node ID:     ");
+    if (!p2p.isInitialized()) {
+        shell.printErrorLine("P2P module is not initialized");
+        shell.newLine();
+        return;
+    }
+
+    if (!p2p.isIdentityReady()) {
+        shell.print(" State:      ");
+        shell.printWarningLine("LOCKED");
+        shell.println(" Node ID:    unavailable");
+        shell.println(" Public Key: unavailable");
+        shell.println(" Signing:    unavailable");
+        shell.println(" Use 'p2p identity refresh' after governance unlock.");
+        shell.newLine();
+        return;
+    }
+
+    shell.print(" State:      ");
+    shell.printSuccessLine("READY");
+    shell.print(" Node ID:    ");
     const node_id = p2p.getNodeId();
     printHexShort(node_id[0..16]);
     shell.println("...");
-
     shell.print(" Public Key: ");
     const pub_key = p2p.getPublicKey();
     printHexShort(pub_key[0..16]);
     shell.println("...");
+    shell.print(" Signing:    ");
+    shell.printSuccessLine("AVAILABLE");
+    shell.newLine();
+}
+
+fn manageIdentity(args: []const u8) void {
+    const option = helpers.trim(args);
+    if (option.len == 0 or helpers.strEql(option, "status")) {
+        showIdentityStatus();
+        return;
+    }
+    if (helpers.strEql(option, "refresh")) {
+        if (p2p.refreshIdentity()) {
+            shell.printSuccessLine("P2P governance identity refreshed");
+        } else {
+            shell.printWarningLine("Governance signing session is locked");
+        }
+        return;
+    }
+    shell.println("Usage: p2p identity status");
+    shell.println("       p2p identity refresh");
+}
+
+fn showIdentityStatus() void {
+    shell.printInfoLine("P2P Identity Status:");
+    shell.newLine();
+    shell.print(" State:      ");
+    if (p2p.isIdentityReady()) {
+        shell.printSuccessLine("READY");
+        shell.print(" Node ID:    ");
+        const node_id = p2p.getNodeId();
+        printHexShort(node_id[0..8]);
+        shell.println("...");
+        shell.print(" Signing:    ");
+        shell.printSuccessLine("AVAILABLE");
+    } else {
+        shell.printWarningLine("LOCKED");
+        shell.println(" Node ID:    unavailable");
+        shell.println(" Signing:    unavailable");
+    }
     shell.newLine();
 }
 

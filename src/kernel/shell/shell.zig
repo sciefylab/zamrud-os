@@ -25,6 +25,8 @@ const rtc = @import("../drivers/timer/rtc.zig");
 
 const hid = @import("../drivers/usb/hid.zig");
 const audio = @import("../drivers/audio/audio.zig");
+const p2p = @import("../p2p/p2p.zig");
+const gateway = @import("../gateway/gateway.zig");
 
 // =============================================================================
 // Constants & State
@@ -164,6 +166,7 @@ pub fn run() void {
 
         setSystemKeyFromCurrentIdentity();
         loadEncryptedConfigIfNeeded();
+        activatePostLoginSecurity();
 
         shellLoop();
 
@@ -172,6 +175,7 @@ pub fn run() void {
         home_dir_len = 0;
 
         env.clearLoginVars();
+        deactivateRuntimeIdentity();
         clearSystemKey();
         auth.lock();
 
@@ -213,6 +217,48 @@ fn loadEncryptedConfigIfNeeded() void {
                 serial.writeString("[SHELL] Config load failed (may need re-save)\n");
             }
         }
+    }
+}
+
+fn activatePostLoginSecurity() void {
+    serial.writeString("[SHELL] Activating post-login security services...\n");
+
+    if (trust_ceremony.verifyGovernanceRoot()) {
+        serial.writeString("[SHELL] Governance ROOT verified\n");
+    } else {
+        serial.writeString("[SHELL] Governance ROOT verification failed; network signing remains fail-closed\n");
+    }
+
+    if (p2p.isInitialized()) {
+        if (p2p.refreshIdentity()) {
+            serial.writeString("[P2P] Governance identity refreshed\n");
+        } else {
+            serial.writeString("[P2P] Governance identity unavailable; fail-closed\n");
+        }
+    } else {
+        serial.writeString("[P2P] Module not initialized\n");
+    }
+
+    if (gateway.isInitialized()) {
+        if (gateway.refreshIdentity()) {
+            serial.writeString("[GATEWAY] Governance identity refreshed\n");
+        } else {
+            serial.writeString("[GATEWAY] Governance identity unavailable; fail-closed\n");
+        }
+    } else {
+        serial.writeString("[GATEWAY] Module not initialized\n");
+    }
+}
+
+fn deactivateRuntimeIdentity() void {
+    if (p2p.isInitialized()) {
+        p2p.clearIdentity();
+        serial.writeString("[P2P] Runtime identity locked\n");
+    }
+
+    if (gateway.isInitialized()) {
+        gateway.clearIdentity();
+        serial.writeString("[GATEWAY] Runtime identity locked\n");
     }
 }
 
@@ -763,6 +809,7 @@ pub fn logout() void {
     if (users.isInitialized() and users.isLoggedIn()) {
         users.logout();
     }
+    deactivateRuntimeIdentity();
     auth.lock();
     clearSystemKey();
     logged_in = false;

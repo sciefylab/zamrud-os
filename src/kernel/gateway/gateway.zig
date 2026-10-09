@@ -314,10 +314,27 @@ fn generateGatewayIdentity() void {
     crypto.sha256Into(&gateway_public_key, &gateway_id);
 }
 
+pub fn isIdentityReady() bool {
+    return initialized and
+        !constant_time.constantTimeIsZero32(&gateway_id) and
+        auth.isGovernanceSigningAvailable();
+}
+
 pub fn refreshIdentity() bool {
-    if (!constant_time.constantTimeIsZero32(&gateway_id)) return true;
+    if (!initialized) return false;
+
+    if (!auth.isGovernanceSigningAvailable()) {
+        clearIdentity();
+        return false;
+    }
+
     generateGatewayIdentity();
-    return !constant_time.constantTimeIsZero32(&gateway_id);
+    return isIdentityReady();
+}
+
+pub fn clearIdentity() void {
+    @memset(gateway_id[0..], 0);
+    @memset(gateway_public_key[0..], 0);
 }
 
 fn registerDefaultServices() void {
@@ -1381,6 +1398,14 @@ pub fn removeService(service_id: [32]u8) bool {
 
 pub fn getGatewayId() [32]u8 {
     return gateway_id;
+}
+
+pub fn getPublicKeyBlob() [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8 {
+    return gateway_public_key;
+}
+
+pub fn isSigningAvailable() bool {
+    return isIdentityReady();
 }
 
 pub fn printStatus() void {

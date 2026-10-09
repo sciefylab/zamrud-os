@@ -23,13 +23,15 @@ const identity_store = @import("../persist/identity_store.zig");
 const sys_encrypt = @import("../crypto/sys_encrypt.zig");
 const identity_export = @import("../identity/export.zig");
 const crypto = @import("../crypto/crypto.zig");
+const gov_sign = @import("../crypto/gov_sign.zig");
+const authority = @import("../security/authority.zig");
 const hid = @import("../drivers/usb/hid.zig");
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-const CEREMONY_VERSION: u32 = 2;
+const CEREMONY_VERSION: u32 = 3;
 const RECOVERY_PHRASE_WORDS: usize = 24;
 const MIN_PASSWORD_LEN: usize = keyring.PASSWORD_MIN_LEN;
 const MAX_PASSWORD_LEN: usize = keyring.CREDENTIAL_MAX_LEN;
@@ -42,6 +44,9 @@ const KEY_CEREMONY_TIMESTAMP = "ceremony.timestamp";
 const KEY_BOOT_PCR_BASELINE = "boot.pcr_baseline";
 const KEY_SYSTEM_OWNER = "system.owner";
 const KEY_TRUST_ANCHOR = "trust.anchor";
+const KEY_GOV_ROOT_FINGERPRINT = "governance.root_fingerprint";
+const KEY_GOV_ROOT_BACKEND = "governance.root_backend";
+const KEY_GOV_ROOT_PARAMETER = "governance.root_parameter";
 
 // =============================================================================
 // State
@@ -66,6 +71,8 @@ var verify_indices: [VERIFY_WORD_COUNT]u8 = [_]u8{0} ** VERIFY_WORD_COUNT;
 var verify_passed: bool = false;
 
 var trust_anchor_hash: [32]u8 = [_]u8{0} ** 32;
+var governance_root_fingerprint: [32]u8 = [_]u8{0} ** 32;
+var governance_root_ready: bool = false;
 
 var ceremony_just_completed_flag: bool = false;
 var returning_user_flag: bool = false;
@@ -137,7 +144,7 @@ pub fn runCeremony() bool {
     ceremony_in_progress = true;
     ceremony_step = 0;
 
-    serial.writeString("\n[TRUST_CEREMONY] Starting first-boot trust ceremony v2\n");
+    serial.writeString("\n[TRUST_CEREMONY] Starting first-boot trust ceremony v3\n");
 
     keyboard.endGracePeriod();
 
@@ -223,7 +230,7 @@ fn stepWelcome() bool {
     writeLine("    [1] Generate a master encryption key");
     writeLine("    [2] Create a 24-word recovery phrase");
     writeLine("    [3] Set up your owner identity (password-protected)");
-    writeLine("    [4] Pin boot integrity & create blockchain trust anchor");
+    writeLine("    [4] Pin boot integrity & create governance root anchor");
     setColor(.normal);
     writeLine("");
 
@@ -897,6 +904,20 @@ fn stepCreateFirstIdentity() bool {
     writeLine(" OK");
 
     setColor(.normal);
+    writeStr("  Validating ML-DSA-65 governance key...");
+    if (!validateGovernanceRoot(id.?, password_buf[0..password_len])) {
+        setColor(.error_color);
+        writeLine(" FAILED");
+        return false;
+    }
+    setColor(.success);
+    writeLine(" OK");
+    setColor(.normal);
+    writeStr("  Governance fingerprint: ");
+    printFingerprint(&governance_root_fingerprint);
+    writeLine("");
+
+    setColor(.normal);
     writeStr("  Binding master key to identity...");
 
     if (sys_encrypt.isInitialized() and !sys_encrypt.isMasterKeySet()) {
@@ -920,15 +941,15 @@ fn stepCreateFirstIdentity() bool {
     writeLine(" OK");
 
     setColor(.normal);
-    writeStr("  Saving to disk...");
+    writeStr("  Saving V5 identity to disk...");
 
-    if (identity_store.saveToDisk()) {
-        setColor(.success);
-        writeLine(" OK");
-    } else {
-        setColor(.warning);
-        writeLine(" (will retry later)");
+    if (!identity_store.saveToDisk()) {
+        setColor(.error_color);
+        writeLine(" FAILED");
+        return false;
     }
+    setColor(.success);
+    writeLine(" OK");
 
     writeLine("");
 
@@ -938,6 +959,55 @@ fn stepCreateFirstIdentity() bool {
 
     delay(1500);
     return true;
+}
+
+fn validateGovernanceRoot(id: *keyring.Identity, credential: []const u8) bool {
+    governance_root_ready = false;
+    constant_time.secureZero32(&governance_root_fingerprint);
+    if (!gov_sign.isProductionBackendAvailable()) return false;
+    if (!id.keypair.gov_sign_valid) return false;
+
+    const public_key = keyring.getGovernancePublicKey(id) orelse return false;
+    if (!public_key.valid or public_key.len != gov_sign.PUBLIC_KEY_BYTES or
+        public_key.backend != gov_sign.DEFAULT_BACKEND or
+        public_key.parameter_set != gov_sign.DEFAULT_PARAMETER_SET) return false;
+
+    var identity_private_key: [32]u8 = [_]u8{0} ** 32;
+    defer constant_time.secureZero32(&identity_private_key);
+    if (!keyring.decryptPrivateKey(id, credential, &identity_private_key)) return false;
+
+    var secret_key = gov_sign.SecretKey{};
+    defer gov_sign.clearSecretKey(&secret_key);
+    if (!keyring.decryptGovernanceSigningKeyWithPrivateKey(id, &identity_private_key, &secret_key)) return false;
+
+    const challenge = "ZAMRUD-CEREMONY-V3-ROOT-VALIDATION";
+    var signature = gov_sign.Signature{};
+    defer gov_sign.clearSignature(&signature);
+    if (!gov_sign.sign(&secret_key, gov_sign.DOMAIN_TRUST_CEREMONY, challenge, &signature)) return false;
+    if (!gov_sign.verifyBool(public_key, gov_sign.DOMAIN_TRUST_CEREMONY, challenge, &signature)) return false;
+
+    var public_blob: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8 = [_]u8{0} ** gov_sign.PUBLIC_KEY_BLOB_BYTES;
+    defer constant_time.secureZero(&public_blob);
+    const blob_len = gov_sign.serializePublicKey(public_key, &public_blob);
+    if (blob_len != gov_sign.PUBLIC_KEY_BLOB_BYTES) return false;
+    hash.sha256Into(public_blob[0..blob_len], &governance_root_fingerprint);
+    governance_root_ready = true;
+    return true;
+}
+
+fn printFingerprint(value: *const [32]u8) void {
+    const hex = "0123456789abcdef";
+    var i: usize = 0;
+    while (i < value.len) : (i += 1) {
+        const high = hex[value[i] >> 4];
+        const low = hex[value[i] & 0x0F];
+        if (terminal.isInitialized()) {
+            terminal.writeChar(high);
+            terminal.writeChar(low);
+        }
+        serial.writeChar(high);
+        serial.writeChar(low);
+    }
 }
 
 fn passwordsMatch(a: []const u8, b: []const u8) bool {
@@ -950,6 +1020,7 @@ fn passwordsMatch(a: []const u8, b: []const u8) bool {
 // =============================================================================
 
 fn stepPinBootAndComplete() bool {
+    if (!governance_root_ready) return false;
     clearScreen();
 
     writeLine("");
@@ -989,7 +1060,13 @@ fn stepPinBootAndComplete() bool {
 
     var anchor_hex: [64]u8 = undefined;
     bytesToHex(&trust_anchor_hash, &anchor_hex);
-    _ = config_store.set(KEY_TRUST_ANCHOR, anchor_hex[0..64]);
+    if (!config_store.set(KEY_TRUST_ANCHOR, anchor_hex[0..64])) return false;
+
+    var governance_hex: [64]u8 = undefined;
+    bytesToHex(&governance_root_fingerprint, &governance_hex);
+    if (!config_store.set(KEY_GOV_ROOT_FINGERPRINT, governance_hex[0..64])) return false;
+    if (!config_store.set(KEY_GOV_ROOT_BACKEND, "native_ml_dsa")) return false;
+    if (!config_store.set(KEY_GOV_ROOT_PARAMETER, "ml_dsa_65")) return false;
 
     setColor(.success);
     writeLine(" OK");
@@ -998,26 +1075,33 @@ fn stepPinBootAndComplete() bool {
     setColor(.normal);
     writeLine("  Saving trust configuration...");
 
-    _ = config_store.set(KEY_CEREMONY_COMPLETE, "true");
+    if (!config_store.set(KEY_CEREMONY_COMPLETE, "true")) return false;
 
     var ver_buf: [4]u8 = undefined;
     const ver_len = formatU32(CEREMONY_VERSION, &ver_buf);
-    _ = config_store.set(KEY_CEREMONY_VERSION, ver_buf[0..ver_len]);
+    if (!config_store.set(KEY_CEREMONY_VERSION, ver_buf[0..ver_len])) return false;
 
-    _ = config_store.set(KEY_SYSTEM_OWNER, name_buf[0..name_len]);
+    if (!config_store.set(KEY_SYSTEM_OWNER, name_buf[0..name_len])) return false;
 
     var ts_buf: [16]u8 = undefined;
     const ts_sec: u32 = @truncate(timer.getSeconds());
     const ts_len = formatU32(ts_sec, &ts_buf);
-    _ = config_store.set(KEY_CEREMONY_TIMESTAMP, ts_buf[0..ts_len]);
+    if (!config_store.set(KEY_CEREMONY_TIMESTAMP, ts_buf[0..ts_len])) return false;
 
-    if (config_store.saveToDisk()) {
-        setColor(.success);
-        writeLine("    [✓] Configuration saved");
-    } else {
-        setColor(.warning);
-        writeLine("    [-] Save to disk failed (in-memory only)");
+    if (!config_store.saveToDisk()) {
+        setColor(.error_color);
+        writeLine("    [FAIL] Configuration save failed");
+        return false;
     }
+    setColor(.success);
+    writeLine("    [✓] Configuration saved");
+
+    if (!authority.registerRootAuthority(&governance_root_fingerprint, name_buf[0..name_len])) {
+        setColor(.error_color);
+        writeLine("    [FAIL] ROOT authority registration failed");
+        return false;
+    }
+    writeLine("    [✓] Governance ROOT registered");
 
     writeLine("");
 
@@ -1420,6 +1504,8 @@ fn wipeAllBuffers() void {
     constant_time.secureZero(&derived_key);
     constant_time.secureZero(&password_buf);
     constant_time.secureZero(&name_buf);
+    constant_time.secureZero32(&governance_root_fingerprint);
+    governance_root_ready = false;
     password_len = 0;
     name_len = 0;
 }
@@ -1583,6 +1669,32 @@ pub fn getTrustAnchor() ?[]const u8 {
     return config_store.get(KEY_TRUST_ANCHOR);
 }
 
+pub fn getGovernanceRootFingerprint() ?[]const u8 {
+    return config_store.get(KEY_GOV_ROOT_FINGERPRINT);
+}
+
+pub fn verifyGovernanceRoot() bool {
+    const stored_hex = getGovernanceRootFingerprint() orelse return false;
+    const owner = keyring.getSystemOwner() orelse return false;
+    const public_key = keyring.getGovernancePublicKey(owner) orelse return false;
+    var blob: [gov_sign.PUBLIC_KEY_BLOB_BYTES]u8 = [_]u8{0} ** gov_sign.PUBLIC_KEY_BLOB_BYTES;
+    defer constant_time.secureZero(&blob);
+    const blob_len = gov_sign.serializePublicKey(public_key, &blob);
+    if (blob_len != gov_sign.PUBLIC_KEY_BLOB_BYTES) return false;
+    var calculated: [32]u8 = [_]u8{0} ** 32;
+    defer constant_time.secureZero32(&calculated);
+    hash.sha256Into(blob[0..blob_len], &calculated);
+    var stored: [32]u8 = [_]u8{0} ** 32;
+    defer constant_time.secureZero32(&stored);
+    if (!hexToBytes(stored_hex, &stored)) return false;
+    if (!constant_time.constantTimeCompare32(&stored, &calculated)) return false;
+    if (!authority.isInitialized()) authority.init();
+    if (!authority.isRootAuthority(&calculated)) {
+        if (!authority.registerRootAuthority(&calculated, owner.getName())) return false;
+    }
+    return authority.isRootAuthority(&calculated);
+}
+
 pub fn verifyTrustAnchor() bool {
     const anchor_hex = getTrustAnchor() orelse return false;
     const owner = keyring.getSystemOwner() orelse return false;
@@ -1628,6 +1740,9 @@ pub fn resetCeremony() bool {
     _ = config_store.delete(KEY_BOOT_PCR_BASELINE);
     _ = config_store.delete(KEY_SYSTEM_OWNER);
     _ = config_store.delete(KEY_TRUST_ANCHOR);
+    _ = config_store.delete(KEY_GOV_ROOT_FINGERPRINT);
+    _ = config_store.delete(KEY_GOV_ROOT_BACKEND);
+    _ = config_store.delete(KEY_GOV_ROOT_PARAMETER);
 
     // 🛡️ Explicitly set to false to make sure isFirstBoot detects it
     _ = config_store.set(KEY_CEREMONY_COMPLETE, "false");
@@ -1724,7 +1839,7 @@ fn bytesToHex(bytes: []const u8, out: []u8) void {
 
 pub fn runTests() bool {
     serial.writeString("\n========================================\n");
-    serial.writeString("  H.7 TRUST CEREMONY TESTS (v2)\n");
+    serial.writeString("  H.7 TRUST CEREMONY TESTS (v3)\n");
     serial.writeString("========================================\n\n");
 
     var passed: u32 = 0;
@@ -1802,8 +1917,8 @@ pub fn runTests() bool {
 
     serial.writeString("    - getCeremonyVersion().......... ");
     {
-        _ = config_store.set(KEY_CEREMONY_VERSION, "2");
-        if (getCeremonyVersion() == 2) {
+        _ = config_store.set(KEY_CEREMONY_VERSION, "3");
+        if (getCeremonyVersion() == 3) {
             serial.writeString("PASS\n");
             passed += 1;
         } else {

@@ -484,14 +484,14 @@ pub fn getConnected() []*Peer {
 }
 
 pub fn getConnectedCount() usize {
-    var count: usize = 0;
+    if (!initialized) return 0;
 
-    for (peers) |p| {
-        if (p.status == .connected) {
+    var count: usize = 0;
+    for (&peers) |peer_ptr| {
+        if (peer_ptr.status == .connected) {
             count += 1;
         }
     }
-
     return count;
 }
 

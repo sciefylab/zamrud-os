@@ -29,12 +29,16 @@ pub fn execute(args: []const u8) void {
         resetCeremony(true); // Konfirmasi berhasil
     } else if (strEql(args, "verify")) {
         verifyTrust();
+    } else if (strEql(args, "verify-governance")) {
+        verifyGovernance();
+    } else if (strEql(args, "fingerprint")) {
+        showGovernanceFingerprint();
     } else if (strEql(args, "test")) {
         _ = trust_ceremony.runTests();
     } else if (strEql(args, "help")) {
         showHelp();
     } else {
-        printStr("Usage: ceremony [status|start|reset|verify|test|help]\n");
+        printStr("Usage: ceremony [status|start|reset|verify|verify-governance|fingerprint|test|help]\n");
     }
 }
 
@@ -45,7 +49,9 @@ fn showHelp() void {
     printStr("  ceremony start           - Run first-boot trust ceremony wizard\n");
     printStr("  ceremony reset           - View reset warning\n");
     printStr("  ceremony reset confirm   - Delete all identity data and reset (Destructive)\n");
-    printStr("  ceremony verify          - Verify trust anchor integrity\n");
+    printStr("  ceremony verify          - Verify identity trust anchor\n");
+    printStr("  ceremony verify-governance - Verify ML-DSA governance ROOT\n");
+    printStr("  ceremony fingerprint     - Show governance ROOT fingerprint\n");
     printStr("  ceremony test            - Run H.7 ceremony tests\n");
     printStr("\n");
 }
@@ -107,6 +113,19 @@ fn showStatus() void {
         printStr("(not set)\n");
     }
 
+    printStr("  Governance ROOT: ");
+    if (trust_ceremony.getGovernanceRootFingerprint()) |fingerprint| {
+        var shown_gov: usize = 0;
+        while (shown_gov < 16 and shown_gov < fingerprint.len) : (shown_gov += 1) {
+            if (terminal.isInitialized()) terminal.writeChar(fingerprint[shown_gov]);
+            serial.writeChar(fingerprint[shown_gov]);
+        }
+        printStr("...\n");
+        printStr("  Governance OK:   ");
+        if (trust_ceremony.verifyGovernanceRoot()) printStr("YES\n") else printStr("FAILED\n");
+    } else {
+        printStr("(not set)\n");
+    }
     // H.7: Show owner identity details
     if (keyring.getSystemOwner()) |owner_id| {
         printStr("\n  Owner Identity:\n");
@@ -198,6 +217,25 @@ fn verifyTrust() void {
         printStr("  WARNING: Trust anchor mismatch! System may be compromised.\n");
     }
     printStr("\n");
+}
+
+fn verifyGovernance() void {
+    printStr("\n=== Governance ROOT Verification ===\n\n");
+    if (trust_ceremony.verifyGovernanceRoot()) {
+        printStr("  PASSED: ML-DSA governance fingerprint and ROOT authority match.\n\n");
+    } else {
+        printStr("  FAILED: governance ROOT is missing, invalid, or not registered.\n\n");
+    }
+}
+
+fn showGovernanceFingerprint() void {
+    printStr("\nGovernance ROOT fingerprint: ");
+    if (trust_ceremony.getGovernanceRootFingerprint()) |fingerprint| {
+        printStr(fingerprint);
+        printStr("\n\n");
+    } else {
+        printStr("(not set)\n\n");
+    }
 }
 
 fn resetCeremony(confirmed: bool) void {
