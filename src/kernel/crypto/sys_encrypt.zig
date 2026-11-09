@@ -177,6 +177,13 @@ pub fn setMasterKeyDirect(key: *const [KEY_SIZE]u8) void {
     }
 }
 
+fn clearTransientBuffers() void {
+    var i: usize = 0;
+    while (i < encrypt_buf.len) : (i += 1) encrypt_buf[i] = 0;
+    i = 0;
+    while (i < decrypt_buf.len) : (i += 1) decrypt_buf[i] = 0;
+}
+
 /// Clear master key (on shutdown/lock)
 pub fn clearMasterKey() void {
     var i: usize = 0;
@@ -195,6 +202,7 @@ pub fn clearMasterKey() void {
         }
     }
 
+    clearTransientBuffers();
     serial.writeString("[SYS_ENCRYPT] Master key cleared\n");
 }
 

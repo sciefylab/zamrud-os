@@ -97,6 +97,7 @@ var dirty: bool = false;
 var loaded_from_disk: bool = false;
 var auto_save: bool = true;
 var encryption_active: bool = false; // F4.2: tracks if saves are encrypted
+var runtime_locked: bool = false; // Session secret closure: persisted plaintext is unavailable
 
 // =============================================================================
 // Initialization
@@ -165,7 +166,7 @@ fn setInternal(key: []const u8, value: []const u8) void {
 // =============================================================================
 
 pub fn get(key: []const u8) ?[]const u8 {
-    if (!initialized) return null;
+    if (!initialized or runtime_locked) return null;
     var i: usize = 0;
     while (i < MAX_ENTRIES) : (i += 1) {
         if (entries[i].active and entries[i].keyEquals(key)) {
@@ -176,7 +177,7 @@ pub fn get(key: []const u8) ?[]const u8 {
 }
 
 pub fn set(key: []const u8, value: []const u8) bool {
-    if (!initialized) return false;
+    if (!initialized or runtime_locked) return false;
     if (key.len == 0 or key.len > MAX_KEY_LEN) return false;
     if (value.len > MAX_VAL_LEN) return false;
 
@@ -221,7 +222,7 @@ pub fn set(key: []const u8, value: []const u8) bool {
 }
 
 pub fn delete(key: []const u8) bool {
-    if (!initialized) return false;
+    if (!initialized or runtime_locked) return false;
     var i: usize = 0;
     while (i < MAX_ENTRIES) : (i += 1) {
         if (entries[i].active and entries[i].keyEquals(key)) {
@@ -238,6 +239,7 @@ pub fn delete(key: []const u8) bool {
 }
 
 pub fn getEntryCount() usize {
+    if (runtime_locked) return 0;
     return entry_count;
 }
 
@@ -257,8 +259,32 @@ pub fn isEncryptionActive() bool {
     return encryption_active;
 }
 
+pub fn isRuntimeLocked() bool {
+    return runtime_locked;
+}
+
+/// Wipe decrypted runtime configuration while preserving CONFIG.DAT on disk.
+/// Defaults are not re-created here, so callers cannot accidentally treat
+/// default values as an unlocked persisted configuration.
+pub fn lockRuntimeConfig() void {
+    if (!initialized) return;
+
+    var i: usize = 0;
+    while (i < MAX_ENTRIES) : (i += 1) {
+        entries[i].clear();
+    }
+
+    entry_count = 0;
+    dirty = false;
+    loaded_from_disk = false;
+    encryption_active = false;
+    runtime_locked = true;
+
+    serial.writeString("[CONFIG_STORE] Decrypted runtime config locked\n");
+}
+
 pub fn getEntryByIndex(index: usize) ?struct { key: []const u8, value: []const u8 } {
-    if (index >= MAX_ENTRIES) return null;
+    if (runtime_locked or index >= MAX_ENTRIES) return null;
     var count: usize = 0;
     var i: usize = 0;
     while (i < MAX_ENTRIES) : (i += 1) {
@@ -352,13 +378,14 @@ pub fn saveToDisk() bool {
             encryption_active = true;
             serial.writeString("[CONFIG_STORE] Encrypting config data...\n");
         } else {
-            // Encryption failed — fall back to plaintext with warning
-            serial.writeString("[CONFIG_STORE] WARNING: encryption failed, saving plaintext!\n");
-            write_data = plain_buf[0..plain_size];
-            encryption_active = false;
+            serial.writeString("[CONFIG_STORE] Encryption failed - refusing plaintext save\n");
+            return false;
         }
+    } else if (isDiskEncryptEnabled()) {
+        serial.writeString("[CONFIG_STORE] Cannot save encrypted config - no system key\n");
+        return false;
     } else {
-        // No encryption available — save plaintext
+        // Explicit compatibility mode only. Production defaults keep this off.
         write_data = plain_buf[0..plain_size];
         encryption_active = false;
     }
@@ -598,6 +625,7 @@ fn deserialize(buf: []const u8) bool {
 
     dirty = false;
     loaded_from_disk = true;
+    runtime_locked = false;
 
     serial.writeString("[CONFIG_STORE] Loaded from disk (");
     printU32(@intCast(entry_count));

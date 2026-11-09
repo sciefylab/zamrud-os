@@ -51,16 +51,22 @@ fn showStatus() void {
     helpers.printU32(smoke_tests.getTestsPassed());
     shell.newLine();
 
+    shell.print("Tests Locked: ");
+    helpers.printU32(smoke_tests.getTestsLocked());
+    shell.newLine();
+
     shell.print("Tests Failed: ");
     helpers.printU32(smoke_tests.getTestsFailed());
     shell.newLine();
 
     shell.newLine();
 
-    if (smoke_tests.allTestsPassed()) {
-        shell.println("Result: ALL PASSED");
-    } else if (smoke_tests.getTestsRun() == 0) {
+    if (smoke_tests.getTestsRun() == 0) {
         shell.println("Result: No tests run yet");
+    } else if (smoke_tests.getTestsFailed() == 0 and smoke_tests.getTestsLocked() == 0) {
+        shell.println("Result: ALL PASSED");
+    } else if (smoke_tests.getTestsFailed() == 0) {
+        shell.println("Result: SYSTEM HEALTHY / SECURELY LOCKED");
     } else {
         shell.println("Result: SOME FAILED");
     }

@@ -18,6 +18,7 @@ const heap = @import("../mm/heap.zig");
 var tests_run: u32 = 0;
 var tests_passed: u32 = 0;
 var tests_failed: u32 = 0;
+var tests_locked: u32 = 0;
 
 // =============================================================================
 // Main Entry Point - Smoke Tests
@@ -30,6 +31,7 @@ pub fn runSmokeTests() void {
     tests_run = 0;
     tests_passed = 0;
     tests_failed = 0;
+    tests_locked = 0;
 
     serial.writeString("\n");
     serial.writeString("+-------------------------------------+\n");
@@ -51,8 +53,10 @@ pub fn runSmokeTests() void {
     // Print summary
     serial.writeString("+-------------------------------------+\n");
 
-    if (tests_failed == 0) {
+    if (tests_failed == 0 and tests_locked == 0) {
         serial.writeString("| [OK] ALL TESTS PASSED              |\n");
+    } else if (tests_failed == 0) {
+        serial.writeString("| [OK] SYSTEM HEALTHY / SECURELY LOCKED |\n");
     } else {
         serial.writeString("| [!!] SOME TESTS FAILED             |\n");
     }
@@ -285,41 +289,33 @@ fn testGateway() void {
     tests_run += 1;
     serial.writeString("| Gateway             : ");
 
-    var passed = true;
-
-    // Test 1: Gateway initialized
     if (!gateway.isInitialized()) {
-        passed = false;
-    }
-
-    // Test 2: Has valid node ID (not all zeros)
-    if (passed) {
-        const node_id = gateway.getGatewayId();
-        var all_zero = true;
-        for (node_id) |b| {
-            if (b != 0) {
-                all_zero = false;
-                break;
-            }
-        }
-        if (all_zero) {
-            passed = false;
-        }
-    }
-
-    // Test 3: Can get stats without crash
-    if (passed) {
-        const gw_stats = gateway.getStats();
-        _ = gw_stats.state;
-    }
-
-    if (passed) {
-        serial.writeString("PASS    |\n");
-        tests_passed += 1;
-    } else {
         serial.writeString("FAIL    |\n");
         tests_failed += 1;
+        return;
     }
+
+    const gw_stats = gateway.getStats();
+    if (gw_stats.state == .error_state) {
+        serial.writeString("FAIL    |\n");
+        tests_failed += 1;
+        return;
+    }
+
+    if (!gateway.isIdentityReady()) {
+        serial.writeString("LOCKED  |\n");
+        tests_locked += 1;
+        return;
+    }
+
+    if (!gateway.isSigningAvailable()) {
+        serial.writeString("FAIL    |\n");
+        tests_failed += 1;
+        return;
+    }
+
+    serial.writeString("PASS    |\n");
+    tests_passed += 1;
 }
 
 // =============================================================================
@@ -372,11 +368,19 @@ pub fn getTestsFailed() u32 {
     return tests_failed;
 }
 
+pub fn getTestsLocked() u32 {
+    return tests_locked;
+}
+
 pub fn getTestsRun() u32 {
     return tests_run;
 }
 
 pub fn allTestsPassed() bool {
+    return tests_failed == 0 and tests_run > 0;
+}
+
+pub fn systemHealthy() bool {
     return tests_failed == 0 and tests_run > 0;
 }
 

@@ -34,6 +34,12 @@ pub fn execute(args: []const u8) void {
     }
 }
 
+fn requireUnlockedConfig() bool {
+    if (!config_store.isRuntimeLocked()) return true;
+    shell.printWarningLine("Config is locked. Log in again to reload encrypted CONFIG.DAT.");
+    return false;
+}
+
 fn showHelp() void {
     shell.printInfoLine("========================================");
     shell.printInfoLine("  CONFIG - Runtime Configuration");
@@ -71,6 +77,7 @@ fn showHelp() void {
 }
 
 fn showConfig(section: []const u8) void {
+    if (!requireUnlockedConfig()) return;
     if (!config_store.isInitialized()) {
         shell.printErrorLine("Config not initialized");
         return;
@@ -144,6 +151,7 @@ fn showConfig(section: []const u8) void {
 }
 
 fn getConfig(args: []const u8) void {
+    if (!requireUnlockedConfig()) return;
     const key = helpers.trim(args);
     if (key.len == 0) {
         shell.println("Usage: config get <key>");
@@ -161,6 +169,7 @@ fn getConfig(args: []const u8) void {
 }
 
 fn setConfig(args: []const u8) void {
+    if (!requireUnlockedConfig()) return;
     if (args.len == 0) {
         shell.println("Usage: config set <key> <value>");
         return;
@@ -186,6 +195,7 @@ fn setConfig(args: []const u8) void {
 }
 
 fn deleteConfig(args: []const u8) void {
+    if (!requireUnlockedConfig()) return;
     const key = helpers.trim(args);
     if (key.len == 0) {
         shell.println("Usage: config delete <key>");
@@ -202,6 +212,7 @@ fn deleteConfig(args: []const u8) void {
 }
 
 fn saveConfig() void {
+    if (!requireUnlockedConfig()) return;
     shell.printInfoLine("Saving config to disk...");
 
     if (config_store.saveToDisk()) {
@@ -225,6 +236,7 @@ fn loadConfig() void {
 }
 
 fn resetConfig() void {
+    if (!requireUnlockedConfig()) return;
     shell.printWarningLine("Resetting config to defaults...");
     config_store.init();
     shell.printSuccessLine("[OK] Config reset to defaults");

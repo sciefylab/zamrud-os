@@ -23,7 +23,11 @@ pub fn execute(args: []const u8) void {
 
     const trimmed = helpers.trim(args);
 
-    if (helpers.startsWith(trimmed, "status")) {
+    if (helpers.startsWith(trimmed, "identity status")) {
+        showGatewayIdentityStatus();
+    } else if (helpers.startsWith(trimmed, "identity refresh")) {
+        refreshGatewayIdentity();
+    } else if (helpers.startsWith(trimmed, "status")) {
         showGatewayStatus();
     } else if (helpers.startsWith(trimmed, "services")) {
         listServices();
@@ -69,12 +73,14 @@ fn showGatewayStatus() void {
     }
 
     const stats = gateway.getStats();
+    const identity_ready = gateway.isIdentityReady();
+    const signing_available = gateway.isSigningAvailable();
 
     shell.newLine();
     shell.println("=== Gateway Bridge Status ===");
     shell.newLine();
 
-    shell.print("State: ");
+    shell.print("State:       ");
     shell.println(switch (stats.state) {
         .stopped => "STOPPED",
         .starting => "STARTING",
@@ -85,10 +91,40 @@ fn showGatewayStatus() void {
         .lockdown => "LOCKDOWN",
     });
 
-    shell.print("Lockdown: ");
+    shell.print("Protocol:    ");
+    if (identity_ready) {
+        shell.println("V2");
+    } else {
+        shell.println("V2 FAIL-CLOSED");
+    }
+
+    shell.print("Identity:    ");
+    if (identity_ready) {
+        shell.printSuccessLine("READY");
+    } else {
+        shell.printWarningLine("LOCKED");
+    }
+
+    shell.print("Signing:     ");
+    if (signing_available) {
+        shell.printSuccessLine("AVAILABLE");
+    } else {
+        shell.printWarningLine("UNAVAILABLE");
+    }
+
+    shell.print("Gateway ID:  ");
+    if (identity_ready) {
+        const gateway_id = gateway.getGatewayId();
+        printHexShort(gateway_id[0..8]);
+        shell.println("...");
+    } else {
+        shell.println("unavailable");
+    }
+
+    shell.print("Lockdown:    ");
     shell.println(if (stats.in_lockdown) "YES" else "NO");
 
-    shell.print("Services: ");
+    shell.print("Services:    ");
     helpers.printUsize(stats.active_services);
     shell.print("/");
     helpers.printUsize(stats.total_services);
@@ -98,23 +134,79 @@ fn showGatewayStatus() void {
     helpers.printUsize(stats.active_connections);
     shell.newLine();
 
-    shell.print("Requests: ");
+    shell.print("Requests:    ");
     helpers.printU64(stats.total_requests);
     shell.newLine();
 
-    shell.print("Success: ");
+    shell.print("Success:     ");
     helpers.printU64(stats.total_success);
     shell.newLine();
 
-    shell.print("Denied: ");
+    shell.print("Denied:      ");
     helpers.printU64(stats.total_denied);
     shell.newLine();
 
-    shell.print("Errors: ");
+    shell.print("Errors:      ");
     helpers.printU64(stats.total_errors);
     shell.newLine();
+    shell.newLine();
+}
+
+fn showGatewayIdentityStatus() void {
+    if (!gateway.isInitialized()) {
+        shell.println("Gateway not initialized");
+        return;
+    }
 
     shell.newLine();
+    shell.println("=== Gateway Identity Status ===");
+    shell.newLine();
+
+    shell.print("State:      ");
+    if (gateway.isIdentityReady()) {
+        shell.printSuccessLine("READY");
+    } else {
+        shell.printWarningLine("LOCKED");
+    }
+
+    shell.print("Signing:    ");
+    if (gateway.isSigningAvailable()) {
+        shell.printSuccessLine("AVAILABLE");
+    } else {
+        shell.printWarningLine("UNAVAILABLE");
+    }
+
+    shell.print("Gateway ID: ");
+    if (gateway.isIdentityReady()) {
+        const gateway_id = gateway.getGatewayId();
+        printHexShort(gateway_id[0..8]);
+        shell.println("...");
+    } else {
+        shell.println("unavailable");
+    }
+
+    shell.newLine();
+}
+
+fn refreshGatewayIdentity() void {
+    if (!gateway.isInitialized()) {
+        shell.println("Gateway not initialized");
+        return;
+    }
+
+    if (gateway.refreshIdentity()) {
+        shell.printSuccessLine("Gateway governance identity refreshed");
+    } else {
+        shell.printWarningLine("Gateway governance identity unavailable; fail-closed");
+    }
+}
+
+fn printHexShort(data: []const u8) void {
+    const hex_chars = "0123456789abcdef";
+    for (data) |b| {
+        shell.printChar(hex_chars[b >> 4]);
+        shell.printChar(hex_chars[b & 0x0F]);
+    }
 }
 
 // =============================================================================
@@ -514,6 +606,8 @@ fn showHelp() void {
     shell.newLine();
     shell.println("  gateway              - Show status");
     shell.println("  gateway status       - Show detailed status");
+    shell.println("  gateway identity status  - Show runtime identity state");
+    shell.println("  gateway identity refresh - Refresh identity after login");
     shell.println("  gateway services     - List registered services");
     shell.println("  gateway connections  - List active connections");
     shell.println("  gateway stats        - Show statistics");

@@ -170,14 +170,22 @@ pub fn run() void {
 
         shellLoop();
 
+        // logout() already closes the sensitive runtime session and sets
+        // logged_in to false. Only perform fallback cleanup here when the
+        // shell loop ended through another path while the session is still
+        // marked active. This keeps cleanup fail-closed without running it
+        // twice during a normal logout.
+        if (logged_in) {
+            deactivateRuntimeIdentity();
+            config_store.lockRuntimeConfig();
+            auth.lock();
+            clearSystemKey();
+        }
+
         logged_in = false;
         current_user_len = 0;
         home_dir_len = 0;
-
         env.clearLoginVars();
-        deactivateRuntimeIdentity();
-        clearSystemKey();
-        auth.lock();
 
         if (terminal.isInitialized()) {
             terminal.clear();
@@ -810,6 +818,7 @@ pub fn logout() void {
         users.logout();
     }
     deactivateRuntimeIdentity();
+    config_store.lockRuntimeConfig();
     auth.lock();
     clearSystemKey();
     logged_in = false;
