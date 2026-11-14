@@ -27,6 +27,11 @@ const socket = @import("socket.zig");
 const dhcp = @import("dhcp.zig");
 const dns = @import("dns.zig");
 const dhcp_security = @import("dhcp_security.zig");
+const firewall = @import("firewall.zig");
+const security = @import("../security/security.zig");
+const threat_score = @import("../security/threat_score.zig");
+const blacklist = @import("../security/blacklist.zig");
+const threat_log = @import("../security/threat_log.zig");
 
 // =============================================================================
 // Unified Output - Writes to BOTH terminal and serial
@@ -142,6 +147,23 @@ fn padString(s: []const u8, width: usize) void {
 // =============================================================================
 
 pub fn runAllTests() TestResult {
+    const security_owner = security.beginTestIsolation();
+    const firewall_owner = firewall.beginTestIsolation();
+    const arp_owner = arp_defense.beginTestIsolation();
+    const dhcp_owner = dhcp_security.beginTestIsolation();
+    const score_owner = threat_score.beginTestIsolation();
+    const blacklist_owner = blacklist.beginTestIsolation();
+    const log_owner = threat_log.beginTestIsolation();
+    defer {
+        threat_log.endTestIsolation(log_owner);
+        blacklist.endTestIsolation(blacklist_owner);
+        threat_score.endTestIsolation(score_owner);
+        dhcp_security.endTestIsolation(dhcp_owner);
+        arp_defense.endTestIsolation(arp_owner);
+        firewall.endTestIsolation(firewall_owner);
+        security.endTestIsolation(security_owner);
+        writeString("[TEST-ISOLATION] Network/security runtime state restored\n");
+    }
     var result = TestResult.init();
 
     printHeader("NETWORK TEST SUITE (B1 + B2 + S.3 + H.6)");

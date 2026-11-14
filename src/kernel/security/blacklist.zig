@@ -27,6 +27,26 @@ const MAX_ENTRIES = 256;
 var entries: [MAX_ENTRIES]BlacklistEntry = undefined;
 var entry_count: usize = 0;
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_entries: @TypeOf(entries) = undefined;
+var test_backup_entry_count: @TypeOf(entry_count) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_entries = entries;
+    test_backup_entry_count = entry_count;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    entries = test_backup_entries;
+    entry_count = test_backup_entry_count;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

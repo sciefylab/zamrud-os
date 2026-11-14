@@ -24,6 +24,26 @@ pub const SecurityLevel = enum(u8) {
 var current_level: SecurityLevel = .standard;
 var initialized: bool = false;
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_current_level: @TypeOf(current_level) = undefined;
+var test_backup_initialized: @TypeOf(initialized) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_current_level = current_level;
+    test_backup_initialized = initialized;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    current_level = test_backup_current_level;
+    initialized = test_backup_initialized;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

@@ -96,6 +96,47 @@ var total_denials: u64 = 0;
 
 var initialized: bool = false;
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_subnets: @TypeOf(subnets) = undefined;
+var test_backup_subnet_count: @TypeOf(subnet_count) = undefined;
+var test_backup_rate_entries: @TypeOf(rate_entries) = undefined;
+var test_backup_rate_count: @TypeOf(rate_count) = undefined;
+var test_backup_alerts: @TypeOf(alerts) = undefined;
+var test_backup_alert_count: @TypeOf(alert_count) = undefined;
+var test_backup_total_registrations: @TypeOf(total_registrations) = undefined;
+var test_backup_total_denials: @TypeOf(total_denials) = undefined;
+var test_backup_initialized: @TypeOf(initialized) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_subnets = subnets;
+    test_backup_subnet_count = subnet_count;
+    test_backup_rate_entries = rate_entries;
+    test_backup_rate_count = rate_count;
+    test_backup_alerts = alerts;
+    test_backup_alert_count = alert_count;
+    test_backup_total_registrations = total_registrations;
+    test_backup_total_denials = total_denials;
+    test_backup_initialized = initialized;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    subnets = test_backup_subnets;
+    subnet_count = test_backup_subnet_count;
+    rate_entries = test_backup_rate_entries;
+    rate_count = test_backup_rate_count;
+    alerts = test_backup_alerts;
+    alert_count = test_backup_alert_count;
+    total_registrations = test_backup_total_registrations;
+    total_denials = test_backup_total_denials;
+    initialized = test_backup_initialized;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

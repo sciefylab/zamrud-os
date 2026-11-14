@@ -113,6 +113,53 @@ var buckets: [BUCKET_COUNT]u8 = [_]u8{0} ** BUCKET_COUNT;
 var last_rotation: u64 = 0;
 var initialized: bool = false;
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_connections: @TypeOf(connections) = undefined;
+var test_backup_connection_count: @TypeOf(connection_count) = undefined;
+var test_backup_anchor_peers: @TypeOf(anchor_peers) = undefined;
+var test_backup_anchor_count: @TypeOf(anchor_count) = undefined;
+var test_backup_pending_blocks: @TypeOf(pending_blocks) = undefined;
+var test_backup_pending_block_count: @TypeOf(pending_block_count) = undefined;
+var test_backup_alerts: @TypeOf(alerts) = undefined;
+var test_backup_alert_count: @TypeOf(alert_count) = undefined;
+var test_backup_buckets: @TypeOf(buckets) = undefined;
+var test_backup_last_rotation: @TypeOf(last_rotation) = undefined;
+var test_backup_initialized: @TypeOf(initialized) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_connections = connections;
+    test_backup_connection_count = connection_count;
+    test_backup_anchor_peers = anchor_peers;
+    test_backup_anchor_count = anchor_count;
+    test_backup_pending_blocks = pending_blocks;
+    test_backup_pending_block_count = pending_block_count;
+    test_backup_alerts = alerts;
+    test_backup_alert_count = alert_count;
+    test_backup_buckets = buckets;
+    test_backup_last_rotation = last_rotation;
+    test_backup_initialized = initialized;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    connections = test_backup_connections;
+    connection_count = test_backup_connection_count;
+    anchor_peers = test_backup_anchor_peers;
+    anchor_count = test_backup_anchor_count;
+    pending_blocks = test_backup_pending_blocks;
+    pending_block_count = test_backup_pending_block_count;
+    alerts = test_backup_alerts;
+    alert_count = test_backup_alert_count;
+    buckets = test_backup_buckets;
+    last_rotation = test_backup_last_rotation;
+    initialized = test_backup_initialized;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

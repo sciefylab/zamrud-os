@@ -167,6 +167,44 @@ pub var stats = EvictionStats{};
 var evidence_input: [256]u8 = [_]u8{0} ** 256;
 var encode_buffer: [COMMIT_PAYLOAD_SIZE]u8 = [_]u8{0} ** COMMIT_PAYLOAD_SIZE;
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_pending_records: @TypeOf(pending_records) = undefined;
+var test_backup_executed_records: @TypeOf(executed_records) = undefined;
+var test_backup_executed_count: @TypeOf(executed_count) = undefined;
+var test_backup_initialized: @TypeOf(initialized) = undefined;
+var test_backup_test_mode: @TypeOf(test_mode) = undefined;
+var test_backup_stats: @TypeOf(stats) = undefined;
+var test_backup_evidence_input: @TypeOf(evidence_input) = undefined;
+var test_backup_encode_buffer: @TypeOf(encode_buffer) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_pending_records = pending_records;
+    test_backup_executed_records = executed_records;
+    test_backup_executed_count = executed_count;
+    test_backup_initialized = initialized;
+    test_backup_test_mode = test_mode;
+    test_backup_stats = stats;
+    test_backup_evidence_input = evidence_input;
+    test_backup_encode_buffer = encode_buffer;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    pending_records = test_backup_pending_records;
+    executed_records = test_backup_executed_records;
+    executed_count = test_backup_executed_count;
+    initialized = test_backup_initialized;
+    test_mode = test_backup_test_mode;
+    stats = test_backup_stats;
+    evidence_input = test_backup_evidence_input;
+    encode_buffer = test_backup_encode_buffer;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

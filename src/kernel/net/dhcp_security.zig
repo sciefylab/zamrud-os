@@ -144,6 +144,53 @@ var rate_window_offers: u8 = 0;
 
 var initialized: bool = false;
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_config: @TypeOf(config) = undefined;
+var test_backup_trusted_server: @TypeOf(trusted_server) = undefined;
+var test_backup_known_servers: @TypeOf(known_servers) = undefined;
+var test_backup_known_server_count: @TypeOf(known_server_count) = undefined;
+var test_backup_static_fallback: @TypeOf(static_fallback) = undefined;
+var test_backup_stats: @TypeOf(stats) = undefined;
+var test_backup_events: @TypeOf(events) = undefined;
+var test_backup_event_count: @TypeOf(event_count) = undefined;
+var test_backup_rate_window_count: @TypeOf(rate_window_count) = undefined;
+var test_backup_rate_window_offers: @TypeOf(rate_window_offers) = undefined;
+var test_backup_initialized: @TypeOf(initialized) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_config = config;
+    test_backup_trusted_server = trusted_server;
+    test_backup_known_servers = known_servers;
+    test_backup_known_server_count = known_server_count;
+    test_backup_static_fallback = static_fallback;
+    test_backup_stats = stats;
+    test_backup_events = events;
+    test_backup_event_count = event_count;
+    test_backup_rate_window_count = rate_window_count;
+    test_backup_rate_window_offers = rate_window_offers;
+    test_backup_initialized = initialized;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    config = test_backup_config;
+    trusted_server = test_backup_trusted_server;
+    known_servers = test_backup_known_servers;
+    known_server_count = test_backup_known_server_count;
+    static_fallback = test_backup_static_fallback;
+    stats = test_backup_stats;
+    events = test_backup_events;
+    event_count = test_backup_event_count;
+    rate_window_count = test_backup_rate_window_count;
+    rate_window_offers = test_backup_rate_window_offers;
+    initialized = test_backup_initialized;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

@@ -106,6 +106,35 @@ var inbound_cache: [MAX_PEERS]*Peer = undefined;
 var outbound_cache: [MAX_PEERS]*Peer = undefined;
 var anchor_cache: [MAX_PEERS]*Peer = undefined;
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_peers: @TypeOf(peers) = undefined;
+var test_backup_peer_count: @TypeOf(peer_count) = undefined;
+var test_backup_initialized: @TypeOf(initialized) = undefined;
+var test_backup_banned_ids: @TypeOf(banned_ids) = undefined;
+var test_backup_banned_count: @TypeOf(banned_count) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_peers = peers;
+    test_backup_peer_count = peer_count;
+    test_backup_initialized = initialized;
+    test_backup_banned_ids = banned_ids;
+    test_backup_banned_count = banned_count;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    peers = test_backup_peers;
+    peer_count = test_backup_peer_count;
+    initialized = test_backup_initialized;
+    banned_ids = test_backup_banned_ids;
+    banned_count = test_backup_banned_count;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

@@ -135,6 +135,38 @@ pub var stats = AuthorityStats{};
 
 var initialized: bool = false;
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_authorities: @TypeOf(authorities) = undefined;
+var test_backup_authority_count: @TypeOf(authority_count) = undefined;
+var test_backup_revoked_ids: @TypeOf(revoked_ids) = undefined;
+var test_backup_revoked_count: @TypeOf(revoked_count) = undefined;
+var test_backup_stats: @TypeOf(stats) = undefined;
+var test_backup_initialized: @TypeOf(initialized) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_authorities = authorities;
+    test_backup_authority_count = authority_count;
+    test_backup_revoked_ids = revoked_ids;
+    test_backup_revoked_count = revoked_count;
+    test_backup_stats = stats;
+    test_backup_initialized = initialized;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    authorities = test_backup_authorities;
+    authority_count = test_backup_authority_count;
+    revoked_ids = test_backup_revoked_ids;
+    revoked_count = test_backup_revoked_count;
+    stats = test_backup_stats;
+    initialized = test_backup_initialized;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

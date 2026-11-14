@@ -182,6 +182,35 @@ pub var stats = ThreatStats{};
 var initialized: bool = false;
 var last_decay_time: u64 = 0;
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_entries: @TypeOf(entries) = undefined;
+var test_backup_entry_count: @TypeOf(entry_count) = undefined;
+var test_backup_stats: @TypeOf(stats) = undefined;
+var test_backup_initialized: @TypeOf(initialized) = undefined;
+var test_backup_last_decay_time: @TypeOf(last_decay_time) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_entries = entries;
+    test_backup_entry_count = entry_count;
+    test_backup_stats = stats;
+    test_backup_initialized = initialized;
+    test_backup_last_decay_time = last_decay_time;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    entries = test_backup_entries;
+    entry_count = test_backup_entry_count;
+    stats = test_backup_stats;
+    initialized = test_backup_initialized;
+    last_decay_time = test_backup_last_decay_time;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

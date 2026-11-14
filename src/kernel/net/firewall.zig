@@ -230,6 +230,65 @@ var p3e_test_mode: bool = false;
 // Initialization
 // ============================================================================
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_config: @TypeOf(config) = undefined;
+var test_backup_state: @TypeOf(state) = undefined;
+var test_backup_stats: @TypeOf(stats) = undefined;
+var test_backup_rules: @TypeOf(rules) = undefined;
+var test_backup_rule_count: @TypeOf(rule_count) = undefined;
+var test_backup_rules_initialized: @TypeOf(rules_initialized) = undefined;
+var test_backup_connections: @TypeOf(connections) = undefined;
+var test_backup_connection_count: @TypeOf(connection_count) = undefined;
+var test_backup_rate_limits: @TypeOf(rate_limits) = undefined;
+var test_backup_rate_limit_count: @TypeOf(rate_limit_count) = undefined;
+var test_backup_blacklist: @TypeOf(blacklist) = undefined;
+var test_backup_blacklist_count: @TypeOf(blacklist_count) = undefined;
+var test_backup_scan_trackers: @TypeOf(scan_trackers) = undefined;
+var test_backup_scan_tracker_count: @TypeOf(scan_tracker_count) = undefined;
+var test_backup_p3e_test_mode: @TypeOf(p3e_test_mode) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_config = config;
+    test_backup_state = state;
+    test_backup_stats = stats;
+    test_backup_rules = rules;
+    test_backup_rule_count = rule_count;
+    test_backup_rules_initialized = rules_initialized;
+    test_backup_connections = connections;
+    test_backup_connection_count = connection_count;
+    test_backup_rate_limits = rate_limits;
+    test_backup_rate_limit_count = rate_limit_count;
+    test_backup_blacklist = blacklist;
+    test_backup_blacklist_count = blacklist_count;
+    test_backup_scan_trackers = scan_trackers;
+    test_backup_scan_tracker_count = scan_tracker_count;
+    test_backup_p3e_test_mode = p3e_test_mode;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    config = test_backup_config;
+    state = test_backup_state;
+    stats = test_backup_stats;
+    rules = test_backup_rules;
+    rule_count = test_backup_rule_count;
+    rules_initialized = test_backup_rules_initialized;
+    connections = test_backup_connections;
+    connection_count = test_backup_connection_count;
+    rate_limits = test_backup_rate_limits;
+    rate_limit_count = test_backup_rate_limit_count;
+    blacklist = test_backup_blacklist;
+    blacklist_count = test_backup_blacklist_count;
+    scan_trackers = test_backup_scan_trackers;
+    scan_tracker_count = test_backup_scan_tracker_count;
+    p3e_test_mode = test_backup_p3e_test_mode;
+    test_isolation_active = false;
+}
+
 pub fn init() void {
     serial.writeString("\n[FIREWALL] ");
     printLine(40);

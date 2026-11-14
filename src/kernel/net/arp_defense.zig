@@ -223,6 +223,65 @@ pub const ArpDefenseStats = struct {
 
 pub var stats = ArpDefenseStats{};
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_config: @TypeOf(config) = undefined;
+var test_backup_trusted_bindings: @TypeOf(trusted_bindings) = undefined;
+var test_backup_binding_count: @TypeOf(binding_count) = undefined;
+var test_backup_arp_v2_nonces: @TypeOf(arp_v2_nonces) = undefined;
+var test_backup_arp_v2_nonce_cursor: @TypeOf(arp_v2_nonce_cursor) = undefined;
+var test_backup_arp_v2_signing_input: @TypeOf(arp_v2_signing_input) = undefined;
+var test_backup_arp_v2_public_key: @TypeOf(arp_v2_public_key) = undefined;
+var test_backup_arp_v2_signature: @TypeOf(arp_v2_signature) = undefined;
+var test_backup_arp_cache: @TypeOf(arp_cache) = undefined;
+var test_backup_arp_cache_count: @TypeOf(arp_cache_count) = undefined;
+var test_backup_rate_limits: @TypeOf(rate_limits) = undefined;
+var test_backup_rate_limit_count: @TypeOf(rate_limit_count) = undefined;
+var test_backup_event_log: @TypeOf(event_log) = undefined;
+var test_backup_event_count: @TypeOf(event_count) = undefined;
+var test_backup_stats: @TypeOf(stats) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_config = config;
+    test_backup_trusted_bindings = trusted_bindings;
+    test_backup_binding_count = binding_count;
+    test_backup_arp_v2_nonces = arp_v2_nonces;
+    test_backup_arp_v2_nonce_cursor = arp_v2_nonce_cursor;
+    test_backup_arp_v2_signing_input = arp_v2_signing_input;
+    test_backup_arp_v2_public_key = arp_v2_public_key;
+    test_backup_arp_v2_signature = arp_v2_signature;
+    test_backup_arp_cache = arp_cache;
+    test_backup_arp_cache_count = arp_cache_count;
+    test_backup_rate_limits = rate_limits;
+    test_backup_rate_limit_count = rate_limit_count;
+    test_backup_event_log = event_log;
+    test_backup_event_count = event_count;
+    test_backup_stats = stats;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    config = test_backup_config;
+    trusted_bindings = test_backup_trusted_bindings;
+    binding_count = test_backup_binding_count;
+    arp_v2_nonces = test_backup_arp_v2_nonces;
+    arp_v2_nonce_cursor = test_backup_arp_v2_nonce_cursor;
+    arp_v2_signing_input = test_backup_arp_v2_signing_input;
+    arp_v2_public_key = test_backup_arp_v2_public_key;
+    arp_v2_signature = test_backup_arp_v2_signature;
+    arp_cache = test_backup_arp_cache;
+    arp_cache_count = test_backup_arp_cache_count;
+    rate_limits = test_backup_rate_limits;
+    rate_limit_count = test_backup_rate_limit_count;
+    event_log = test_backup_event_log;
+    event_count = test_backup_event_count;
+    stats = test_backup_stats;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

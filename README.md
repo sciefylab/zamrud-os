@@ -4,7 +4,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  ZAMRUD OS - GLOBAL PROJECT STATUS                              │
 │  "Security = Identity × Integrity × Isolation × Blockchain"     │
-│  Last Updated: Ceremony V3 + Runtime Identity VERIFIED ✅       │
+│  Last Updated: Session Secret + Test-State Isolation VERIFIED ✅│
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
@@ -42,6 +42,10 @@
 │  Stateful regression verified:                                 │
 │  identity → p2p → gateway → network → chain → ZAM → security    │
 │                                                                 │
+│  Test-state restoration verified:                              │
+│  P2P tests → production state restored                         │
+│  Network tests → security state restored                       │
+│                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
@@ -63,6 +67,9 @@
 │  STAGE SHELL: Security Commands              ✅ UPDATED         │
 │  STAGE PQSIG: ML-DSA-65 Signature Backend    ✅ COMPLETE        │
 │  STAGE CEREMONY: Governance Root Ceremony    ✅ V3 COMPLETE     │
+│  STAGE RUNTIME-ID: Runtime Identity Closure  ✅ COMPLETE        │
+│  STAGE SESSION: Session Secret Closure       ✅ COMPLETE        │
+│  STAGE TEST-ISO: Test-State Isolation        ✅ COMPLETE        │
 │  STAGE GOV.1: Governance Audit               ✅ COMPLETE        │
 │  STAGE GOV.2: Signed Governance Actions      🔄 IN PROGRESS     │
 │  STAGE CRYPTO-U: Signature Unification       ✅ COMPLETE        │
@@ -110,9 +117,12 @@
 │  ✅ Mutation and protocol-downgrade rejection                 │
 │  ✅ Stack-safe public-key/signature workspaces                │
 │  ✅ Post-login runtime identity activation                    │
-│  ✅ P2P identity clear/refresh lifecycle                      │
-│  ✅ Gateway identity clear/refresh lifecycle                  │
-│  ✅ Security-test state isolation                            │
+│  ✅ P2P and Gateway identity lifecycle                        │
+│  ✅ Decrypted configuration wiped on logout                   │
+│  ✅ Encrypted CONFIG.DAT reloaded after relogin               │
+│  ✅ System crypto transient buffers wiped                     │
+│  ✅ P2P production state restored after tests                 │
+│  ✅ Network/security state restored after tests               │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -171,10 +181,12 @@
 │  ⬚ Register current disk through an authorized lifecycle flow. │
 │                                                                 │
 │  Planned hardening:                                             │
-│  ⬚ AEAD protection for sensitive key containers                │
-│  ⬚ Versioned persistence migration                             │
-│  ⬚ Rollback-safe container replacement                         │
+│  ⬚ Authorized disk-registration command                       │
+│  ⬚ Governance approval and physical confirmation              │
+│  ⬚ Persistent drive-binding checkpoint                        │
 │  ⬚ Recovery policy for legitimate hardware replacement         │
+│  ⬚ AEAD protection for sensitive key containers                │
+│  ⬚ Versioned and rollback-safe storage migration               │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -200,11 +212,25 @@
 │  ├── Binary-registration test made idempotent                  │
 │  └── Caller security level restored after testing              │
 │                                                                 │
-│  Remaining test-state isolation:                               │
-│  ⬚ Isolate ARP flood and threat-score state in ntest           │
-│  ⬚ Restore pre-test security level after ntest                 │
-│  ⬚ Isolate synthetic authority registry in P2P tests           │
-│  ⬚ Reconstruct production ROOT after authority tests           │
+│  Network test-state isolation:                                 │
+│  ├── Security level restored                                  │
+│  ├── Firewall configuration and state restored                │
+│  ├── Firewall rules and counters restored                     │
+│  ├── Connection tracking restored                             │
+│  ├── Internal firewall blacklist restored                     │
+│  ├── Security blacklist restored                              │
+│  ├── Threat-score table restored                              │
+│  ├── Threat log restored                                      │
+│  ├── ARP bindings, cache and replay state restored            │
+│  └── DHCP trusted-server and fallback state restored          │
+│                                                                 │
+│  Latest restored production baseline:                          │
+│  ├── Security level: STANDARD                                 │
+│  ├── Firewall state: ENFORCING                                │
+│  ├── Firewall rules: 8                                        │
+│  ├── Blacklist entries: 0                                     │
+│  ├── Threat log entries: 0                                    │
+│  └── Production ROOT authorities: 1                           │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -229,6 +255,18 @@
 │  ✅ Firewall network kill-switch                             │
 │  ✅ P2P status stack-copy page fault fixed                   │
 │  ✅ Peer counters use stack-safe access                      │
+│                                                                 │
+│  P2P test-state isolation:                                    │
+│  ├── Authority registry restored                              │
+│  ├── Production ROOT preserved                                │
+│  ├── Reputation table restored                                │
+│  ├── Sybil counters and alerts restored                       │
+│  ├── Eclipse connections and alerts restored                  │
+│  ├── Peer and ban state restored                              │
+│  ├── Discovery cache restored                                 │
+│  ├── Eviction records and statistics restored                 │
+│  ├── Firewall state restored                                  │
+│  └── Threat state restored                                    │
 │                                                                 │
 │  Core Trust Flow:                                              │
 │  security/authority.zig  = authority source-of-truth           │
@@ -285,6 +323,9 @@
 │  ├── Secret metadata preservation fixed                        │
 │  ├── Login/session restoration verified                        │
 │  ├── Session public-key snapshot verified                      │
+│  ├── Decrypted CONFIG.DAT state wiped on logout                │
+│  ├── CONFIG.DAT reloaded after login                           │
+│  ├── System crypto transient buffers wiped                     │
 │  └── AEAD authenticated-container upgrade pending              │
 │                                                                 │
 │  Note:                                                         │
@@ -311,7 +352,8 @@
 │  ✅ Governance session unlock during login                   │
 │  ✅ Runtime ROOT authority reconstruction                    │
 │  ✅ Exactly one production ROOT after reboot                 │
-│  ✅ Governance ROOT verification after reboot                │
+│  ✅ Exactly one production ROOT after P2P tests              │
+│  ✅ Governance ROOT verification after reboot/tests          │
 │                                                                 │
 │  Production Governance ROOT fingerprint:                       │
 │  4fc8450b5b320b9380fa6bb7a63ece9878e3c413b919455979f11b7d75df5eb9
@@ -327,7 +369,7 @@
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ═══════════════════════════════════════════════════════════    │
-│  RUNTIME IDENTITY LIFECYCLE STATUS                              │
+│  RUNTIME IDENTITY & SESSION SECRET STATUS                       │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
 │  ✅ Governance signing session opens after password login      │
@@ -337,12 +379,16 @@
 │  ✅ P2P identity refreshed automatically                       │
 │  ✅ Gateway identity refreshed automatically                   │
 │  ✅ P2P Node ID available before first status command          │
-│  ✅ P2P public-key blob available after login                  │
-│  ✅ P2P signing state reports AVAILABLE                        │
-│  ✅ P2P status is read-only                                   │
-│  ✅ Explicit P2P identity refresh command                     │
-│  ✅ Runtime identity cleared on logout                        │
-│  ✅ Runtime identity can be reconstructed on next login       │
+│  ✅ P2P and Gateway signing availability visible              │
+│  ✅ Explicit P2P/Gateway identity refresh commands            │
+│  ✅ Runtime identities cleared on logout                      │
+│  ✅ Auth session keys wiped on logout                         │
+│  ✅ Decrypted runtime config wiped on logout                  │
+│  ✅ Runtime config locked after logout                        │
+│  ✅ System master key and transient buffers wiped             │
+│  ✅ CONFIG.DAT reloaded after relogin                         │
+│  ✅ Runtime identities reconstructed after relogin            │
+│  ✅ Duplicate logout cleanup removed                          │
 │                                                                 │
 │  Runtime activation flow:                                      │
 │                                                                 │
@@ -369,7 +415,23 @@
 │               ▼                                                 │
 │         Shell prompt active                                    │
 │                                                                 │
-│  Current Node ID:                                               │
+│  Logout closure flow:                                          │
+│                                                                 │
+│  P2P identity lock                                             │
+│               │                                                 │
+│               ▼                                                 │
+│  Gateway identity lock                                         │
+│               │                                                 │
+│               ▼                                                 │
+│  Decrypted configuration lock                                  │
+│               │                                                 │
+│               ▼                                                 │
+│  Governance/auth session wipe                                  │
+│               │                                                 │
+│               ▼                                                 │
+│  System master-key and transient-buffer wipe                    │
+│                                                                 │
+│  Current Node/Gateway ID:                                      │
 │  4fc8450b5b320b9380fa6bb7a63ece9878e3c413b919455979f11b7d75df5eb9
 │                                                                 │
 │  Current Node ID policy:                                       │
@@ -404,6 +466,7 @@
 │  ✅ Explicit identity status and refresh commands            │
 │  ✅ P2P listener active on TCP port 27777                     │
 │  ✅ Fail-closed start without governance identity             │
+│  ✅ Production state restored after full P2P test             │
 │                                                                 │
 │  Current single-node topology:                                 │
 │  ├── Node identity READY                                      │
@@ -435,21 +498,23 @@
 │  ✅ Automatic identity refresh after production login        │
 │  ✅ Gateway runtime identity clear/refresh lifecycle         │
 │  ✅ Gateway identity remains fail-closed before login        │
+│  ✅ Protocol V2 displayed in Gateway status                  │
+│  ✅ Gateway identity readiness displayed                     │
+│  ✅ Gateway signing availability displayed                   │
+│  ✅ Gateway ID fingerprint displayed                         │
+│  ✅ Pre-login Gateway reported as LOCKED                     │
 │                                                                 │
 │  Current runtime state:                                       │
 │  ├── Gateway state RUNNING                                    │
-│  ├── Governance identity refreshed                            │
-│  ├── Governance signing session available                     │
+│  ├── Protocol V2                                              │
+│  ├── Governance identity READY                               │
+│  ├── Governance signing AVAILABLE                            │
 │  ├── Lockdown disabled                                        │
 │  └── No services currently registered                         │
 │                                                                 │
 │  Remaining operational target:                                │
-│  ⬚ Display Gateway protocol version in status                 │
-│  ⬚ Display Gateway identity readiness in status              │
-│  ⬚ Display Gateway signing state in status                   │
-│  ⬚ Display Gateway ID fingerprint in status                  │
 │  ⬚ Add positive signed-response integration command          │
-│  ⬚ Distinguish LOCKED from FAILED in boot smoke              │
+│  ⬚ Add end-to-end registered service request test            │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -469,15 +534,59 @@
 │  ✅ Legacy 32-byte key rejection                            │
 │  ✅ Unsigned V2 rejection                                   │
 │  ✅ Positive ML-DSA signing path verified                   │
+│  ✅ ARP state restored after ntest                          │
+│  ✅ Replay nonce table restored after ntest                 │
+│  ✅ ARP threat-score effects isolated                       │
+│  ✅ Synthetic blacklist entries removed                     │
 │                                                                 │
 │  Fail-closed behavior:                                         │
 │  Without a GOV session, positive signing is skipped while      │
 │  unsigned and malformed authenticated traffic remains rejected.│
 │                                                                 │
-│  Test hygiene remaining:                                      │
-│  ⬚ Isolate ARP threat-score state inside ntest                │
-│  ⬚ Restore production security level after ntest              │
-│  ⬚ Remove synthetic blacklist entries after ntest             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ═══════════════════════════════════════════════════════════    │
+│  TEST-STATE ISOLATION STATUS                                   │
+│  ═══════════════════════════════════════════════════════════    │
+│                                                                 │
+│  P2P test isolation:                                           │
+│  ✅ Authority registry snapshot/restore                       │
+│  ✅ Reputation state snapshot/restore                        │
+│  ✅ Sybil state snapshot/restore                             │
+│  ✅ Eclipse state snapshot/restore                           │
+│  ✅ Peer table and ban-list snapshot/restore                 │
+│  ✅ Discovery cache snapshot/restore                         │
+│  ✅ Eviction records and statistics snapshot/restore         │
+│  ✅ Firewall and threat state snapshot/restore               │
+│  ✅ Production Governance ROOT preserved                     │
+│                                                                 │
+│  Network/security test isolation:                              │
+│  ✅ Security-level snapshot/restore                           │
+│  ✅ Firewall state/config/rules snapshot/restore              │
+│  ✅ Connection and rate-limit state snapshot/restore          │
+│  ✅ Firewall blacklist snapshot/restore                       │
+│  ✅ Security blacklist snapshot/restore                       │
+│  ✅ Threat-score table snapshot/restore                       │
+│  ✅ Threat-log snapshot/restore                               │
+│  ✅ ARP bindings/cache/events/nonces snapshot/restore         │
+│  ✅ DHCP trusted-server/fallback snapshot/restore             │
+│                                                                 │
+│  Verified post-test invariants:                                │
+│  ├── Security level remains STANDARD                          │
+│  ├── Firewall remains ENFORCING                               │
+│  ├── Firewall rules remain 8                                  │
+│  ├── Blacklist remains empty                                  │
+│  ├── Threat log remains empty                                 │
+│  ├── Authority count remains 1                                │
+│  ├── Production ROOT remains 1                                │
+│  ├── Validator/Member/Guest counts remain 0                   │
+│  ├── Peer and banned-peer counts remain unchanged             │
+│  ├── Sybil/Eclipse alerts remain unchanged                    │
+│  └── Governance ROOT verification remains PASS                │
+│                                                                 │
+│  Runtime restore markers:                                      │
+│  [OK] P2P production runtime state restored                    │
+│  [TEST-ISOLATION] Network/security runtime state restored      │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -538,13 +647,16 @@
 │  ✅ Authority status/list/revoked/stats                       │
 │  ✅ Chain audit/latest/checkpoint/restore                     │
 │  ✅ Gateway and gw wrapper                                   │
+│  ✅ Gateway identity status/refresh                          │
 │  ✅ Ceremony V3 commands                                     │
 │  ✅ Governance ROOT verification command                     │
 │  ✅ Governance fingerprint command                           │
-│  ✅ P2P identity status command                              │
-│  ✅ P2P identity refresh command                             │
+│  ✅ P2P identity status/refresh                              │
 │  ✅ P2P Node ID visibility                                  │
-│  ✅ Security-test isolation                                 │
+│  ✅ Config lock enforcement                                 │
+│  ✅ Smoke PASS/LOCKED/FAIL semantics                        │
+│  ✅ P2P test-state isolation                                │
+│  ✅ Network/security test-state isolation                   │
 │                                                                 │
 │  Notes:                                                        │
 │  - Commands remain visibility/control surfaces only.           │
@@ -552,7 +664,7 @@
 │  - No new ledger database was created.                         │
 │  - Authority reads from security/authority.zig.                │
 │  - Audit reads from chain/ledger.zig.                           │
-│  - P2P status no longer activates identity implicitly.         │
+│  - Status commands do not activate identity implicitly.        │
 │                                                                 │
 │  Identity command extension:                                  │
 │  ⬚ identity gov-key status                                   │
@@ -642,7 +754,8 @@
 │  ├── Sign/verify and domain separation                        │
 │  ├── Session keypair consistency                              │
 │  ├── Runtime authority reconstruction                         │
-│  └── P2P/Gateway/ARP integration                              │
+│  ├── P2P/Gateway/ARP integration                              │
+│  └── Isolated governance/security test environment            │
 │                                                                 │
 │  GOV.2 remaining target:                                      │
 │  ⬚ Canonical governance action envelope                      │
@@ -736,37 +849,39 @@
 │  SECURITY RATING                                               │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  Timing Attacks:         ⭐⭐⭐⭐⭐   ← H.1 FIXED                 │
-│  RNG Quality:            ⭐⭐⭐⭐⭐   ← H.2 FIXED                 │
-│  Signature Integrity:    ⭐⭐⭐⭐⭐   ← ACVP KAT PASS             │
-│  Memory Cleanup:         ⭐⭐⭐⭐⭐   ← H.9 FIXED                 │
-│  Sybil Resistance:       ⭐⭐⭐⭐⭐   ← H.3 FIXED                 │
-│  Eclipse Defense:        ⭐⭐⭐⭐⭐   ← H.4 ACTIVE                │
-│  Boot Integrity:         ⭐⭐⭐⭐⭐   ← H.5 FIXED                 │
-│  DHCP Security:          ⭐⭐⭐⭐⭐   ← H.6 FIXED                 │
-│  Identity System:        ⭐⭐⭐⭐⭐   ← V5 + CEREMONY V3          │
-│  Threat Detection:       ⭐⭐⭐⭐⭐   ← H.8 FIXED                 │
-│  Anti-Quantum KEM:       ⭐⭐⭐⭐⭐   ← H.10 INTEGRATED           │
-│  Secret-Key Protection:  ⭐⭐⭐⭐☆   ← AEAD PENDING               │
-│  Session Encryption:     ⭐⭐⭐⭐☆   ← KDF + AEAD PENDING         │
-│  App Signing:            ⭐⭐⭐⭐⭐   ← ML-DSA ACTIVE              │
-│  P2P Authentication:     ⭐⭐⭐⭐⭐   ← PROTOCOL V2 ACTIVE         │
-│  P2P Runtime Identity:    ⭐⭐⭐⭐⭐   ← LOGIN REFRESH ACTIVE       │
-│  Gateway Authentication: ⭐⭐⭐⭐⭐   ← GATEWAY V2 ACTIVE          │
-│  Gateway Runtime Identity:⭐⭐⭐⭐⭐   ← LOGIN REFRESH ACTIVE       │
-│  ARP Authentication:     ⭐⭐⭐⭐⭐   ← ARP DEFENSE V2 ACTIVE      │
-│  Hardware Sovereignty:   ⭐⭐⭐⭐☆   ← DISK REGISTRATION PENDING  │
-│  Authority Governance:   ⭐⭐⭐⭐⭐   ← SOURCE-OF-TRUTH         ✅│
-│  Governance ROOT:        ⭐⭐⭐⭐⭐   ← CEREMONY V3 VERIFIED    ✅│
-│  Chain PoA Adapter:      ⭐⭐⭐⭐⭐   ← NO DOUBLE AUTHORITY      ✅│
-│  Network Kill-Switch:    ⭐⭐⭐⭐⭐   ← FIREWALL ENFORCED       ✅│
-│  Governance Audit:       ⭐⭐⭐⭐⭐   ← GOV.1b AUDIT            ✅│
-│  Signed GOV Backend:     ⭐⭐⭐⭐⭐   ← ML-DSA OPERATIONAL       ✅│
-│  Signed GOV Actions:     ⭐⭐⭐⭐☆   ← ACTION INTEGRATION NEXT    │
-│  Lightweight Chain:      ⭐⭐⭐⭐⭐   ← RING + HASH FOLDING      ✅│
+│  Timing Attacks:          ⭐⭐⭐⭐⭐   ← H.1 FIXED                │
+│  RNG Quality:             ⭐⭐⭐⭐⭐   ← H.2 FIXED                │
+│  Signature Integrity:     ⭐⭐⭐⭐⭐   ← ACVP KAT PASS            │
+│  Memory Cleanup:          ⭐⭐⭐⭐⭐   ← H.9 FIXED                │
+│  Session Secret Closure:  ⭐⭐⭐⭐⭐   ← CONFIG/KEY WIPE VERIFIED │
+│  Sybil Resistance:        ⭐⭐⭐⭐⭐   ← H.3 FIXED                │
+│  Eclipse Defense:         ⭐⭐⭐⭐⭐   ← H.4 ACTIVE               │
+│  Boot Integrity:          ⭐⭐⭐⭐⭐   ← H.5 FIXED                │
+│  DHCP Security:           ⭐⭐⭐⭐⭐   ← H.6 FIXED                │
+│  Identity System:         ⭐⭐⭐⭐⭐   ← V5 + CEREMONY V3         │
+│  Threat Detection:        ⭐⭐⭐⭐⭐   ← H.8 FIXED                │
+│  Test-State Isolation:    ⭐⭐⭐⭐⭐   ← P2P/NETWORK VERIFIED     │
+│  Anti-Quantum KEM:        ⭐⭐⭐⭐⭐   ← H.10 INTEGRATED          │
+│  Secret-Key Protection:   ⭐⭐⭐⭐☆   ← AEAD PENDING              │
+│  Session Encryption:      ⭐⭐⭐⭐☆   ← KDF + AEAD PENDING        │
+│  App Signing:             ⭐⭐⭐⭐⭐   ← ML-DSA ACTIVE             │
+│  P2P Authentication:      ⭐⭐⭐⭐⭐   ← PROTOCOL V2 ACTIVE        │
+│  P2P Runtime Identity:     ⭐⭐⭐⭐⭐   ← LOGIN REFRESH ACTIVE      │
+│  Gateway Authentication:  ⭐⭐⭐⭐⭐   ← GATEWAY V2 ACTIVE         │
+│  Gateway Runtime Identity:⭐⭐⭐⭐⭐   ← LOGIN REFRESH ACTIVE      │
+│  ARP Authentication:      ⭐⭐⭐⭐⭐   ← ARP DEFENSE V2 ACTIVE     │
+│  Hardware Sovereignty:    ⭐⭐⭐⭐☆   ← DISK REGISTRATION PENDING │
+│  Authority Governance:    ⭐⭐⭐⭐⭐   ← SOURCE-OF-TRUTH        ✅│
+│  Governance ROOT:         ⭐⭐⭐⭐⭐   ← CEREMONY V3 VERIFIED   ✅│
+│  Chain PoA Adapter:       ⭐⭐⭐⭐⭐   ← NO DOUBLE AUTHORITY     ✅│
+│  Network Kill-Switch:     ⭐⭐⭐⭐⭐   ← FIREWALL ENFORCED      ✅│
+│  Governance Audit:        ⭐⭐⭐⭐⭐   ← GOV.1b AUDIT           ✅│
+│  Signed GOV Backend:      ⭐⭐⭐⭐⭐   ← ML-DSA OPERATIONAL      ✅│
+│  Signed GOV Actions:      ⭐⭐⭐⭐☆   ← ACTION INTEGRATION NEXT   │
+│  Lightweight Chain:       ⭐⭐⭐⭐⭐   ← RING + HASH FOLDING     ✅│
 │                                                                 │
 │  ENGINEERING STATUS: ADVANCED SECURITY ARCHITECTURE             │
-│  CEREMONY V3 + ML-DSA-65 GOVERNANCE ROOT VERIFIED               │
+│  SESSION SECRET + TEST-STATE ISOLATION VERIFIED                 │
 │                                                                 │
 │  Security claim note:                                          │
 │  "Nation-State Grade" remains a design target until independent │
@@ -790,6 +905,8 @@
 │  ARP Defense V2: ████████████████████ COMPLETE ✅              │
 │  Ceremony V3:    ████████████████████ COMPLETE ✅              │
 │  Runtime ID:     ████████████████████ COMPLETE ✅              │
+│  Session Secret: ████████████████████ COMPLETE ✅              │
+│  Test Isolation: ████████████████████ COMPLETE ✅              │
 │  Stage Chain:    ████████████████████ 100% ✅                  │
 │  Stage Shell:    ████████████████████ UPDATED ✅               │
 │  Stage PQSIG:    ████████████████████ COMPLETE ✅              │
@@ -800,7 +917,7 @@
 │  Stage G:        ░░░░░░░░░░░░░░░░░░░░ PENDING                 │
 │  Stage F6:       ░░░░░░░░░░░░░░░░░░░░ PENDING                 │
 │                                                                 │
-│  OVERALL: HIGH PROGRESS - IDENTITY RUNTIME CLOSED              │
+│  OVERALL: HIGH PROGRESS - RUNTIME SECURITY STATE CLOSED        │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -816,6 +933,8 @@
 │  ✅ crypto test                                                │
 │  ✅ identity test                                              │
 │  ✅ identity test dsa                                         │
+│  ✅ config show                                                │
+│  ✅ config get governance.root_fingerprint                    │
 │  ✅ p2p id                                                     │
 │  ✅ p2p identity status                                       │
 │  ✅ p2p identity refresh                                      │
@@ -823,13 +942,18 @@
 │  ✅ p2p start                                                  │
 │  ✅ p2p test                                                   │
 │  ✅ gateway status                                             │
+│  ✅ gateway identity status                                   │
+│  ✅ gateway identity refresh                                  │
 │  ✅ gateway test / gw test                                    │
 │  ✅ ntest / net test                                          │
+│  ✅ security status                                            │
 │  ✅ security test                                              │
+│  ✅ security authority status                                 │
 │  ✅ chain test                                                 │
 │  ✅ zam test                                                   │
-│  ✅ security authority                                        │
 │  ✅ chain audit                                                │
+│  ✅ smoke                                                      │
+│  ✅ smoke status                                               │
 │                                                                 │
 │  Verified characteristics:                                    │
 │  ├── All current module tests have zero failures              │
@@ -837,13 +961,18 @@
 │  ├── Governance fingerprint remains stable                    │
 │  ├── Governance session unlocks at login                      │
 │  ├── Production ROOT reconstructs correctly                   │
-│  ├── P2P Node ID is non-zero before status command            │
-│  ├── P2P status no longer triggers a page fault               │
-│  ├── P2P identity refresh is deterministic                    │
-│  ├── Gateway identity refreshes after login                   │
-│  ├── Stateful test execution verified                         │
-│  ├── Gateway tests repeatable                                 │
-│  ├── Chain tests idempotent                                   │
+│  ├── P2P and Gateway identities refresh after login           │
+│  ├── P2P status page fault is fixed                           │
+│  ├── Runtime identities are cleared at logout                 │
+│  ├── Decrypted config is cleared at logout                    │
+│  ├── CONFIG.DAT is reloaded after relogin                     │
+│  ├── P2P test state is fully restored                         │
+│  ├── Network/security test state is fully restored             │
+│  ├── Production ROOT remains exactly one                      │
+│  ├── Threat log and blacklists remain clean                   │
+│  ├── Firewall remains ENFORCING after tests                   │
+│  ├── Gateway tests remain repeatable                          │
+│  ├── Chain tests remain idempotent                            │
 │  ├── ARP positive/fail-closed paths verified                  │
 │  └── Legacy signature absent from active source               │
 │                                                                 │
@@ -867,6 +996,8 @@
 │  Runtime ROOT authority:                      ✅ ACTIVE         │
 │  P2P runtime identity:                        ✅ READY          │
 │  Gateway runtime identity:                    ✅ READY          │
+│  Logout session closure:                      ✅ VERIFIED       │
+│  Relogin state reconstruction:                ✅ VERIFIED       │
 │                                                                 │
 │  Identity storage status:                                     │
 │  ├── IDENTITY.DAT V5 GOV_SIGN                                 │
@@ -906,6 +1037,13 @@
 │  ✅ P2P identity refreshes after login                        │
 │  ✅ Gateway identity refreshes after login                    │
 │  ✅ P2P listener starts on TCP port 27777                     │
+│  ✅ Gateway pre-login state reported as LOCKED                │
+│  ✅ Smoke reports healthy/securely locked pre-login           │
+│                                                                 │
+│  ⚠ Boot summary is generated before encrypted state unlock.    │
+│  ├── Ceremony may display v0 before CONFIG.DAT unlock          │
+│  ├── Config count reflects pre-login defaults                 │
+│  └── Identity count reflects locked pre-login state            │
 │                                                                 │
 │  ⚠ Current disk is not authorized in the governance ledger.    │
 │  ✅ Anti-Evil Maid VFS rejection is operating correctly.       │
@@ -914,13 +1052,13 @@
 │  ✅ P2P identity remains fail-closed                           │
 │  ✅ Gateway identity remains fail-closed                       │
 │  ✅ No fallback or ephemeral signing key                       │
+│  ✅ Encrypted config remains unavailable                       │
 │                                                                 │
 │  Operational TODO:                                             │
 │  ⬚ Authorize current disk through lifecycle command           │
-│  ⬚ Display Gateway identity and signing state                 │
-│  ⬚ Report LOCKED instead of FAILED in boot smoke              │
-│  ⬚ Test logout identity deactivation end-to-end               │
-│  ⬚ Test login → logout → login identity reconstruction        │
+│  ⬚ Improve pre-login boot summary labels                      │
+│  ⬚ Show Ceremony metadata as LOCKED before config unlock      │
+│  ⬚ Show identity presence as PRESENT/LOCKED before login      │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -962,7 +1100,8 @@
 │  Repository hardening:                                        │
 │  ⬚ Add SHA256SUMS for ACVP vectors                            │
 │  ⬚ Ignore generated disk/audio output                        │
-│  ⬚ Commit Ceremony V3 and runtime identity checkpoint         │
+│  ⬚ Commit Session Secret Closure checkpoint                  │
+│  ⬚ Commit Test-State Isolation checkpoint                    │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -970,52 +1109,46 @@
 │  NEXT STAGE TARGETS                                            │
 │  ═══════════════════════════════════════════════════════════    │
 │                                                                 │
-│  1. Runtime Identity Closure                                  │
-│     ├── display Gateway identity readiness                    │
-│     ├── display Gateway signing availability                  │
-│     ├── display Gateway ID fingerprint                        │
-│     ├── test logout runtime identity wipe                     │
-│     └── test login reconstruction                             │
+│  1. ZAM Header Serialized-Blob Hardening                      │
+│     ├── audit raw vs serialized size constants                │
+│     ├── use PUBLIC_KEY_BLOB_BYTES                             │
+│     ├── use SIGNATURE_BLOB_BYTES                              │
+│     ├── update fixed-header offsets                           │
+│     ├── preserve 8192-byte header size                        │
+│     ├── positive serialize/parse/verify round-trip            │
+│     ├── malformed public-key blob rejection                   │
+│     ├── malformed signature blob rejection                    │
+│     └── backward-compatibility validation                     │
 │                                                                 │
-│  2. Test-State Isolation                                      │
-│     ├── isolate authority registry in P2P tests               │
-│     ├── reconstruct production ROOT after tests               │
-│     ├── isolate threat-score entries in ntest                 │
-│     ├── remove synthetic blacklist entries                    │
-│     └── restore pre-test security level                       │
-│                                                                 │
-│  3. Hardware Authorization Lifecycle                          │
-│     ├── authorized disk registration command                  │
-│     ├── physical confirmation                                 │
-│     ├── drive fingerprint audit record                        │
-│     ├── persistence checkpoint                                │
-│     └── reboot mount verification                             │
-│                                                                 │
-│  4. ZAM Header Serialized-Blob Hardening                      │
-│     ├── PUBLIC_KEY_BLOB_BYTES                                 │
-│     ├── SIGNATURE_BLOB_BYTES                                  │
-│     ├── fixed-header offset update                            │
-│     ├── positive round-trip test                              │
-│     ├── malformed key/signature rejection                     │
-│     └── backward-compatible fixed-size header                 │
-│                                                                 │
-│  5. GOV.2 Signed Governance Actions                           │
+│  2. GOV.2 Signed Governance Actions                           │
 │     ├── canonical governance action envelope                  │
 │     ├── signed eviction vote                                 │
 │     ├── signed eviction commit                               │
-│     ├── signer fingerprint binding                           │
-│     ├── timestamp and nonce validation                       │
-│     ├── authorization and replay rejection                   │
-│     └── accepted-action ledger audit                         │
+│     ├── signer fingerprint/public-key binding                │
+│     ├── timestamp validity                                   │
+│     ├── nonce replay protection                              │
+│     ├── authority permission validation                      │
+│     ├── forged/unsigned action rejection                     │
+│     ├── unauthorized signed-action rejection                 │
+│     └── accepted-action governance audit                     │
 │                                                                 │
-│  6. AEAD Secret-Key Protection                               │
+│  3. Hardware Authorization Lifecycle                          │
+│     ├── authorized disk-registration command                 │
+│     ├── display serial and drive fingerprint                 │
+│     ├── physical/governance confirmation                     │
+│     ├── ledger audit record                                  │
+│     ├── persistent checkpoint                                │
+│     ├── reboot verification                                  │
+│     └── confirm VFS mount authorization                      │
+│                                                                 │
+│  4. AEAD Secret-Key Protection                               │
 │     ├── authenticated ML-DSA secret-key container             │
 │     ├── versioned persistence migration                       │
 │     ├── compatibility loader                                  │
 │     ├── rollback-safe storage                                 │
 │     └── export/import migration                               │
 │                                                                 │
-│  7. SLOR KEM Assurance & Secure Channel                       │
+│  5. SLOR KEM Assurance & Secure Channel                       │
 │     ├── deterministic assurance vectors                       │
 │     ├── negative/adversarial tests                            │
 │     ├── malformed ciphertext rejection                        │
@@ -1024,6 +1157,18 @@
 │     ├── transcript KDF                                        │
 │     ├── directional session keys                              │
 │     └── AEAD packet framing                                   │
+│                                                                 │
+│  6. Boot Status Accuracy                                      │
+│     ├── Ceremony LOCKED metadata state                        │
+│     ├── Config LOCKED pre-login state                         │
+│     ├── Identity PRESENT/LOCKED state                         │
+│     └── post-login refreshed status command                   │
+│                                                                 │
+│  7. Repository Hardening                                      │
+│     ├── ACVP SHA256SUMS                                      │
+│     ├── generated artifact ignores                           │
+│     ├── runtime disk image exclusion                         │
+│     └── remove temporary update archives/backups             │
 │                                                                 │
 │  After GOV/Crypto Closure:                                    │
 │  ⬚ GOV.3 Persistent Authority Registry                       │
@@ -1035,8 +1180,8 @@
 │  ⬚ F6.1-F6.6 GUI / Window Manager                           │
 │                                                                 │
 │  Current Focus:                                               │
-│  Gateway visibility → test isolation → disk authorization →   │
-│  ZAM hardening → signed governance actions                    │
+│  ZAM blob hardening → signed governance actions →             │
+│  hardware authorization → AEAD secret protection              │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -1058,25 +1203,32 @@
 │  P2P post-login identity refresh:         ✅ COMPLETED         │
 │  P2P zero identity display:               ✅ FIXED             │
 │  P2P status page fault:                   ✅ FIXED             │
-│  P2P runtime clear/refresh lifecycle:     ✅ COMPLETED         │
+│  P2P runtime lifecycle:                   ✅ COMPLETED         │
 │  Gateway V2 integration:                  ✅ COMPLETED         │
+│  Gateway identity visibility:             ✅ COMPLETED         │
 │  Gateway post-login identity refresh:     ✅ COMPLETED         │
-│  Gateway runtime clear/refresh lifecycle: ✅ COMPLETED         │
-│  ARP Defense V2 integration:              ✅ COMPLETED         │
-│  Chain placeholder cleanup:               ✅ COMPLETED         │
-│  Security-test isolation:                 ✅ COMPLETED         │
+│  Gateway runtime lifecycle:               ✅ COMPLETED         │
+│  Smoke LOCKED/PASS semantics:             ✅ COMPLETED         │
+│  Logout lifecycle end-to-end:             ✅ VERIFIED          │
+│  Session secret closure:                  ✅ COMPLETED         │
+│  Decrypted config logout wipe:            ✅ VERIFIED          │
+│  Encrypted config relogin reload:         ✅ VERIFIED          │
+│  System crypto transient-buffer wipe:     ✅ IMPLEMENTED       │
+│  P2P authority-test isolation:            ✅ VERIFIED          │
+│  P2P reputation/defense isolation:        ✅ VERIFIED          │
+│  Network threat-test isolation:           ✅ VERIFIED          │
+│  Firewall/blacklist restoration:          ✅ VERIFIED          │
+│  ARP/DHCP state restoration:              ✅ VERIFIED          │
+│  Governance ROOT test preservation:       ✅ VERIFIED          │
 │  Active legacy-signature removal:         ✅ COMPLETED         │
 │  Legacy quarantine deletion:              ✅ COMPLETED         │
 │                                                                 │
-│  Gateway identity visibility:             ⬚ PENDING            │
-│  Logout lifecycle end-to-end test:        ⬚ PENDING            │
-│  P2P authority-test isolation:            ⬚ PENDING            │
-│  Network threat-test isolation:           ⬚ PENDING            │
 │  Current disk authorization:              ⬚ PENDING            │
-│  ZAM serialized-blob layout:              ⬚ PENDING            │
+│  ZAM serialized-blob layout:              ⬚ NEXT TARGET        │
 │  GOV.2 action integration:                🔄 IN PROGRESS        │
 │  AEAD secret-key container:               ⬚ PENDING            │
 │  SLOR KEM protocol assurance:             ⬚ PLANNED            │
+│  Boot pre-login status accuracy:          ⬚ PENDING            │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
@@ -1146,4 +1298,3 @@ scripts\run\create-disk.bat
 ## Jalankan ulang
 
 zig build run
-

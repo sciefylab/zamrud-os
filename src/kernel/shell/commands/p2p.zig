@@ -29,6 +29,13 @@ const crypto = @import("../../crypto/crypto.zig");
 var static_p3_handshake: protocol.HandshakePayload = undefined;
 var static_p3_tampered: protocol.HandshakePayload = undefined;
 
+const authority = @import("../../security/authority.zig");
+const threat_score = @import("../../security/threat_score.zig");
+const blacklist = @import("../../security/blacklist.zig");
+const threat_log = @import("../../security/threat_log.zig");
+const security = @import("../../security/security.zig");
+const firewall = @import("../../net/firewall.zig");
+
 // =============================================================================
 // Main Entry Point
 // =============================================================================
@@ -1580,6 +1587,33 @@ fn runQuickTest() void {
 }
 
 fn runAllTests() void {
+    const authority_owner = authority.beginTestIsolation();
+    const reputation_owner = reputation.beginTestIsolation();
+    const sybil_owner = sybil.beginTestIsolation();
+    const eclipse_owner = eclipse.beginTestIsolation();
+    const eviction_owner = eviction.beginTestIsolation();
+    const peer_owner = peer.beginTestIsolation();
+    const discovery_owner = discovery.beginTestIsolation();
+    const firewall_owner = firewall.beginTestIsolation();
+    const score_owner = threat_score.beginTestIsolation();
+    const blacklist_owner = blacklist.beginTestIsolation();
+    const log_owner = threat_log.beginTestIsolation();
+    const security_owner = security.beginTestIsolation();
+    defer {
+        security.endTestIsolation(security_owner);
+        threat_log.endTestIsolation(log_owner);
+        blacklist.endTestIsolation(blacklist_owner);
+        threat_score.endTestIsolation(score_owner);
+        firewall.endTestIsolation(firewall_owner);
+        discovery.endTestIsolation(discovery_owner);
+        peer.endTestIsolation(peer_owner);
+        eviction.endTestIsolation(eviction_owner);
+        eclipse.endTestIsolation(eclipse_owner);
+        sybil.endTestIsolation(sybil_owner);
+        reputation.endTestIsolation(reputation_owner);
+        authority.endTestIsolation(authority_owner);
+        shell.printSuccessLine("P2P production runtime state restored");
+    }
     shell.printInfoLine("P2P Full Test Suite");
     shell.newLine();
 

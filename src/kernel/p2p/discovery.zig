@@ -50,6 +50,38 @@ var discovered_count: usize = 0;
 var bootstrap_peers: [8]BootstrapPeer = undefined;
 var bootstrap_count: usize = 0;
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_initialized: @TypeOf(initialized) = undefined;
+var test_backup_running: @TypeOf(running) = undefined;
+var test_backup_discovered: @TypeOf(discovered) = undefined;
+var test_backup_discovered_count: @TypeOf(discovered_count) = undefined;
+var test_backup_bootstrap_peers: @TypeOf(bootstrap_peers) = undefined;
+var test_backup_bootstrap_count: @TypeOf(bootstrap_count) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_initialized = initialized;
+    test_backup_running = running;
+    test_backup_discovered = discovered;
+    test_backup_discovered_count = discovered_count;
+    test_backup_bootstrap_peers = bootstrap_peers;
+    test_backup_bootstrap_count = bootstrap_count;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    initialized = test_backup_initialized;
+    running = test_backup_running;
+    discovered = test_backup_discovered;
+    discovered_count = test_backup_discovered_count;
+    bootstrap_peers = test_backup_bootstrap_peers;
+    bootstrap_count = test_backup_bootstrap_count;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

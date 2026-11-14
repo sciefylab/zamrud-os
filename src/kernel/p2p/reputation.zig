@@ -129,6 +129,29 @@ var pow_input: [40]u8 = [_]u8{0} ** 40;
 var pow_hash: [32]u8 = [_]u8{0} ** 32;
 const leading_masks = [8]u8{ 0x00, 0x80, 0xC0, 0xE0, 0xF0, 0xF8, 0xFC, 0xFE };
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_reputations: @TypeOf(reputations) = undefined;
+var test_backup_rep_count: @TypeOf(rep_count) = undefined;
+var test_backup_initialized: @TypeOf(initialized) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_reputations = reputations;
+    test_backup_rep_count = rep_count;
+    test_backup_initialized = initialized;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    reputations = test_backup_reputations;
+    rep_count = test_backup_rep_count;
+    initialized = test_backup_initialized;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================

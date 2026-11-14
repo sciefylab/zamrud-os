@@ -52,6 +52,35 @@ var threat_id_counter: u64 = 0;
 var total_threats: u64 = 0;
 var last_threat_time: u64 = 0;
 
+// Test-state transaction storage. Static backups avoid large kernel-stack copies.
+var test_isolation_active: bool = false;
+var test_backup_threats: @TypeOf(threats) = undefined;
+var test_backup_threat_count: @TypeOf(threat_count) = undefined;
+var test_backup_threat_id_counter: @TypeOf(threat_id_counter) = undefined;
+var test_backup_total_threats: @TypeOf(total_threats) = undefined;
+var test_backup_last_threat_time: @TypeOf(last_threat_time) = undefined;
+
+pub fn beginTestIsolation() bool {
+    if (test_isolation_active) return false;
+    test_backup_threats = threats;
+    test_backup_threat_count = threat_count;
+    test_backup_threat_id_counter = threat_id_counter;
+    test_backup_total_threats = total_threats;
+    test_backup_last_threat_time = last_threat_time;
+    test_isolation_active = true;
+    return true;
+}
+
+pub fn endTestIsolation(owner: bool) void {
+    if (!owner or !test_isolation_active) return;
+    threats = test_backup_threats;
+    threat_count = test_backup_threat_count;
+    threat_id_counter = test_backup_threat_id_counter;
+    total_threats = test_backup_total_threats;
+    last_threat_time = test_backup_last_threat_time;
+    test_isolation_active = false;
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================
